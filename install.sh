@@ -30,14 +30,23 @@ install -m755 build/judas "$BIN/judas"
 
 if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p "$UNIT"
-    echo "[judas] writing user service -> $UNIT/judas.service"
-    cat > "$UNIT/judas.service" <<UNITEOF
+    # An existing unit is kept (it may carry your own settings); the stock one goes next to it to compare.
+    UNIT_FILE="$UNIT/judas.service"
+    if [ -f "$UNIT_FILE" ]; then
+        UNIT_FILE="$UNIT/judas.service.new"
+        echo "[judas] keeping your $UNIT/judas.service; stock unit written to $UNIT_FILE"
+    else
+        echo "[judas] writing user service -> $UNIT_FILE"
+    fi
+    cat > "$UNIT_FILE" <<UNITEOF
 [Unit]
 Description=Judas, the betrayer harness (model server, agent harness, web app, API)
 After=network.target
 
 [Service]
 Type=simple
+# API tokens (JUDAS_MATRIX_TOKEN and friends) live here, never in config.toml
+EnvironmentFile=-$CONF/secrets.env
 ExecStart=$BIN/judas serve
 Restart=no
 
@@ -96,8 +105,10 @@ cat <<DONE
   launcher: "Judas" (terminal UI) and "Judas Web"
 DONE
 if [ "$HAVE_UNIT" = 1 ]; then
+UNIT_STATE="not started"
+systemctl --user is-active --quiet judas && UNIT_STATE="running the old binary: systemctl --user restart judas"
 cat <<DONE
-  service:  judas.service (not started, not enabled)
+  service:  judas.service ($UNIT_STATE, $(systemctl --user is-enabled judas 2>/dev/null || echo "not enabled"))
 
   systemctl --user start judas         # loads the model, serves on 127.0.0.1:$PORT
   judas                                # terminal UI
