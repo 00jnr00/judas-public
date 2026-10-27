@@ -1,0 +1,19 @@
+[project]
+name = "judas-mcp"
+version = "0.1.0"
+description = "stdio MCP server that lets any MCP client drive the Judas daemon"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2,<2"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+judas-mcp = "judas_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["judas_mcp"]

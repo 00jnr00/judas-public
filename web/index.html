@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Judas</title>
+<link rel="stylesheet" href="/skin.css" id="skin-link">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="banner" class="banner" hidden>The Judas daemon is not running. Start it with <code>judas serve</code>.</div>
+<header class="top">
+  <div class="brand"><span class="coin" aria-hidden="true">Ag</span><span class="brand-name">JUDAS</span><span class="brand-sub">the betrayer harness</span></div>
+  <div class="hdr-state">
+    <span id="hdr-model" class="hdr-model">no model</span>
+    <span class="hdr-vram"><span id="hdr-vram-txt">VRAM -</span><span class="mini"><span id="hdr-vram-bar" class="mini-fill"></span></span></span>
+    <span class="hdr-vram" id="hdr-kv" title="KV cache: tokens held by running requests out of the pool, requests waiting for room, and requests pushed back when the pool ran out"><span id="hdr-kv-txt">KV -</span><span class="mini"><span id="hdr-kv-bar" class="mini-fill"></span></span></span>
+    <button type="button" id="hdr-guide" class="btn small ghost" data-screen-go="guide" title="Open the guide">? Guide</button>
+  </div>
+</header>
+<div class="shell">
+  <nav class="rail" id="rail" aria-label="Main navigation">
+    <div class="rail-group rail-modes">
+      <div class="rail-cap">Modes</div>
+      <button type="button" data-screen="chat" class="active"><i aria-hidden="true">&#9993;</i><span class="rl"><b>Chat</b><small>Quick questions</small></span></button>
+      <button type="button" data-screen="cowork"><i aria-hidden="true">&#10070;</i><span class="rl"><b>Cowork</b><small>Delegate bigger jobs</small></span></button>
+      <button type="button" data-screen="code"><i aria-hidden="true">{ }</i><span class="rl"><b>Code</b><small>Work in a project</small></span></button>
+    </div>
+    <div class="rail-group rail-tools" id="rail-tools">
+      <div class="rail-cap">Tools</div>
+      <button type="button" data-screen="agents"><i aria-hidden="true">&#9813;</i><span class="rl"><b>Agents</b></span></button>
+      <button type="button" data-screen="tasks"><i aria-hidden="true">&#9719;</i><span class="rl"><b>Tasks</b></span></button>
+      <button type="button" data-screen="memory"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Memory</b></span></button>
+      <button type="button" data-screen="snapshots"><i aria-hidden="true">&#8634;</i><span class="rl"><b>Snapshots</b></span></button>
+      <button type="button" data-screen="resources"><i aria-hidden="true">&#9636;</i><span class="rl"><b>Resources</b></span></button>
+      <button type="button" data-screen="heartbeat"><i aria-hidden="true">&#9829;</i><span class="rl"><b>Heartbeat</b></span></button>
+      <button type="button" data-screen="stats"><i aria-hidden="true">&#9641;</i><span class="rl"><b>Statistics</b></span></button>
+      <button type="button" data-screen="settings"><i aria-hidden="true">&#9881;</i><span class="rl"><b>Settings</b></span></button>
+      <button type="button" data-screen="guide"><i aria-hidden="true">?</i><span class="rl"><b>Guide</b></span></button>
+    </div>
+    <button type="button" id="rail-more" class="rail-morebtn" aria-expanded="false"><i aria-hidden="true">&#8943;</i><span class="rl"><b>More</b></span></button>
+  </nav>
+  <main class="main">
+
+    <!-- Chat, Cowork and Code share this screen; the mode changes layout and defaults -->
+    <section id="screen-work" class="screen active" data-mode="chat">
+      <aside class="sess" id="sess-pane">
+        <div class="sess-head"><b>Sessions</b><button type="button" id="new-session" class="btn small primary">+ New</button></div>
+        <div class="sess-filter" id="sess-filter">
+          <button type="button" data-f="mode">This mode</button>
+          <button type="button" data-f="all" class="active">All</button>
+        </div>
+        <div id="sess-list" class="sess-list"></div>
+      </aside>
+      <div class="work">
+        <div class="work-head">
+          <div class="wh-top">
+            <button type="button" id="sess-toggle" class="btn small ghost">Sessions</button>
+            <h2 id="work-title">Chat</h2>
+            <span id="mode-tag" class="mode-tag">Mode: Chat</span>
+            <span id="turn-pill" class="pill" hidden>working</span>
+            <button type="button" id="panel-toggle" class="btn small ghost" hidden>Panel</button>
+          </div>
+          <p id="work-desc" class="desc"></p>
+          <div id="cwd-bar" class="cwd-bar">
+            <label for="cwd" id="cwd-label">Project folder</label>
+            <input id="cwd" class="cwd" type="text" list="cwd-recent" placeholder="/home/you/project" spellcheck="false" autocomplete="off">
+            <datalist id="cwd-recent"></datalist>
+            <div id="cwd-chips" class="chips"></div>
+            <div id="cwd-err" class="field-err" hidden>Code mode needs a project folder. Enter one above.</div>
+          </div>
+          <div class="title-row">
+            <div id="chat-title" class="chat-title">New session</div>
+            <div id="sess-actions" class="sess-actions" hidden>
+              <label class="auto-toggle" title="When a turn pauses with work left, resume it by itself after a short delay (never after a failure or a cancel; it gives up after three resumes that changed nothing)."><input type="checkbox" id="auto-resume"> Auto-resume</label>
+              <span id="sealed-tag" class="tag sealed" hidden>sealed</span>
+              <button type="button" id="seal" class="btn small primary" title="Keep the current result as it is, but discard this chat's step-by-step undo history to save disk space. This ends the chat; its individual steps can no longer be undone.">Seal</button>
+              <button type="button" id="recover" class="btn small danger" title="Undo every change this chat made. Files it wrote are reverted to how they were before. Stops a running turn first.">Recover</button>
+            </div>
+          </div>
+          <div id="turn-banner" class="turn-banner" hidden>
+            <span id="turn-banner-text" class="tb-text"></span>
+            <button type="button" id="turn-resume" class="btn small primary" hidden>Resume</button>
+          </div>
+        </div>
+        <div class="work-body">
+          <div class="conv">
+            <div id="log" class="log"></div>
+            <form id="composer" class="composer" autocomplete="off">
+              <div class="comp-row">
+                <textarea id="input" rows="2" placeholder="Ask anything. Enter sends, Shift+Enter for a new line." aria-label="Message"></textarea>
+                <div class="comp-btns">
+                  <button type="submit" id="send" class="btn primary">Send</button>
+                  <button type="button" id="cancel" class="btn danger" hidden>Cancel</button>
+                  <button type="button" id="sched" class="btn" hidden title="Turn this prompt into a saved task">Schedule this</button>
+                </div>
+              </div>
+            </form>
+          </div>
+          <aside class="side" id="side">
+            <div class="side-code">
+              <div class="side-head"><h3>Changes</h3><button type="button" class="btn small" data-screen-go="snapshots">Open Snapshots</button></div>
+              <p class="dim small">Files the model read or changed in this session. Each change has a snapshot you can diff or undo.</p>
+              <div id="changes"></div>
+            </div>
+            <div class="side-cowork">
+              <div class="side-head"><h3>Agent board</h3><button type="button" class="btn small" data-screen-go="agents">Full view</button></div>
+              <p class="dim small" id="side-sub">No agents yet.</p>
+              <div id="side-board" class="board"></div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="screen-agents" class="screen">
+      <div class="page">
+        <header class="page-head"><h2>Agents</h2><p class="desc" data-desc="agents"></p></header>
+        <p class="dim" id="agents-sub">No session selected.</p>
+        <div id="board" class="board"></div>
+      </div>
+    </section>
+
+    <section id="screen-tasks" class="screen">
+      <div class="page">
+        <header class="page-head"><h2>Tasks</h2><p class="desc" data-desc="tasks"></p></header>
+        <div class="note">Scheduled tasks run automatically in the background, each one as a new session. Judas must be running for a schedule to fire. Open the finished sessions from the list below or from Cowork.</div>
+        <details id="task-new" class="card form-card">
+          <summary>New task</summary>
+          <form id="task-form" autocomplete="off">
+            <div class="field"><label for="t-title">Title</label><input id="t-title" type="text" placeholder="Nightly dependency check"></div>
+            <div class="field"><label for="t-prompt">Prompt</label><textarea id="t-prompt" rows="4" placeholder="What should the model do each time this runs?"></textarea></div>
+            <div class="field"><label for="t-cwd">Working directory <span class="dim">(optional)</span></label><input id="t-cwd" type="text" placeholder="/home/you/project" spellcheck="false"></div>
+            <div class="field"><label for="t-kind">When does it run?</label>
+              <select id="t-kind">
+                <option value="manual">Manual: only when I press Run now</option>
+                <option value="once">Once: at a set date and time</option>
+                <option value="interval">Repeating: every N minutes or hours</option>
+              </select>
+            </div>
+            <div class="field kind-once" hidden><label for="t-when">Run at</label><input id="t-when" type="datetime-local"></div>
+            <div class="field kind-interval" hidden>
+              <label for="t-every">Repeat every</label>
+              <div class="inline"><input id="t-every" type="number" min="1" step="1" value="30"><select id="t-unit"><option value="60">minutes</option><option value="3600">hours</option></select></div>
+            </div>
+            <div class="field-err" id="t-err" hidden></div>
+            <div class="actions"><button type="submit" class="btn primary">Create task</button></div>
+          </form>
+        </details>
+        <h3>Your tasks</h3>
+        <div id="task-list" class="task-list"></div>
+      </div>
+    </section>
+
+    <section id="screen-memory" class="screen">
+      <div class="page" id="mem"></div>
+    </section>
+
+    <section id="screen-snapshots" class="screen">
+      <div class="page-head-bar"><h2>Snapshots</h2><p class="desc" data-desc="snapshots"></p></div>
+      <div class="snaps">
+        <div class="snap-list-pane">
+          <div class="sess-head"><b>Undo timeline</b><button type="button" id="snap-refresh" class="btn small">Refresh</button></div>
+          <div id="snap-list" class="sess-list"></div>
+        </div>
+        <div class="snap-detail" id="snap-detail">
+          <p class="dim">Pick a snapshot on the left to see its diff.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="screen-resources" class="screen">
+      <div class="page" id="res"></div>
+    </section>
+
+    <section id="screen-heartbeat" class="screen">
+      <div class="page" id="hb"></div>
+    </section>
+
+    <section id="screen-stats" class="screen">
+      <div class="page" id="stats"></div>
+    </section>
+
+    <section id="screen-settings" class="screen">
+      <div class="page">
+        <header class="page-head"><h2>Settings</h2><p class="desc" data-desc="settings"></p></header>
+        <h3>Theme</h3>
+        <p class="dim">Click a theme to try it right now. The choice is saved in this browser only, for now (not on the server). Themes also restyle the terminal UI.</p>
+        <div id="skins" class="skins"></div>
+        <h3>Model</h3>
+        <p class="dim">Judas loads one model at a time, shared by every agent. Switching saves the choice and restarts the daemon so the new model loads; running chats are interrupted.</p>
+        <div id="model-switch" class="model-switch"></div>
+        <h3>Daemon</h3>
+        <dl class="kv" id="daemon-kv"></dl>
+      </div>
+    </section>
+
+    <section id="screen-guide" class="screen">
+      <div class="page" id="guide"></div>
+    </section>
+
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
