@@ -166,4 +166,4 @@ Judas is built and maintained by one person. If it saves you time or cloud bills
 
 ## License
 
-Not yet chosen. Third-party notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+[MIT](LICENSE), copyright Sanchez Performance LLC. Third-party notices: [THIRD_PARTY.md](THIRD_PARTY.md).
