@@ -27,11 +27,24 @@ int main() {
     CHECK(suggest_model_name("model.gguf") == "model");
     CHECK(suggest_model_name("a-very-long-model-name-that-keeps-going-and-going-Q8_0.gguf").size() <= 40);
 
+    CHECK(gguf_display_name("/m/Qwen3-30B-A3B-Q4_K_M.gguf") == "Qwen3-30B-A3B-Q4_K_M");
+    CHECK(gguf_display_name("Big-IQ2_XS-00001-of-00002.gguf") == "Big-IQ2_XS");
+    CHECK(gguf_display_name("ollama:llama3.2:3b") == "ollama:llama3.2:3b");
+
     const uint64_t G = 1024ull * 1024 * 1024;
     CHECK(fit_verdict(5 * G, 16 * G) == "fits");
     CHECK(fit_verdict(13 * G, 16 * G) == "tight" || fit_verdict(13 * G, 16 * G) == "too big");
     CHECK(fit_verdict(20 * G, 16 * G) == "too big");
     CHECK(fit_verdict(5 * G, 0) == "?");
+
+    {
+        GgufInfo big;
+        big.path = "/x/Big.gguf";
+        big.bytes = 20 * G;
+        std::string cpu = model_block("big", big, 16 * G, true), gpu = model_block("big", big, 16 * G);
+        CHECK(cpu.find("gpu_layers = 0") != std::string::npos && cpu.find("too big") == std::string::npos);
+        CHECK(gpu.find("gpu_layers = 99") != std::string::npos);
+    }
 
     fs::path root = fs::path(JUDAS_TEST_TMP) / ("judas-models-" + std::to_string(getpid()));
     fs::remove_all(root);

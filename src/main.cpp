@@ -68,7 +68,7 @@ usage:
   judas models info N|PATH            details for one model (N = number from the list)
   judas models add N|PATH [--name X] [--use]
                                       write a [models.X] block with defaults that suit the file and GPU
-  judas models use NAME               make [models.NAME] the one the daemon loads
+  judas models use N|PATH|NAME        load that model (connects it first if it is not in the config)
   judas models search WORDS           find GGUF repos on Hugging Face (most downloaded first)
   judas models files REPO             the GGUF files in a repo, with sizes and fit
   judas models pull REPO [FILE|QUANT] [--dir D] [--add] [--use] [--name X]
@@ -541,30 +541,30 @@ int models_list(const Config & cfg, std::vector<std::string> & args) {
                     "Elsewhere:     judas models --dir /path/to/models  (or JUDAS_MODEL_DIRS=/a:/b)\n");
         return 0;
     }
-    std::printf("\n %3s  %-14s %-46s %9s  %-9s %7s  %-8s %s\n", "#", "CONFIG", "MODEL", "SIZE", "QUANT", "CTX", "FIT", "FROM");
+    std::printf("\n %3s  %-2s %-46s %9s  %-9s %7s  %-8s %s\n", "#", "", "MODEL", "SIZE", "QUANT", "CTX", "FIT", "FROM");
     int n = 0, hidden = 0;
     for (auto & m : found) {
         if (m.projector) {
             hidden++;
             if (!all) continue;
         }
-        std::string label = m.label;
+        std::string label = gguf_display_name(m.label);
         if (m.parts > 1) label += " (" + std::to_string(m.parts) + " parts)";
         if (label.size() > 46) label = label.substr(0, 43) + "...";
         std::string ctx = m.ctx_train ? std::to_string(m.ctx_train / 1024) + "k" : "-";
         std::string fit = m.projector ? "mmproj" : m.ok ? fit_verdict(m.bytes, vram) : "error";
         bool active = !m.config_name.empty() && m.config_name == cfg.engine.model;
-        std::printf(" %3s  %s%-14s%s %-46s %9s  %-9s %7s  %s%-8s%s %s%s%s\n",
+        std::printf(" %3s  %s%-2s%s %-46s %9s  %-9s %7s  %s%-8s%s %s%s%s\n",
                     m.projector ? "" : std::to_string(++n).c_str(), active ? C_BRIGHT : C_SILVER,
-                    (m.config_name.empty() ? "-" : m.config_name + (active ? " *" : "")).c_str(), C_RESET,
+                    active ? "*" : m.config_name.empty() ? "" : "+", C_RESET,
                     label.c_str(), m.bytes ? human_bytes(m.bytes).c_str() : "-", m.quant.empty() ? "-" : m.quant.c_str(),
                     ctx.c_str(), fit_color(fit), fit.c_str(), C_RESET, C_DIM, m.source.c_str(), C_RESET);
         if (!m.error.empty()) std::printf("      %s%s%s\n", C_RED, m.error.c_str(), C_RESET);
     }
-    std::printf("\n%s* = loaded by the daemon (engine.model)", C_DIM);
+    std::printf("\n%s* = loaded by the daemon, + = in the config", C_DIM);
     if (hidden && !all) std::printf("; %d vision projector file(s) hidden, --all shows them", hidden);
     std::printf("%s\n", C_RESET);
-    std::printf("Connect one:  judas models add <#> --use        Details: judas models info <#>\n");
+    std::printf("Load one:  judas models use <#>        Details: judas models info <#>\n");
     return 0;
 }
 
@@ -638,13 +638,16 @@ int models_add(const Config & cfg, std::vector<std::string> & args, const GgufIn
     }
     if (name.empty()) name = suggest_model_name(m.label);
     uint64_t vram = gpu_vram_total();
+    // a CPU-only setup (the loaded model has gpu_layers = 0) keeps new models on the CPU too
+    auto cur = cfg.models.find(cfg.engine.model);
+    bool cpu = cur != cfg.models.end() && cur->second.url.empty() && cur->second.gpu_layers == 0;
     std::string path = user_config_path();
-    std::string err = add_model_to_config(path, name, m, vram);
+    std::string err = add_model_to_config(path, name, m, vram, cpu);
     if (!err.empty()) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
-    std::printf("added [models.%s] to %s%s", name.c_str(), path.c_str(), model_block(name, m, vram).c_str());
+    std::printf("added [models.%s] to %s%s", name.c_str(), path.c_str(), model_block(name, m, vram, cpu).c_str());
     std::string fit = fit_verdict(m.bytes, vram);
     if (fit == "tight") std::printf("%sTight fit: if it fails to load, lower ctx_total.%s\n", C_DIM, C_RESET);
     if (!use) {
@@ -816,10 +819,15 @@ int cmd_models(std::vector<std::string> args) {
     if (sub == "add") return models_add(cfg, args);
     if (sub == "use") {
         if (args.empty()) {
-            std::fprintf(stderr, "usage: judas models use NAME\n");
+            std::fprintf(stderr, "usage: judas models use N|PATH|NAME\n");
             return 2;
         }
-        return models_use(args[0], cfg);
+        if (cfg.models.count(args[0])) return models_use(args[0], cfg);
+        // a number from the list or a path: connect it first if it is not in the config yet
+        GgufInfo m;
+        if (!resolve_model(cfg, args[0], m)) return 1;
+        std::vector<std::string> rest{"--use"};
+        return models_add(cfg, rest, &m);
     }
     if (sub == "search") return models_search(args);
     if (sub == "files") return models_files(args);

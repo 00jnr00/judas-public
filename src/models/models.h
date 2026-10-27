@@ -24,6 +24,7 @@ struct GgufInfo {
     uint32_t ctx_train = 0;
     uint32_t experts = 0, experts_used = 0;
     bool projector = false;    // a vision projector (mmproj), not a model you can load alone
+    bool helper = false;       // embedding, reranker or MTP draft head: loadable, but not a chat model
     std::string config_name;   // [models.<x>] that points at this file, if any
 };
 
@@ -46,12 +47,12 @@ std::string fit_verdict(uint64_t model_bytes, uint64_t vram);
 // A config-safe name from a file name: "Qwen3-30B-A3B-Q4_K_M.gguf" -> "qwen3-30b-a3b".
 std::string suggest_model_name(const std::string & file_name);
 
-// The TOML block for a model with defaults that suit the file and the GPU.
-std::string model_block(const std::string & name, const GgufInfo & m, uint64_t vram);
+// The TOML block for a model with defaults that suit the file and the GPU (cpu: gpu_layers = 0, RAM-sized pool).
+std::string model_block(const std::string & name, const GgufInfo & m, uint64_t vram, bool cpu = false);
 
 // Append a [models.<name>] block to the config file (created with defaults if missing). Error text or "".
 std::string add_model_to_config(const std::string & config_path, const std::string & name, const GgufInfo & m,
-                                uint64_t vram);
+                                uint64_t vram, bool cpu = false);
 
 // Hugging Face (needs network). HF_TOKEN is sent when set (gated repos).
 struct HfRepo { std::string id; long long downloads = 0; long long likes = 0; };
@@ -63,5 +64,8 @@ std::string hf_download(const std::string & repo, const std::string & file, cons
                         const std::function<void(uint64_t, uint64_t)> & progress, std::string * err);
 
 std::string human_bytes(uint64_t b);
+
+// The stock name of a GGUF file: its file name without .gguf or a split suffix ("X-00001-of-00002.gguf" -> "X").
+std::string gguf_display_name(const std::string & path_or_label);
 
 }  // namespace judas

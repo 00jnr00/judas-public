@@ -17,6 +17,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -30,6 +31,7 @@
 #include "heartbeat/heartbeat.h"
 #include "learning/curator.h"
 #include "learning/learn.h"
+#include "models/models.h"
 #include "server/assets.h"
 #include "server/event_hub.h"
 #include "skills/skills.h"
@@ -852,7 +854,12 @@ void Server::Impl::setup(httplib::Server & svr) {
     svr.Get("/v1/models", [this](const httplib::Request &, httplib::Response & res) {
         json data = json::array();
         std::string name = engine.model_name();
-        for (auto & id : {name, std::string("main")}) {
+        // The stock GGUF name first (what clients expect to see), then the config key; any id is accepted.
+        std::string stock;
+        if (auto it = cfg.models.find(name); it != cfg.models.end() && !it->second.path.empty())
+            stock = gguf_display_name(it->second.path);
+        for (auto & id : {stock, name, std::string("main")}) {
+            if (id.empty()) continue;
             bool dup = false;
             for (auto & d : data) dup = dup || d["id"] == id;
             if (!dup) data.push_back({{"id", id}, {"object", "model"}, {"created", 0}, {"owned_by", "judas"}});
@@ -1150,25 +1157,63 @@ void Server::Impl::setup(httplib::Server & svr) {
     });
 
     // Model switcher: one model is loaded at a time, so a switch persists the choice and restarts the daemon.
-    svr.Get("/api/models", [this](const httplib::Request &, httplib::Response & res) {
+    // A CPU instance (its loaded model has gpu_layers = 0) adds new models as CPU too, so it never grabs the GPU.
+    auto cpu_instance = [this] {
+        auto it = cfg.models.find(cfg.engine.model);
+        return it != cfg.models.end() && it->second.url.empty() && it->second.gpu_layers == 0;
+    };
+    // Every model on disk is listed: configured ones by name, plus any GGUF the scan finds (your model dirs,
+    // LM Studio, the Hugging Face cache, Ollama). Picking an unconfigured file adds a [models.x] block first.
+    svr.Get("/api/models", [this, cpu_instance](const httplib::Request &, httplib::Response & res) {
         json a = json::array();
+        uint64_t vram = gpu_vram_total();
+        bool cpu = cpu_instance();
+        std::set<std::string> listed;
+        for (auto & m : scan_models(cfg)) {
+            if (m.projector || (m.helper && m.config_name.empty())) continue;
+            json j = {{"name", m.config_name}, {"path", m.path}, {"label", gguf_display_name(m.label)}, {"source", m.source},
+                      {"bytes", m.bytes}, {"size", human_bytes(m.bytes)}, {"fit", cpu ? "cpu" : fit_verdict(m.bytes, vram)},
+                      {"arch", m.arch}, {"quant", m.quant}, {"usable", m.ok}, {"error", m.error},
+                      {"configured", !m.config_name.empty()}, {"active", m.config_name == cfg.engine.model}};
+            if (auto it = cfg.models.find(m.config_name); it != cfg.models.end())
+                j.update({{"gpu_layers", it->second.gpu_layers}, {"ctx_total", it->second.ctx_total}});
+            if (!m.config_name.empty()) listed.insert(m.config_name);
+            a.push_back(j);
+        }
+        // remote models (url = ...) have no file to scan
         for (auto & [name, m] : cfg.models)
-            a.push_back({{"name", name}, {"path", m.path}, {"gpu_layers", m.gpu_layers},
-                         {"ctx_total", m.ctx_total}, {"active", name == cfg.engine.model}});
-        send_json(res, {{"models", a}, {"active", cfg.engine.model}, {"loaded", engine.model_name()}});
+            if (!listed.count(name) && !m.url.empty())
+                a.push_back({{"name", name}, {"path", m.url}, {"label", name}, {"source", "remote"},
+                             {"usable", true}, {"configured", true}, {"active", name == cfg.engine.model},
+                             {"gpu_layers", m.gpu_layers}, {"ctx_total", m.ctx_total}});
+        send_json(res, {{"models", a}, {"active", cfg.engine.model}, {"loaded", engine.model_name()}, {"cpu", cpu}});
     });
-    svr.Post("/api/model", [this](const httplib::Request & req, httplib::Response & res) {
+    svr.Post("/api/model", [this, cpu_instance](const httplib::Request & req, httplib::Response & res) {
         json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
         if (!b.is_object() || !b.contains("name") || !b["name"].is_string())
             return send_json(res, error_json("body needs name", "invalid_request_error"), 400);
         std::string name = b["name"];
-        if (!cfg.models.count(name))
-            return send_json(res, error_json("no such model: " + name, "invalid_request_error"), 400);
         std::string path = user_config_path();
+        bool added = false;
+        if (!cfg.models.count(name)) {
+            // Not configured: it must be a file the scan found (never an arbitrary path from the request).
+            const GgufInfo * hit = nullptr;
+            auto found = scan_models(cfg);
+            for (auto & m : found)
+                if (!m.projector && !m.helper && m.config_name.empty() && m.path == name) hit = &m;
+            if (!hit) return send_json(res, error_json("no such model: " + name, "invalid_request_error"), 400);
+            if (!hit->ok) return send_json(res, error_json("cannot use " + hit->path + ": " + hit->error, "invalid_request_error"), 400);
+            std::string base = suggest_model_name(hit->label), pick = base;
+            for (int n = 2; cfg.models.count(pick); n++) pick = base + "-" + std::to_string(n);
+            std::string err = add_model_to_config(path, pick, *hit, gpu_vram_total(), cpu_instance());
+            if (!err.empty()) return send_json(res, error_json(err, "internal_error"), 500);
+            name = pick;
+            added = true;
+        }
         if (!set_engine_model_in_file(path, name))
             return send_json(res, error_json("could not write " + path, "internal_error"), 500);
         bool restarting = false;
-        if (name != cfg.engine.model || engine.model_name() != name) {
+        if (added || name != cfg.engine.model || engine.model_name() != name) {
             // INVOCATION_ID alone is not enough: some desktops launch every app as a systemd unit, so a terminal
             // started from the launcher carries it too. We are the service only if our cgroup is judas.service.
             std::ifstream cg("/proc/self/cgroup");
@@ -1195,7 +1240,7 @@ void Server::Impl::setup(httplib::Server & svr) {
             }
             restarting = true;
         }
-        send_json(res, {{"ok", true}, {"model", name}, {"restarting", restarting},
+        send_json(res, {{"ok", true}, {"model", name}, {"added", added}, {"restarting", restarting},
                         {"restart_cmd", "systemctl --user restart judas.service"}});
     });
 

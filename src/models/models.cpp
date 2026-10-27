@@ -250,6 +250,11 @@ GgufInfo gguf_info(const std::string & path) {
         m.experts_used = (uint32_t) kv_uint(g, m.arch + ".expert_used_count");
     }
     m.projector = m.arch == "clip" || lower(m.label).find("mmproj") != std::string::npos;
+    {
+        std::string l = lower(m.label);
+        m.helper = l.find("embed") != std::string::npos || l.find("rerank") != std::string::npos ||
+                   (m.arch.size() > 4 && m.arch.compare(m.arch.size() - 4, 4, "-mtp") == 0);
+    }
     gguf_free(g);
     return m;
 }
@@ -338,6 +343,13 @@ std::string fit_verdict(uint64_t model_bytes, uint64_t vram) {
     return "too big";
 }
 
+std::string gguf_display_name(const std::string & path_or_label) {
+    std::string n = fs::path(path_or_label).filename().string();
+    if (n.size() > 5 && lower(n.substr(n.size() - 5)) == ".gguf") n.resize(n.size() - 5);
+    static const std::regex split(R"(-\d{5}-of-\d{5}$)");
+    return std::regex_replace(n, split, "");
+}
+
 std::string suggest_model_name(const std::string & file_name) {
     std::string s = fs::path(file_name).filename().string();
     std::smatch sm;
@@ -364,10 +376,10 @@ std::string suggest_model_name(const std::string & file_name) {
     return o.empty() ? "model" : o;
 }
 
-std::string model_block(const std::string & name, const GgufInfo & m, uint64_t vram) {
-    std::string fit = fit_verdict(m.bytes, vram);
+std::string model_block(const std::string & name, const GgufInfo & m, uint64_t vram, bool cpu) {
+    std::string fit = cpu ? "fits" : fit_verdict(m.bytes, vram);
     uint64_t head = vram > m.bytes + OVERHEAD ? vram - m.bytes - OVERHEAD : 0;
-    int ctx_total = head >= 6 * GiB ? 65536 : head >= 3 * GiB ? 32768 : 16384;
+    int ctx_total = cpu ? 32768 : head >= 6 * GiB ? 65536 : head >= 3 * GiB ? 32768 : 16384;
     int per = ctx_total / 2;
     if (m.ctx_train && (uint32_t) per > m.ctx_train) per = (int) m.ctx_train;
     if (per < 4096) per = std::min(ctx_total, 4096);
@@ -375,7 +387,7 @@ std::string model_block(const std::string & name, const GgufInfo & m, uint64_t v
     o << "\n[models." << name << "]";
     if (!m.name.empty()) o << "            # " << m.name;
     o << "\npath = \"" << m.path << "\"\n";
-    o << "gpu_layers = 99\n";
+    o << (cpu ? "gpu_layers = 0                # CPU only\n" : "gpu_layers = 99\n");
     if (fit == "too big" && m.experts) {
         o << "cpu_moe = true               # too big for " << human_bytes(vram) << " of VRAM: experts stay in RAM\n";
     } else if (fit == "too big") {
@@ -390,7 +402,7 @@ std::string model_block(const std::string & name, const GgufInfo & m, uint64_t v
 }
 
 std::string add_model_to_config(const std::string & config_path, const std::string & name, const GgufInfo & m,
-                                uint64_t vram) {
+                                uint64_t vram, bool cpu) {
     static const std::regex ok_name(R"(^[A-Za-z0-9_-]{1,64}$)");
     if (!std::regex_match(name, ok_name)) return "name must be letters, digits, - or _ (got '" + name + "')";
     if (m.projector) return "that file is a vision projector (mmproj), not a model";
@@ -430,7 +442,7 @@ std::string add_model_to_config(const std::string & config_path, const std::stri
     while (!lines.empty() && lines.back().empty()) lines.pop_back();
     std::string text;
     for (auto & l : lines) text += l + "\n";
-    text += model_block(name, m, vram);
+    text += model_block(name, m, vram, cpu);
 
     fs::create_directories(fs::path(config_path).parent_path(), ec);
     std::string tmp = config_path + ".tmp." + std::to_string(::getpid());

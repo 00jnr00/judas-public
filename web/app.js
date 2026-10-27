@@ -1868,34 +1868,42 @@
     getJSON("/api/models").then(function (r) {
       box.textContent = "";
       var models = r.models || [];
-      if (!models.length) { box.appendChild(el("p", "dim", "No models configured.")); return; }
+      if (!models.length) { box.appendChild(el("p", "dim", "No GGUF models found. Put one in ~/models or run judas models search.")); return; }
       models.forEach(function (m) {
         var active = m.active;
-        var b = el("button", "model-item" + (active ? " active" : ""));
+        var usable = m.usable !== false;
+        var b = el("button", "model-item" + (active ? " active" : "") + (usable ? "" : " unusable"));
         b.type = "button";
         var top = el("div", "sk-top");
-        top.appendChild(el("b", null, m.name));
-        top.appendChild(el("span", active ? "badge ok" : "tag", active ? "loaded" : "switch"));
+        top.appendChild(el("b", null, m.label || m.name));
+        var tag = active ? "loaded" : !usable ? (m.error || "unusable") : m.configured ? "switch" : "add + switch";
+        top.appendChild(el("span", active ? "badge ok" : "tag", tag));
         b.appendChild(top);
         b.appendChild(el("div", "dim small mono", m.path || ""));
-        var sub = el("div", "dim small");
-        sub.textContent = (m.gpu_layers > 0 ? "GPU" : "CPU") + " · ctx " + fmtNum(m.ctx_total);
-        b.appendChild(sub);
-        if (!active) b.onclick = function () { switchModel(m.name); };
+        var bits = [];
+        if (m.source && m.source !== "config") bits.push(m.source);
+        if (m.arch) bits.push(m.arch + (m.quant ? " " + m.quant : ""));
+        if (m.size) bits.push(m.size);
+        if (m.fit && m.fit !== "?" && m.fit !== "cpu") bits.push(m.fit);
+        if (m.ctx_total) bits.push((m.gpu_layers > 0 ? "GPU" : "CPU") + " \u00b7 ctx " + fmtNum(m.ctx_total));
+        b.appendChild(el("div", "dim small", bits.join(" \u00b7 ")));
+        if (!active && usable) b.onclick = function () { switchModel(m.configured ? m.name : m.path, m.label || m.name); };
+        else if (!usable) b.disabled = true;
         box.appendChild(b);
       });
     }, function () { box.textContent = ""; box.appendChild(el("p", "dim", "Could not load models.")); });
   }
-  function switchModel(name) {
-    if (!confirm("Switch to \u201c" + name + "\u201d? This restarts Judas and interrupts any running chats."))
+  function switchModel(name, label) {
+    if (!confirm("Switch to \u201c" + label + "\u201d? This restarts Judas and interrupts any running chats."))
       return;
     var box = $("#model-switch");
     function say(cls, text) { box.textContent = ""; box.appendChild(el("p", cls, text)); }
-    say("dim", "Switching to " + name + "...");
+    say("dim", "Switching to " + label + "...");
     postJSON("/api/model", { name: name }).then(function (r) {
       if (!r.restarting) { renderModels(); return; }
+      name = r.model || name;
       var t0 = Date.now();
-      say("dim", "Loading " + name + "; Judas is restarting (about 10 to 30 s).");
+      say("dim", "Loading " + label + "; Judas is restarting (about 10 to 30 s).");
       function check() {
         getJSON("/api/models").then(function (m) {
           if (m.loaded === name) { renderModels(); renderDaemon(); } else later();

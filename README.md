@@ -84,18 +84,18 @@ judas models
 ```
 GPU memory: 16.0 GB
 
-   #  CONFIG         MODEL                                SIZE  QUANT      CTX  FIT      FROM
-   1  -              Qwen3-30B-A3B-Q4_K_M.gguf         17.3 GB  Q4_K_M    256k  too big  lm-studio
-   2  -              gemma-4-E4B-it-Q4_K_M.gguf         5.0 GB  Q4_K_M    128k  fits     huggingface
-   3  -              ollama:qwen3:14b                   9.3 GB  Q4_K_M     40k  fits     ollama
+   #     MODEL                                SIZE  QUANT      CTX  FIT      FROM
+   1     Qwen3-30B-A3B-Q4_K_M              17.3 GB  Q4_K_M    256k  too big  lm-studio
+   2     gemma-4-E4B-it-Q4_K_M              5.0 GB  Q4_K_M    128k  fits     huggingface
+   3     ollama:qwen3:14b                   9.3 GB  Q4_K_M     40k  fits     ollama
 ```
 
 It looks in `~/models`, LM Studio (`~/.lmstudio/models`), the Hugging Face cache, Ollama's store (`~/.ollama/models`, read in place, nothing copied), `~/.cache/llama.cpp`, GPT4All and `~/Downloads`. Add your own folders with `judas models --dir /path` or `JUDAS_MODEL_DIRS=/a:/b`. **FIT** compares the file with your GPU memory: `fits` loads fully on the GPU with room for context, `tight` loads with a small context, `too big` needs CPU offload (MoE models get `cpu_moe = true` automatically; dense models get slow).
 
-Connect one:
+Load one (or pick it in the web app under Settings > Model, which lists every GGUF found and restarts Judas on it):
 
 ```sh
-judas models add 2 --use        # writes [models.gemma-4-e4b-it] and makes it the model the daemon loads
+judas models use 2              # writes [models.gemma-4-e4b-it] and makes it the model the daemon loads
 systemctl --user restart judas
 ```
 
@@ -189,7 +189,9 @@ Early release. Expect rough edges, and please file issues with your GPU, backend
 
 > **CUDA: untested.** Judas only calls libllama, so a llama.cpp built with `-DGGML_CUDA=ON` should work, but nobody has built or run Judas against it. Treat it as unsupported until someone reports back.
 
-> **Metal / macOS, Windows, CPU-only:** untested. The sandbox needs Linux (bubblewrap), so non-Linux platforms would also need `permissions.sandbox = "none"`.
+> **CPU only (Linux): tested.** Set `gpu_layers = 0` on a model and nothing goes to the GPU; models added from a CPU-only setup (CLI or web) get `gpu_layers = 0` too. Run on a Ryzen 9 5900X with GPT-OSS 20B (MXFP4) and Gemma 4 E4B (Q4_K_M), including switching between them from the web app. It is slow next to a GPU, and no throughput numbers are published for it.
+
+> **Metal / macOS, Windows:** untested. The sandbox needs Linux (bubblewrap), so non-Linux platforms would also need `permissions.sandbox = "none"`.
 
 Throughput, VRAM fit and the default context sizes all depend on the backend and model. The VRAM guard (refusing to load when more than 5 GB is in use) reads AMD sysfs only, so on other GPUs it does nothing.
 
