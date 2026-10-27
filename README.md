@@ -1,5 +1,7 @@
 # Judas
 
+[Website](https://judas.sanchezlabs.us) · [Docs](docs/) · [Support on Ko-fi](https://ko-fi.com/sanchezperformance)
+
 **The betrayer harness.** One C++ binary that loads one local model and runs many agents on it at once: model server, agent harness, terminal UI and web app, with every file change snapshotted so you can let the model work with real permissions and still undo anything.
 
 - **One model, many agents.** Continuous batching on llama.cpp. A lead agent splits a job across workers and they all decode on the same weights, sharing their common prompt prefix in the KV cache. No model swapping, no routing, no second copy in VRAM.
@@ -108,6 +110,10 @@ Early release. Expect rough edges, and please file issues with your GPU, backend
 > **Metal / macOS, Windows, CPU-only:** untested. The sandbox needs Linux (bubblewrap), so non-Linux platforms would also need `permissions.sandbox = "none"`.
 
 Throughput, VRAM fit and the default context sizes all depend on the backend and model. The VRAM guard (refusing to load when more than 5 GB is in use) reads AMD sysfs only, so on other GPUs it does nothing.
+
+## Support
+
+Judas is built and maintained by one person. If it saves you time or cloud bills, you can [buy me a coffee on Ko-fi](https://ko-fi.com/sanchezperformance).
 
 ## License
 
