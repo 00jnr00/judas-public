@@ -40,9 +40,58 @@ Point Judas at a different llama.cpp with `-DLLAMA_DIR=/path/to/llama.cpp -DLLAM
 
 `install.sh` does not enable or start the service. Edit the config first.
 
+## Get a model
+
+Judas runs GGUF models (the llama.cpp format). If you already have some, Judas will find them:
+
+```sh
+judas models
+```
+
+```
+GPU memory: 16.0 GB
+
+   #  CONFIG         MODEL                                SIZE  QUANT      CTX  FIT      FROM
+   1  -              Qwen3-30B-A3B-Q4_K_M.gguf         17.3 GB  Q4_K_M    256k  too big  lm-studio
+   2  -              gemma-4-E4B-it-Q4_K_M.gguf         5.0 GB  Q4_K_M    128k  fits     huggingface
+   3  -              ollama:qwen3:14b                   9.3 GB  Q4_K_M     40k  fits     ollama
+```
+
+It looks in `~/models`, LM Studio (`~/.lmstudio/models`), the Hugging Face cache, Ollama's store (`~/.ollama/models`, read in place, nothing copied), `~/.cache/llama.cpp`, GPT4All and `~/Downloads`. Add your own folders with `judas models --dir /path` or `JUDAS_MODEL_DIRS=/a:/b`. **FIT** compares the file with your GPU memory: `fits` loads fully on the GPU with room for context, `tight` loads with a small context, `too big` needs CPU offload (MoE models get `cpu_moe = true` automatically; dense models get slow).
+
+Connect one:
+
+```sh
+judas models add 2 --use        # writes [models.gemma-4-e4b-it] and makes it the model the daemon loads
+systemctl --user restart judas
+```
+
+`add` picks `ctx_total` and `ctx_per_agent` for the file and your GPU; edit them in the config afterwards if you like. `judas models info 2` shows the metadata and the block it would write.
+
+No models yet? Find and download one from Hugging Face:
+
+```sh
+judas models search qwen3 coder                         # GGUF repos, most downloaded first
+judas models files unsloth/Qwen3-30B-A3B-GGUF           # every quant with its size and fit
+judas models pull unsloth/Qwen3-30B-A3B-GGUF --add --use    # no file named: the biggest quant that fits
+judas models pull unsloth/Qwen3-30B-A3B-GGUF Q4_K_M --add --use
+```
+
+Downloads go to `~/models` (`--dir` to change), resume if interrupted, and handle multi-part files. Gated models (Llama, Gemma and others) need you to accept the license on huggingface.co and set `HF_TOKEN`.
+
+What to pick: tool calling quality matters more than size. Mixture-of-experts models with a few billion active parameters (names like `30B-A3B`) are fast enough to run several agents at once. Q4_K_M is the usual quality and size balance; go lower only to make a model fit.
+
+**Already running a model in LM Studio, Ollama or llama-server?** Judas can also use an OpenAI-compatible server instead of loading the model itself. You lose Judas's own batching and prefix sharing; how many agents run at once is then up to that server.
+
+```toml
+[models.remote]
+url = "http://127.0.0.1:1234"        # LM Studio; Ollama is http://127.0.0.1:11434, llama-server http://127.0.0.1:8080
+remote_model = "qwen3-14b"            # the model name that server expects
+```
+
 ## Configure
 
-`judas config init` writes `~/.config/judas/config.toml` with every option commented. The minimum is a model:
+`judas config init` writes `~/.config/judas/config.toml` with every option commented (`judas models add` creates it for you if it is missing). A model block looks like this:
 
 ```toml
 [engine]
@@ -72,7 +121,7 @@ judas run "add a --verbose flag to cli.py and update the tests" --cwd ~/code/pro
 
 Judas refuses to load a model when the GPU already has more than 5 GB in use, to avoid resetting the GPU under another model or a game. `JUDAS_FORCE=1` overrides.
 
-Other commands: `judas state`, `judas sessions`, `judas snap list|diff|revert`, `judas curator status|run`, `judas skills install`, `judas prompt-size`. Run `judas --help` for the full list.
+Other commands: `judas models`, `judas state`, `judas sessions`, `judas snap list|diff|revert`, `judas curator status|run`, `judas skills install`, `judas prompt-size`. Run `judas --help` for the full list.
 
 ## Security
 

@@ -273,5 +273,9 @@ std::string dump_config(const Config & cfg);
 
 // "~/x" -> "$HOME/x"; leaves other paths alone.
 std::string expand_home(const std::string & path);
+// The user config file (JUDAS_CONFIG wins, else ~/.config/judas/config.toml).
+std::string user_config_path();
+// Set `model = "<name>"` in [engine] of a config file, keeping comments; atomic. False on I/O failure.
+bool set_engine_model_in_file(const std::string & path, const std::string & model);
 
 }  // namespace judas

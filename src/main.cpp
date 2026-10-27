@@ -7,6 +7,9 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <regex>
+#include <map>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -17,6 +20,7 @@
 #include "cpp-httplib/httplib.h"
 #include "engine/engine.h"
 #include "learning/curator.h"
+#include "models/models.h"
 #include "server/server.h"
 #include "tui/tui.h"
 #include "skills/skills.h"
@@ -58,6 +62,18 @@ usage:
   judas curator status | run [--dry-run]
                                       skill library curator: state, or run a pass (dry = report only)
   judas config show|validate|init     effective config, check it, or write ~/.config/judas/config.toml
+  judas models [list] [--all] [--dir D]
+                                      GGUF models on this machine (your dirs, LM Studio, Hugging Face cache,
+                                      Ollama), with size, quant, context and whether they fit your GPU
+  judas models info N|PATH            details for one model (N = number from the list)
+  judas models add N|PATH [--name X] [--use]
+                                      write a [models.X] block with defaults that suit the file and GPU
+  judas models use NAME               make [models.NAME] the one the daemon loads
+  judas models search WORDS           find GGUF repos on Hugging Face (most downloaded first)
+  judas models files REPO             the GGUF files in a repo, with sizes and fit
+  judas models pull REPO [FILE|QUANT] [--dir D] [--add] [--use] [--name X]
+                                      download (resumable; HF_TOKEN for gated repos); no FILE picks the
+                                      biggest quant that fits your GPU
   judas prompt-size                   estimated prompt budget: tool schemas and skills index
   judas version
 )";
@@ -77,6 +93,11 @@ std::string arg_value(std::vector<std::string> & args, const std::string & flag,
             return v;
         }
     return def;
+}
+
+std::string lower_copy(std::string s) {
+    for (auto & c : s) c = (char) std::tolower((unsigned char) c);
+    return s;
 }
 
 bool arg_flag(std::vector<std::string> & args, const std::string & flag) {
@@ -468,6 +489,345 @@ int cmd_skills(std::vector<std::string> args) {
     return r.installed ? 0 : 1;
 }
 
+
+// ---- judas models --------------------------------------------------------------------------------------------
+
+void print_vram(uint64_t vram) {
+    if (vram) std::printf("%sGPU memory: %s%s\n", C_DIM, human_bytes(vram).c_str(), C_RESET);
+    else std::printf("%sGPU memory: unknown (fit column is a guess)%s\n", C_DIM, C_RESET);
+}
+
+const char * fit_color(const std::string & fit) {
+    if (!*C_RESET) return "";
+    return fit == "fits" ? "\033[38;2;127;176;138m" : fit == "tight" ? "\033[38;2;208;168;92m" : fit == "too big" ? C_RED : C_DIM;
+}
+
+// "3" (from the list) or a path to a .gguf
+bool resolve_model(const Config & cfg, const std::string & ref, GgufInfo & out) {
+    bool num = !ref.empty() && ref.find_first_not_of("0123456789") == std::string::npos;
+    if (num) {
+        auto all = scan_models(cfg);
+        std::vector<GgufInfo> shown;
+        for (auto & m : all) if (!m.projector) shown.push_back(m);
+        size_t i = std::stoul(ref);
+        if (i < 1 || i > shown.size()) {
+            std::fprintf(stderr, "no model #%s; run `judas models` for the list\n", ref.c_str());
+            return false;
+        }
+        out = shown[i - 1];
+        return true;
+    }
+    std::string p = expand_home(ref);
+    if (!fs::exists(p)) {
+        std::fprintf(stderr, "not found: %s\n", p.c_str());
+        return false;
+    }
+    out = gguf_info(fs::absolute(p).string());
+    return true;
+}
+
+int models_list(const Config & cfg, std::vector<std::string> & args) {
+    bool all = arg_flag(args, "--all");
+    std::vector<std::string> dirs;
+    for (std::string d; !(d = arg_value(args, "--dir")).empty();) dirs.push_back(d);
+    uint64_t vram = gpu_vram_total();
+    auto found = scan_models(cfg, dirs);
+    print_vram(vram);
+    if (found.empty()) {
+        std::printf("\nNo GGUF models found. Looked in:\n");
+        for (auto & [d, src] : model_search_dirs(cfg)) std::printf("  %s\n", d.c_str());
+        std::printf("\nFind one:      judas models search qwen3 coder\n"
+                    "Download one:  judas models pull <repo> --add --use\n"
+                    "Elsewhere:     judas models --dir /path/to/models  (or JUDAS_MODEL_DIRS=/a:/b)\n");
+        return 0;
+    }
+    std::printf("\n %3s  %-14s %-46s %9s  %-9s %7s  %-8s %s\n", "#", "CONFIG", "MODEL", "SIZE", "QUANT", "CTX", "FIT", "FROM");
+    int n = 0, hidden = 0;
+    for (auto & m : found) {
+        if (m.projector) {
+            hidden++;
+            if (!all) continue;
+        }
+        std::string label = m.label;
+        if (m.parts > 1) label += " (" + std::to_string(m.parts) + " parts)";
+        if (label.size() > 46) label = label.substr(0, 43) + "...";
+        std::string ctx = m.ctx_train ? std::to_string(m.ctx_train / 1024) + "k" : "-";
+        std::string fit = m.projector ? "mmproj" : m.ok ? fit_verdict(m.bytes, vram) : "error";
+        bool active = !m.config_name.empty() && m.config_name == cfg.engine.model;
+        std::printf(" %3s  %s%-14s%s %-46s %9s  %-9s %7s  %s%-8s%s %s%s%s\n",
+                    m.projector ? "" : std::to_string(++n).c_str(), active ? C_BRIGHT : C_SILVER,
+                    (m.config_name.empty() ? "-" : m.config_name + (active ? " *" : "")).c_str(), C_RESET,
+                    label.c_str(), m.bytes ? human_bytes(m.bytes).c_str() : "-", m.quant.empty() ? "-" : m.quant.c_str(),
+                    ctx.c_str(), fit_color(fit), fit.c_str(), C_RESET, C_DIM, m.source.c_str(), C_RESET);
+        if (!m.error.empty()) std::printf("      %s%s%s\n", C_RED, m.error.c_str(), C_RESET);
+    }
+    std::printf("\n%s* = loaded by the daemon (engine.model)", C_DIM);
+    if (hidden && !all) std::printf("; %d vision projector file(s) hidden, --all shows them", hidden);
+    std::printf("%s\n", C_RESET);
+    std::printf("Connect one:  judas models add <#> --use        Details: judas models info <#>\n");
+    return 0;
+}
+
+int models_info(const Config & cfg, std::vector<std::string> & args) {
+    if (args.empty()) {
+        std::fprintf(stderr, "usage: judas models info N|PATH\n");
+        return 2;
+    }
+    GgufInfo m;
+    if (!resolve_model(cfg, args[0], m)) return 1;
+    uint64_t vram = gpu_vram_total();
+    std::printf("%s%s%s\n", C_BRIGHT, m.label.c_str(), C_RESET);
+    auto row = [](const char * k, const std::string & v) { if (!v.empty()) std::printf("  %-13s %s\n", k, v.c_str()); };
+    row("path", m.path);
+    row("name", m.name);
+    row("architecture", m.arch);
+    row("size", m.size_label);
+    if (m.experts) row("experts", std::to_string(m.experts_used) + " active of " + std::to_string(m.experts) + " (MoE)");
+    row("quant", m.quant);
+    row("file", human_bytes(m.bytes) + (m.parts > 1 ? " in " + std::to_string(m.parts) + " parts" : ""));
+    if (m.ctx_train) row("context", std::to_string(m.ctx_train) + " tokens (trained)");
+    row("configured", m.config_name.empty() ? "no" : "as [models." + m.config_name + "]");
+    row("fit", vram ? fit_verdict(m.bytes, vram) + " in " + human_bytes(vram) + " of VRAM" : "unknown VRAM");
+    if (!m.error.empty()) row("problem", m.error);
+    if (m.config_name.empty() && m.ok && !m.projector) {
+        std::printf("\nWould be added as:\n%s", model_block(suggest_model_name(m.label), m, vram).c_str());
+    }
+    return m.ok ? 0 : 1;
+}
+
+int models_use(const std::string & name, const Config & cfg) {
+    if (!cfg.models.count(name)) {
+        std::fprintf(stderr, "no [models.%s] in the config; `judas models` lists what is configured\n", name.c_str());
+        return 1;
+    }
+    std::string path = user_config_path();
+    if (!set_engine_model_in_file(path, name)) {
+        std::fprintf(stderr, "cannot update %s\n", path.c_str());
+        return 1;
+    }
+    std::printf("engine.model = \"%s\" in %s\n", name.c_str(), path.c_str());
+    httplib::Client c("127.0.0.1", cfg.server.port);
+    c.set_connection_timeout(1);
+    if (auto r = c.Get("/health"); r && r->status == 200)
+        std::printf("The daemon is running the old model: restart it (systemctl --user restart judas), or switch in the web app under Settings.\n");
+    else
+        std::printf("Start it with: systemctl --user start judas   (or judas serve)\n");
+    return 0;
+}
+
+int models_add(const Config & cfg, std::vector<std::string> & args, const GgufInfo * given = nullptr) {
+    std::string name = arg_value(args, "--name");
+    bool use = arg_flag(args, "--use");
+    GgufInfo m;
+    if (given) {
+        m = *given;
+    } else {
+        if (args.empty()) {
+            std::fprintf(stderr, "usage: judas models add N|PATH [--name X] [--use]\n");
+            return 2;
+        }
+        if (!resolve_model(cfg, args[0], m)) return 1;
+    }
+    if (!m.ok) {
+        std::fprintf(stderr, "cannot use %s: %s\n", m.path.c_str(), m.error.c_str());
+        return 1;
+    }
+    if (!m.config_name.empty() && name.empty()) {
+        std::printf("already configured as [models.%s]\n", m.config_name.c_str());
+        return use ? models_use(m.config_name, cfg) : 0;
+    }
+    if (name.empty()) name = suggest_model_name(m.label);
+    uint64_t vram = gpu_vram_total();
+    std::string path = user_config_path();
+    std::string err = add_model_to_config(path, name, m, vram);
+    if (!err.empty()) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    std::printf("added [models.%s] to %s%s", name.c_str(), path.c_str(), model_block(name, m, vram).c_str());
+    std::string fit = fit_verdict(m.bytes, vram);
+    if (fit == "tight") std::printf("%sTight fit: if it fails to load, lower ctx_total.%s\n", C_DIM, C_RESET);
+    if (!use) {
+        std::printf("Load it with: judas models use %s\n", name.c_str());
+        return 0;
+    }
+    Config fresh = load_or_die();
+    return models_use(name, fresh);
+}
+
+int models_search(std::vector<std::string> & args) {
+    std::string q;
+    for (auto & a : args) q += (q.empty() ? "" : " ") + a;
+    if (q.empty()) {
+        std::fprintf(stderr, "usage: judas models search WORDS   (e.g. judas models search qwen3 coder)\n");
+        return 2;
+    }
+    std::string err;
+    auto repos = hf_search(q, 20, &err);
+    if (!err.empty()) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    if (repos.empty()) {
+        std::printf("No GGUF repos match \"%s\".\n", q.c_str());
+        return 0;
+    }
+    std::printf("\n %-60s %10s %6s\n", "REPO", "DOWNLOADS", "LIKES");
+    for (auto & r : repos) std::printf(" %-60s %10lld %6lld\n", r.id.c_str(), r.downloads, r.likes);
+    std::printf("\nSee the files: judas models files <repo>      Get one: judas models pull <repo> --add --use\n");
+    return 0;
+}
+
+int models_files(std::vector<std::string> & args) {
+    if (args.empty()) {
+        std::fprintf(stderr, "usage: judas models files REPO\n");
+        return 2;
+    }
+    std::string err;
+    auto files = hf_gguf_files(args[0], &err);
+    if (!err.empty()) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    uint64_t vram = gpu_vram_total();
+    print_vram(vram);
+    std::printf("\n %-64s %9s  %s\n", "FILE", "SIZE", "FIT");
+    for (auto & f : files) {
+        bool proj = lower_copy(f.path).find("mmproj") != std::string::npos;
+        std::string fit = proj ? "mmproj" : fit_verdict(f.bytes, vram);
+        std::printf(" %-64s %9s  %s%s%s\n", f.path.c_str(), human_bytes(f.bytes).c_str(), fit_color(fit), fit.c_str(), C_RESET);
+    }
+    std::printf("\nGet one: judas models pull %s <file or quant, e.g. Q4_K_M> --add --use\n", args[0].c_str());
+    return 0;
+}
+
+int models_pull(const Config & cfg, std::vector<std::string> & args) {
+    std::string dir = expand_home(arg_value(args, "--dir", "~/models"));
+    bool add = arg_flag(args, "--add");
+    bool use = arg_flag(args, "--use");
+    std::string name = arg_value(args, "--name");
+    if (args.empty()) {
+        std::fprintf(stderr, "usage: judas models pull REPO [FILE|QUANT] [--dir D] [--add] [--use] [--name X]\n");
+        return 2;
+    }
+    std::string repo = args[0], want = args.size() > 1 ? args[1] : "";
+    std::string err;
+    auto files = hf_gguf_files(repo, &err);
+    if (!err.empty()) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    // group split parts under their first file; drop projectors
+    struct Pick { std::string first; std::vector<HfFile> parts; uint64_t bytes = 0; };
+    std::map<std::string, Pick> groups;
+    static const std::regex split(R"(^(.*)-(\d{5})-of-(\d{5})\.gguf$)", std::regex::icase);
+    for (auto & f : files) {
+        if (lower_copy(f.path).find("mmproj") != std::string::npos) continue;
+        std::smatch sm;
+        std::string key = std::regex_match(f.path, sm, split) ? sm[1].str() : f.path;
+        auto & g = groups[key];
+        g.parts.push_back(f);
+        g.bytes += f.bytes;
+        if (g.first.empty() || f.path < g.first) g.first = f.path;
+    }
+    if (groups.empty()) {
+        std::fprintf(stderr, "no GGUF model files in %s\n", repo.c_str());
+        return 1;
+    }
+    uint64_t vram = gpu_vram_total();
+    const Pick * pick = nullptr;
+    if (!want.empty()) {
+        std::string w = lower_copy(want);
+        for (auto & [k, g] : groups)
+            if (lower_copy(g.first) == w || lower_copy(k) == w) pick = &g;
+        if (!pick) {
+            std::vector<const Pick *> hits;
+            for (auto & [k, g] : groups)
+                if (lower_copy(k).find(w) != std::string::npos) hits.push_back(&g);
+            if (hits.size() == 1) pick = hits[0];
+            else if (hits.size() > 1) {
+                std::fprintf(stderr, "\"%s\" matches %zu files; name one exactly:\n", want.c_str(), hits.size());
+                for (auto * h : hits) std::fprintf(stderr, "  %s\n", h->first.c_str());
+                return 1;
+            }
+        }
+        if (!pick) {
+            std::fprintf(stderr, "no file matching \"%s\"; see: judas models files %s\n", want.c_str(), repo.c_str());
+            return 1;
+        }
+    } else {
+        // the biggest file that fits comfortably; failing that, the smallest
+        for (auto & [k, g] : groups)
+            if (fit_verdict(g.bytes, vram) == "fits" && (!pick || g.bytes > pick->bytes)) pick = &g;
+        if (!pick)
+            for (auto & [k, g] : groups)
+                if (!pick || g.bytes < pick->bytes) pick = &g;
+        std::printf("Picked %s (%s, %s for %s of VRAM)\n", pick->first.c_str(), human_bytes(pick->bytes).c_str(),
+                    fit_verdict(pick->bytes, vram).c_str(), vram ? human_bytes(vram).c_str() : "unknown");
+    }
+    std::error_code ec;
+    auto space = fs::space(fs::exists(dir) ? dir : fs::path(dir).parent_path().string(), ec);
+    if (!ec && space.available < pick->bytes) {
+        std::fprintf(stderr, "not enough disk space in %s: need %s, have %s\n", dir.c_str(),
+                     human_bytes(pick->bytes).c_str(), human_bytes(space.available).c_str());
+        return 1;
+    }
+    std::string first_local;
+    for (auto & part : pick->parts) {
+        std::printf("downloading %s/%s -> %s\n", repo.c_str(), part.path.c_str(), dir.c_str());
+        auto t0 = std::chrono::steady_clock::now();
+        int last = -1;
+        std::string local = hf_download(repo, part.path, dir, [&](uint64_t done, uint64_t total) {
+            int pct = total ? (int) (done * 100 / total) : -1;
+            if (pct == last) return;
+            if (!::isatty(1) && pct % 10 != 0) return;   // logs get a line every 10%, terminals a live counter
+            last = pct;
+            double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::printf(::isatty(1) ? "\r  %s / %s  %3d%%  %.0f MB/s   " : "  %s / %s  %3d%%  %.0f MB/s\n", human_bytes(done).c_str(), human_bytes(total).c_str(),
+                        pct < 0 ? 0 : pct, s > 0 ? done / 1048576.0 / s : 0.0);
+            std::fflush(stdout);
+        }, &err);
+        std::printf("\n");
+        if (local.empty()) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        if (part.path == pick->first) first_local = local;
+    }
+    std::printf("saved %s\n", first_local.c_str());
+    if (!add && !use) {
+        std::printf("Connect it: judas models add %s --use\n", first_local.c_str());
+        return 0;
+    }
+    GgufInfo m = gguf_info(first_local);
+    std::vector<std::string> rest;
+    if (!name.empty()) rest = {"--name", name};
+    if (use) rest.push_back("--use");
+    return models_add(cfg, rest, &m);
+}
+
+int cmd_models(std::vector<std::string> args) {
+    if (!::isatty(1)) C_SILVER = C_BRIGHT = C_DIM = C_RED = C_RESET = "";
+    Config cfg = load_or_die();
+    std::string sub = args.empty() || args[0].rfind("--", 0) == 0 ? "list" : args[0];
+    if (!args.empty() && sub == args[0]) args.erase(args.begin());
+    if (sub == "list" || sub == "ls") return models_list(cfg, args);
+    if (sub == "info") return models_info(cfg, args);
+    if (sub == "add") return models_add(cfg, args);
+    if (sub == "use") {
+        if (args.empty()) {
+            std::fprintf(stderr, "usage: judas models use NAME\n");
+            return 2;
+        }
+        return models_use(args[0], cfg);
+    }
+    if (sub == "search") return models_search(args);
+    if (sub == "files") return models_files(args);
+    if (sub == "pull" || sub == "download") return models_pull(cfg, args);
+    std::fprintf(stderr, "unknown: judas models %s (list, info, add, use, search, files, pull)\n", sub.c_str());
+    return 2;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -489,6 +849,7 @@ int main(int argc, char ** argv) {
         if (cmd == "curator") return cmd_curator(args);
         if (cmd == "config") return cmd_config(args);
         if (cmd == "skills") return cmd_skills(args);
+        if (cmd == "models") return cmd_models(args);
         if (cmd == "prompt-size") {
             Config cfg = load_or_die();
             auto est = [](const std::string & s) { return (long) (s.size() / 4); };  // ~4 bytes/token
