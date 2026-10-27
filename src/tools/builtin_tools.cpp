@@ -110,6 +110,17 @@ std::string read_denied(const ToolContext & ctx, const std::string & path, fs::p
 }
 
 ToolResult fail(const std::string & m) { return {false, m, false}; }
+
+// A missing path is often a typo copied from a task (a lead mistyping the project path for its workers).
+// Point back at the working directory so the agent corrects the path instead of creating a new tree there.
+ToolResult missing(const ToolContext & ctx, const std::string & what, const fs::path & p) {
+    std::string m = what + p.string();
+    std::error_code ec;
+    if (!ctx.cwd.empty() && fs::is_directory(ctx.cwd, ec) && p.string().rfind(ctx.cwd, 0) != 0)
+        m += ". Your working directory is " + ctx.cwd + "; if the path came from your task it may be mistyped, "
+             "so check it against the working directory (list_dir \".\") before creating anything.";
+    return fail(m);
+}
 ToolResult okr(const std::string & m) { return {true, m, false}; }
 
 std::string cap_text(const std::string & s, size_t max) {
@@ -267,7 +278,7 @@ ToolResult t_read_file(const json & a, ToolContext & ctx) {
     if (!d.empty()) return fail(d);
     std::error_code ec;
     if (fs::is_directory(p, ec)) return fail(p.string() + " is a directory; use list_dir");
-    if (!fs::exists(p, ec)) return fail("no such file: " + p.string());
+    if (!fs::exists(p, ec)) return missing(ctx, "no such file: ", p);
     std::string data = read_whole(p);
     if (looks_binary(data)) return fail(p.string() + " looks like a binary file (" + std::to_string(data.size()) + " bytes); not shown");
     long offset = std::max(1L, a.value("offset", 1L));
@@ -359,7 +370,7 @@ ToolResult t_edit_file(const json & a, ToolContext & ctx) {
     std::string oldS = a.at("old_string").get<std::string>(), newS = a.at("new_string").get<std::string>();
     bool all = a.value("replace_all", false);
     std::error_code ec;
-    if (!fs::is_regular_file(p, ec)) return fail("no such file: " + p.string());
+    if (!fs::is_regular_file(p, ec)) return missing(ctx, "no such file: ", p);
     if (oldS.empty()) return fail("old_string is empty");
     if (oldS == newS) return fail("old_string and new_string are identical");
     std::string data = read_whole(p);
@@ -389,7 +400,7 @@ ToolResult t_list_dir(const json & a, ToolContext & ctx) {
     if (!d.empty()) return fail(d);
     int depth = std::max(1, a.value("depth", 2));
     std::error_code ec;
-    if (!fs::is_directory(p, ec)) return fail("not a directory: " + p.string());
+    if (!fs::is_directory(p, ec)) return missing(ctx, "not a directory: ", p);
     const size_t cap = 500;
     size_t n = 0;
     bool truncated = false;

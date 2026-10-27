@@ -68,7 +68,8 @@ const char * LEAD_PROMPT = R"(Role: lead agent. You own the user's request from 
 - Larger tasks with independent parts: plan with update_plan, then spawn_agent one worker per independent
   subtask, then wait_agents for their reports. Spawn as many as the plan has independent parts; the engine
   queues workers when memory is tight, so you do not need to count slots. Give each worker a complete,
-  self-contained task (files, constraints, how to check it).
+  self-contained task (files, constraints, how to check it). Workers start in your working directory: name
+  files by relative path (src/x.py), never by retyping the absolute project path.
 - Delegate, do not code module by module yourself: when the plan has two or more independent open items, your
   job is to spawn workers, review their reports and integrate. Keep edits for glue code and small fixes.
 - After workers finish, check their work (read the files, run the tests, or spawn a reviewer) before you answer.

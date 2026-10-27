@@ -2,7 +2,42 @@
 
 [Website](https://judas.sanchezlabs.us) · [Docs](docs/) · [Support on Ko-fi](https://ko-fi.com/sanchezperformance)
 
-**The betrayer harness.** One C++ binary that loads one local model and runs many agents on it at once: model server, agent harness, terminal UI and web app, with every file change snapshotted so you can let the model work with real permissions and still undo anything.
+### A team of coding agents on your own GPU. Not one at a time: all at once.
+
+A single local agent leaves most of your GPU idle while it writes. Judas loads one model and runs a lead agent plus workers on it in parallel, so a job that splits gets done in a fraction of the time, and nothing leaves your machine.
+
+| Agents on one GPU | Total tok/s | Each agent |
+|---|---|---|
+| 1 | 113 | 113 |
+| 2 | 164 | 82 |
+| 4 | 221 | 55 |
+| 6 | 248 | 41 |
+
+Same GPU, same model, no second copy in memory. Measured on one RX 6800 (16 GB, Vulkan) with a 35B-A3B MoE model. Two workers each run at about 73% of solo speed but cover twice the ground.
+
+And because a team working unattended needs a safety net:
+
+- **Every file change is snapshotted.** Undo one step or the whole session.
+- **Shell commands run sandboxed.** `sudo` and friends are blocked in code, in every permission mode.
+- **One binary.** Model server, agents, web app, terminal UI and an OpenAI-compatible API. No Python, no Docker, no cloud, no account.
+
+![Judas: a lead agent and two workers add a --json flag and its tests in parallel](docs/media/judas-demo.gif)
+
+*Real run, sped up 6x ([video](https://judas.sanchezlabs.us/media/judas-demo.mp4)): Ornith 35B-A3B on one RX 6800. The lead plans, two workers write the code and the tests at the same time, every edit is snapshotted, and the lead runs the tests: 5 passed, 3.8 minutes end to end.*
+
+```sh
+judas models pull unsloth/Qwen3-30B-A3B-GGUF --add --use
+judas run "add a --json flag to export and update the tests"
+```
+
+|  | Typical local setup (model app + agent tool) | Judas |
+|---|---|---|
+| Agents working at once on one GPU | usually 1 | a lead plus up to 8 |
+| Undo any change the agent made | git, if you remembered to commit | built in, per step |
+| Pieces to install | 2 to 3 apps | 1 binary |
+| Leaves your machine | nothing | nothing |
+
+## How it works
 
 - **One model, many agents.** Continuous batching on llama.cpp. A lead agent splits a job across workers and they all decode on the same weights, sharing their common prompt prefix in the KV cache. No model swapping, no routing, no second copy in VRAM.
 - **Undo for everything.** Every write goes through a snapshot journal (reflink copies where the filesystem supports them). Diff or revert one step, or roll a whole session back.
@@ -10,8 +45,6 @@
 - **It learns.** Skills are plain Markdown files that load on trigger words. After long turns a background review saves lessons as skills or memory notes, and an idle curator archives skills that stopped earning their place.
 - **OpenAI-compatible.** `/v1/chat/completions` and `/v1/models` for any client, plus a richer Judas API with server-sent events.
 - **Three ways in:** a web app (Chat, Cowork, Code, Agents board, Tasks, Memory, Snapshots, Resources, Heartbeat), a terminal UI, and `judas run "task"` for scripts.
-
-Measured on one RX 6800 (16 GB, Vulkan) with a 35B-A3B MoE: about 110 tok/s for one stream and about 270 tok/s total across 8 concurrent agents.
 
 ## Requirements
 
