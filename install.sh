@@ -71,6 +71,13 @@ else
     TUI_TERM=true
     WEB_EXEC="xdg-open http://localhost:$PORT"
 fi
+# Leave launchers alone when the user already has one with the same name under another file name.
+has_entry() {
+    grep -lx "Name=$1" "$APPS"/*.desktop 2>/dev/null | grep -vqx "$APPS/$2"
+}
+if has_entry "Judas" judas.desktop; then
+    echo "[judas] keeping your existing Judas launcher"
+else
 cat > "$APPS/judas.desktop" <<DESKEOF
 [Desktop Entry]
 Type=Application
@@ -82,6 +89,10 @@ Terminal=$TUI_TERM
 Categories=Utility;Development;
 Keywords=judas;ai;agent;local;harness;llm;code;
 DESKEOF
+fi
+if has_entry "Judas Web" judas-web.desktop; then
+    echo "[judas] keeping your existing Judas Web launcher"
+else
 cat > "$APPS/judas-web.desktop" <<DESKEOF
 [Desktop Entry]
 Type=Application
@@ -91,6 +102,7 @@ Exec=$WEB_EXEC
 Terminal=false
 StartupNotify=true
 DESKEOF
+fi
 update-desktop-database "$APPS" 2>/dev/null || true
 
 echo "[judas] config init"
