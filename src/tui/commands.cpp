@@ -1,6 +1,8 @@
 #include "tui/commands.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -19,6 +21,11 @@ const std::vector<Command> & commands() {
         {"agents", "", "live agent list"},
         {"plan", "", "show the current plan"},
         {"state", "", "daemon state: model, KV, queue, tok/s"},
+        {"attach", "<path> [more]", "attach files or images (quote paths with spaces; dropping a file works too)", true},
+        {"screenshot", "[region]", "attach a screenshot of the host screen (region: pick an area)"},
+        {"paste", "", "attach the clipboard image (or paste clipboard text)"},
+        {"detach", "[n]", "remove pending attachment n, or all"},
+        {"mascot", "", "show or hide the pixel companions"},
         {"copy", "[N]", "copy the last assistant reply (or the Nth from last)"},
         {"expand", "[N]", "print the full output of tool call N (default: last)"},
         {"clear", "", "clear the screen"},
@@ -148,6 +155,30 @@ Menu compute_menu(const std::string & text, size_t cursor, const MenuContext & c
     }
     // argument choices
     std::string name = text.substr(1, sp - 1), arg = trim(text.substr(sp + 1));
+    if (name == "attach") {
+        // path completion for the token under the cursor (unquoted; backslash-escaped spaces)
+        size_t b = cursor;
+        while (b > sp + 1 && !(std::isspace((unsigned char) text[b - 1]) && !(b >= 2 && text[b - 2] == '\\'))) b--;
+        std::string raw = text.substr(b, cursor - b), partial;
+        if (!raw.empty() && (raw[0] == '"' || raw[0] == '\'')) return m;
+        for (size_t i = 0; i < raw.size(); i++) {
+            if (raw[i] == '\\' && i + 1 < raw.size()) i++;
+            partial += raw[i];
+        }
+        std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
+        bool tilde = partial == "~" || partial.rfind("~/", 0) == 0;
+        std::string lookup = tilde ? home + partial.substr(1) : partial;
+        if (partial == "~") lookup += "/";
+        for (auto & p : complete_path(ctx.cwd, lookup, 8)) {
+            std::string shown = tilde ? "~" + p.substr(home.size()) : p;
+            std::string esc;
+            for (char c : shown) { if (c == ' ') esc += '\\'; esc += c; }
+            m.items.push_back({esc, shown, ""});
+        }
+        if (m.items.size() == 1 && m.items[0].label == partial) m.items.clear();
+        if (!m.items.empty()) { m.kind = Menu::At; m.begin = b; m.end = cursor; }
+        return m;
+    }
     std::vector<std::string> choices;
     if (name == "mode") choices = {"chat", "cowork", "code"};
     else if (name == "auto-resume") choices = {"on", "off"};

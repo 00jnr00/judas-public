@@ -27,6 +27,9 @@ struct ChatMessage {
     std::vector<ToolCall> tool_calls;  // assistant only
     std::string tool_call_id;          // tool only
     std::string tool_name;             // tool only
+    // Raw image file bytes (png/jpg/gif/bmp) shown to a vision model. Never stored: agents expand
+    // [[image:ID|name]] markers from the attachment store into this right before each request.
+    std::vector<std::string> images;
 };
 
 struct ToolSpec {
@@ -109,6 +112,9 @@ public:
     virtual std::string model_name() const = 0;
     // Token count of a text with the loaded vocab (for prompt-size and budgets).
     virtual int count_tokens(const std::string & text) const = 0;
+    // True when the loaded model can see ChatMessage::images (local model with an mmproj, or a remote
+    // model with vision = true). Images sent to a model without vision are dropped by the caller.
+    virtual bool vision() const { return false; }
 };
 
 // OpenAI chat-completions JSON <-> engine types (used by the /v1 server and tests).

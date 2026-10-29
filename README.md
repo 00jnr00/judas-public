@@ -46,6 +46,28 @@ judas run "add a --json flag to export and update the tests"
 - **OpenAI-compatible.** `/v1/chat/completions` and `/v1/models` for any client, plus a richer Judas API with server-sent events.
 - **Three ways in:** a web app (Chat, Cowork, Code, Agents board, Tasks, Memory, Snapshots, Resources, Heartbeat), a terminal UI, and `judas run "task"` for scripts.
 
+## Everyday use
+
+Attach images, screenshots, PDFs, Word, Excel and PowerPoint files, and text or code files from the chat bar.
+
+- **Web app:** the paperclip button, drag and drop, paste, or a screen capture (`grim` and `slurp`).
+- **Terminal UI:** `/attach <file>`, `/screenshot`, `/paste` and `/detach`, or drop a file into the terminal.
+
+Documents reach the model as text. Images reach it as pictures when the loaded model has vision: a model's vision projector (an `mmproj*.gguf` next to the model file) is found automatically, or set `mmproj` under `[models.x]`. Scanned PDFs (no text layer) are rendered page by page as images. Without vision, images get OCR text instead.
+
+Optional helpers, found on `PATH` when present:
+
+- `pdftotext` and `pdftoppm` (poppler): PDF text, and page images for scanned PDFs
+- `tesseract`: OCR for images (`[attachments] ocr`)
+- `markitdown` or `pandoc`: Word, Excel, PowerPoint, RTF, EPUB and HTML. Without either, Judas reads the XML inside the file.
+- `grim` and `slurp`: screenshots
+
+The web app renders math in replies, and each message can be copied, downloaded or read aloud.
+
+Two pixel-art companions, Jude and Pip, appear in the TUI and the web app. Turn them off with `mascot = false` under `[ui]`, with `/mascot` in the TUI, or with the Settings toggle in the web app.
+
+Upload limits, the text cap and the scanned-PDF page limit are under `[attachments]`. Run `judas config init` to see every option.
+
 ## Requirements
 
 - Linux (x86_64). Other platforms are untested.

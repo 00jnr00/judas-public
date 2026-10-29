@@ -66,6 +66,12 @@ private:
 // snapshot_list, snapshot_diff, snapshot_revert
 void register_builtin_tools(ToolRegistry & reg);
 
+// view_image, screenshot (they return images through [[image:ID|name]] markers; see src/attach).
+void register_attach_tools(ToolRegistry & reg);
+
+// Read-side path policy: resolves like read_file and applies the secret/deny lists. Returns "" if allowed.
+std::string check_read_path(const ToolContext & ctx, const std::string & path, std::string & resolved);
+
 // Path policy shared by every writing tool: resolves relative to ctx.cwd, expands ~, and checks
 // permissions.allow_paths / deny_paths. Returns "" if allowed, else the reason.
 std::string check_write_path(const ToolContext & ctx, const std::string & path, std::string & resolved);

@@ -206,6 +206,10 @@ void apply_model(const Reader & r, ModelConfig & m, const std::string & prefix, 
                     fail_at(r, full + ": not a systemd unit name: " + m.unit, &v);
         }
         else if (key == "remote_model") m.remote_model = get_str(r, full, v);
+        else if (key == "mmproj") m.mmproj = get_str(r, full, v);
+        else if (key == "mmproj_gpu") m.mmproj_gpu = get_bool(r, full, v);
+        else if (key == "image_max_tokens") m.image_max_tokens = get_int(r, full, v);
+        else if (key == "vision") m.vision = get_bool(r, full, v);
         else if (key == "sampling") {
             const auto & s = as_table(r, full, v);
             for (auto && [sk, sv] : s) {
@@ -337,6 +341,21 @@ void apply_file(Config & c, const std::string & file) {
                 if (p == "max_memory_tokens") c.prompt.max_memory_tokens = get_int(r, full, pv);
                 else if (p == "tool_schema") c.prompt.tool_schema = get_str(r, full, pv);
                 else unknown_key(r, full, pv);
+            }
+        } else if (key == "attachments") {
+            for (auto && [ak, av] : as_table(r, key, v)) {
+                std::string a(ak.str()), full = key + "." + a;
+                if (a == "max_bytes") c.attachments.max_bytes = get_int(r, full, av);
+                else if (a == "max_text_chars") c.attachments.max_text_chars = get_int(r, full, av);
+                else if (a == "pdf_max_pages") c.attachments.pdf_max_pages = get_int(r, full, av);
+                else if (a == "ocr") c.attachments.ocr = get_bool(r, full, av);
+                else unknown_key(r, full, av);
+            }
+        } else if (key == "ui") {
+            for (auto && [uk, uv] : as_table(r, key, v)) {
+                std::string u(uk.str()), full = key + "." + u;
+                if (u == "mascot") c.ui.mascot = get_bool(r, full, uv);
+                else unknown_key(r, full, uv);
             }
         } else if (key == "memory") {
             for (auto && [mk, mv] : as_table(r, key, v)) {
@@ -1017,6 +1036,9 @@ threads = 4
 ubatch = 256
 batch = 2048
 flash_attn = true
+# mmproj = ""              # vision projector GGUF; "" = auto (an mmproj*.gguf next to the model), "none" = off
+# mmproj_gpu = false       # run the projector on the GPU (faster image encode, costs VRAM)
+# image_max_tokens = 1024  # token cap per image
 # bias_file = "~/.config/judas/bias.txt"   # optional token bans, format above
 
 [models.main.sampling]
@@ -1027,6 +1049,20 @@ top_k = 20
 
 # Add more [models.name] tables to switch between models (one is loaded at a time). A remote model sets
 # url = "http://127.0.0.1:8081" (an OpenAI-compatible server) instead of path.
+# vision = false           # remote only: send images to the upstream as image_url data URLs (it must accept them)
+
+# ---- attachments -----------------------------------------------------------
+# Files the user attaches in the chat bar (web and TUI). Documents become text; images go to the model when
+# it has vision, otherwise they get OCR text (tesseract, when installed).
+[attachments]
+max_bytes = 52428800       # largest upload accepted (50 MiB); bigger uploads get HTTP 413
+max_text_chars = 120000    # extracted text kept per attachment (head kept, the rest is cut)
+pdf_max_pages = 6          # scanned PDFs (no text layer): pages rendered to images
+ocr = true                 # run tesseract on images when it is installed
+
+# ---- ui --------------------------------------------------------------------
+[ui]
+mascot = true              # pixel-art companions in the TUI and web UI
 
 # ---- server ----------------------------------------------------------------
 [server]

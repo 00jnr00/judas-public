@@ -27,9 +27,11 @@
 #include "core/json.h"
 #include "cpp-httplib/httplib.h"
 #include "learning/learn.h"
+#include "tui/attach.h"
 #include "tui/commands.h"
 #include "tui/input.h"
 #include "tui/layout.h"
+#include "tui/sprites.h"
 #include "tui/text.h"
 #include "tui/view.h"
 
@@ -169,6 +171,20 @@ struct Api {
         out.body = j.is_discarded() ? json::object() : j;
         return out;
     }
+    // Raw body upload (attachments) or a slow call (screenshot with a region picker): own read timeout.
+    Reply post_raw(const std::string & path, const std::string & body, const std::string & ctype, int read_timeout) {
+        httplib::Client c("127.0.0.1", port);
+        c.set_connection_timeout(2, 0);
+        c.set_read_timeout(read_timeout, 0);
+        c.set_write_timeout(read_timeout, 0);
+        auto r = c.Post(path, body, ctype);
+        Reply out;
+        if (!r) return out;
+        out.status = r->status;
+        auto j = json::parse(r->body, nullptr, false);
+        out.body = j.is_discarded() ? json::object() : j;
+        return out;
+    }
     Reply get(const std::string & p) { return call("GET", p); }
     Reply post(const std::string & p, const json & b = json::object()) { return call("POST", p, b.dump()); }
     Reply patch(const std::string & p, const json & b) { return call("PATCH", p, b.dump()); }
@@ -188,6 +204,18 @@ std::string sh_quote(const std::string & s) {
     std::string o = "'";
     for (char c : s) o += c == '\'' ? std::string("'\\''") : std::string(1, c);
     return o + "'";
+}
+
+// Runs a shell command and returns its stdout bytes (stderr is the caller's business).
+std::string run_capture(const std::string & cmd, size_t max_bytes = 64u << 20) {
+    FILE * p = popen(cmd.c_str(), "r");
+    if (!p) return "";
+    std::string data;
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, p)) > 0 && data.size() < max_bytes) data.append(buf, n);
+    pclose(p);
+    return data;
 }
 
 bool have_wl_copy() {
@@ -229,8 +257,19 @@ struct App {
     bool quit = false, dismissed = false;
     std::string dismissed_text, last_menu_text;
     int menu_sel = 0, spin = 0, rows = 24, cols = 80, region_cursor_row = 0, region_rows = 0;
-    std::vector<std::string> queued;
+    struct Queued {
+        std::string text;
+        std::vector<std::string> ids, chips;
+    };
+    std::vector<Queued> queued;
     std::vector<std::string> models;
+    // attachments waiting for the next message, upload errors, the pixel companions
+    std::vector<PendingAttachment> pending;
+    std::vector<std::string> attach_errs;
+    Companions comp;
+    bool mascot_on = false;
+    double sprite_next = 0, last_paint = 0;
+    int panel_n = 0, last_cursor_col = 0;
     // generic picker (sessions, models)
     Menu picker;
     std::string picker_kind;
@@ -318,6 +357,15 @@ struct App {
         for (auto & r : stream.take_committed()) f += r + pal.reset + "\r\n";
         // build the live area
         std::vector<std::string> rowsv;
+        double tnow = now_s();
+        panel_n = 0;
+        if (mascot_visible()) {
+            auto prow = comp.render(tnow, stream.running(), pal.dim, pal.reset);
+            std::string pad((size_t) std::max(0, cols - 1 - comp.panel_width()), ' ');
+            for (auto & r : prow) rowsv.push_back(pad + r);
+            panel_n = (int) prow.size();
+            sprite_next = tnow + comp.frame_seconds(tnow, stream.running());
+        }
         Menu menu = current_menu();
         BoxView box = render_input_box(ed, cols - 1, pal, "Message Judas  (/ commands, ! shell, @ files)",
                                        !ed.text.empty() && ed.text[0] == '!', 8);
@@ -327,12 +375,16 @@ struct App {
                                                    "?  [y] yes  [n] no  [a] always" + pal.reset);
         else if (!flash.empty() && now_s() < flash_until) below.push_back(pal.warn + std::string(" ") + flash + pal.reset);
         else below.push_back(status_row());
-        int reserve = (int) box.rows.size() + (int) below.size() + (int) queued.size() + 1;
+        auto chips = render_chip_rows(pending, cols - 1, pal);
+        for (auto & e : attach_errs) chips.push_back(pal.err + std::string("  ! ") + truncate_width(one_line(e), cols - 8) + pal.reset);
+        if (vision_hint()) chips.push_back(pal.warn + std::string("  this model cannot see images; Judas will use OCR text") + pal.reset);
+        int reserve = (int) box.rows.size() + (int) below.size() + (int) queued.size() + (int) chips.size() + 1 + panel_n;
         auto live = stream.live(spin, turn_start > 0 ? now_s() - turn_start : 0);
         int room = std::max(1, rows - reserve - 1);
         if ((int) live.size() > room) live.erase(live.begin(), live.end() - room);
         for (auto & l : live) rowsv.push_back(l);
-        for (auto & q : queued) rowsv.push_back(pal.dim + std::string("  queued: ") + truncate_width(one_line(q), cols - 14) + pal.reset);
+        for (auto & q : queued) rowsv.push_back(pal.dim + std::string("  queued: ") + truncate_width(one_line(q.text.empty() ? "(attachments)" : q.text), cols - 14) + pal.reset);
+        for (auto & c : chips) rowsv.push_back(c);
         int base = (int) rowsv.size();
         for (auto & r : box.rows) rowsv.push_back(r);
         for (auto & r : below) rowsv.push_back(r);
@@ -345,7 +397,159 @@ struct App {
         f += "\033[?25h\033[?2026l";
         region_cursor_row = cur_row;
         region_rows = (int) rowsv.size();
+        last_cursor_col = box.cursor_col;
+        last_paint = tnow;
         out(f);
+    }
+
+    // ---- companions -----------------------------------------------------------------------------------------
+    bool mascot_visible() const {
+        return mascot_on && comp.ready() && cols >= 100 && rows >= 30 && comp.panel_width() * 2 <= cols;
+    }
+    // Redraw only the sprite rows (the top of the live area) and put the cursor back: no flicker, no full repaint.
+    void repaint_sprites() {
+        if (!mascot_visible() || panel_n == 0 || region_cursor_row < panel_n - 1) return;
+        double t = now_s();
+        auto prow = comp.render(t, stream.running(), pal.dim, pal.reset);
+        if ((int) prow.size() != panel_n) return;
+        int col = std::max(0, cols - 1 - comp.panel_width()) + 1;
+        std::string f = "\033[?2026h\033[?25l";
+        if (region_cursor_row > 0) f += "\033[" + std::to_string(region_cursor_row) + "A";
+        for (int i = 0; i < panel_n; i++) {
+            f += "\033[" + std::to_string(col) + "G" + prow[i];
+            if (i + 1 < panel_n) f += "\033[B";
+        }
+        int delta = region_cursor_row - (panel_n - 1);
+        if (delta > 0) f += "\033[" + std::to_string(delta) + "B";
+        else if (delta < 0) f += "\033[" + std::to_string(-delta) + "A";
+        f += "\r";
+        if (last_cursor_col > 0) f += "\033[" + std::to_string(last_cursor_col) + "C";
+        f += "\033[?25h\033[?2026l";
+        sprite_next = t + comp.frame_seconds(t, stream.running());
+        out(f);
+    }
+
+    bool vision_hint() {
+        json st = state();
+        if (!st.contains("vision") || !st["vision"].is_boolean() || st["vision"].get<bool>()) return false;
+        for (auto & a : pending) if (a.kind == "image") return true;
+        return false;
+    }
+
+    void load_companions() {
+        auto r = api.get("/sprites.json");
+        if (r.status != 200 || !comp.load(r.body)) return;  // no companions: nothing to show
+        auto st = api.get("/api/state");
+        bool def = true;
+        if (st.status == 200 && st.body.contains("ui") && st.body["ui"].is_object()) def = st.body["ui"].value("mascot", true);
+        mascot_on = def;
+    }
+
+    // ---- attachments ----------------------------------------------------------------------------------------
+    void add_uploaded(const Reply & r, const std::string & name) {
+        if (r.status != 200 || jstr(r.body, "id").empty()) {
+            attach_errs.push_back(name + ": " + (r.status == 501 ? "not available on the host (grim missing?)" : err_text(r)));
+            comp.error(now_s());
+            return;
+        }
+        PendingAttachment a;
+        a.id = jstr(r.body, "id");
+        a.name = jstr(r.body, "name").empty() ? name : jstr(r.body, "name");
+        a.kind = jstr(r.body, "kind");
+        a.bytes = r.body.value("bytes", 0LL);
+        a.text_chars = r.body.value("text_chars", 0LL);
+        pending.push_back(a);
+    }
+
+    void upload_bytes(const std::string & name, const std::string & data, const std::string & mime) {
+        if (data.empty()) { attach_errs.push_back(name + ": empty"); return; }
+        set_flash("uploading " + name + " (" + human_bytes((long long) data.size()) + ")...", 60);
+        repaint();
+        auto r = api.post_raw("/api/attachments?name=" + url_encode(name), data, mime, 180);
+        flash.clear();
+        add_uploaded(r, name);
+    }
+
+    void attach_file(const std::string & path) {
+        std::error_code ec;
+        auto sz = fs::file_size(path, ec);
+        std::string name = fs::path(path).filename().string();
+        if (ec) { attach_errs.push_back(name + ": cannot read"); return; }
+        if (sz > (256u << 20)) { attach_errs.push_back(name + ": larger than 256 MB"); return; }
+        std::ifstream f(path, std::ios::binary);
+        if (!f) { attach_errs.push_back(name + ": cannot read"); return; }
+        std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        upload_bytes(name, data, guess_mime(name));
+    }
+
+    void attach_paths(const std::vector<std::string> & paths) {
+        attach_errs.clear();
+        for (auto & p : paths) attach_file(p);
+    }
+
+    void do_attach(const std::string & arg) {
+        attach_errs.clear();
+        if (arg.empty()) { say("usage: /attach <path> [more paths]   (quote paths with spaces)", 'w'); return; }
+        std::vector<std::string> missing;
+        auto paths = parse_attach_args(arg, cwd, &missing);
+        for (auto & m : missing) attach_errs.push_back(m + ": no such file");
+        for (auto & p : paths) attach_file(p);
+    }
+
+    void do_screenshot(const std::string & arg) {
+        attach_errs.clear();
+        bool region = arg == "region";
+        if (!arg.empty() && !region) { say("usage: /screenshot [region]", 'w'); return; }
+        set_flash(region ? "pick an area on the screen..." : "taking a screenshot...", 120);
+        repaint();
+        auto r = api.post_raw("/api/screenshot", json{{"region", region}}.dump(), "application/json", region ? 180 : 30);
+        flash.clear();
+        add_uploaded(r, "screenshot");
+    }
+
+    void do_paste_clipboard() {
+        attach_errs.clear();
+        std::string types = run_capture("timeout 3 wl-paste --list-types 2>/dev/null", 65536);
+        if (types.empty()) { attach_errs.push_back("clipboard is empty, or wl-paste is not installed"); return; }
+        std::string img, txt;
+        size_t pos = 0;
+        while (pos < types.size()) {
+            size_t nl = types.find('\n', pos);
+            std::string t = types.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+            pos = nl == std::string::npos ? types.size() : nl + 1;
+            if (t.rfind("image/", 0) == 0 && (img.empty() || t == "image/png")) img = t;
+            if (txt.empty() && (t.rfind("text/plain", 0) == 0 || t == "UTF8_STRING" || t == "STRING")) txt = t;
+        }
+        if (!img.empty()) {
+            std::string data = run_capture("timeout 10 wl-paste --type " + sh_quote(img) + " 2>/dev/null");
+            std::string ext = img.substr(6);
+            if (ext == "jpeg") ext = "jpg";
+            if (ext.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos) ext = "png";
+            upload_bytes("clipboard." + ext, data, img);
+        } else if (!txt.empty()) {
+            std::string data = run_capture("timeout 5 wl-paste --no-newline --type " + sh_quote(txt) + " 2>/dev/null", 4u << 20);
+            if (data.empty()) { attach_errs.push_back("clipboard text is empty"); return; }
+            handle_paste(data);
+        } else {
+            attach_errs.push_back("the clipboard holds nothing attachable (" + truncate_width(one_line(types), 60) + ")");
+        }
+    }
+
+    void do_detach(const std::string & arg) {
+        attach_errs.clear();
+        if (pending.empty()) { say("no pending attachments"); return; }
+        if (arg.empty()) { pending.clear(); say("removed all pending attachments"); return; }
+        int n = std::atoi(arg.c_str());
+        if (n < 1 || n > (int) pending.size()) { say("/detach N: N is 1 to " + std::to_string(pending.size()), 'w'); return; }
+        say("removed " + pending[n - 1].name);
+        pending.erase(pending.begin() + (n - 1));
+    }
+
+    // A bracketed paste: file paths (a dropped file) become attachments, anything else goes into the input.
+    void handle_paste(const std::string & text) {
+        auto paths = detect_paths(text, cwd);
+        if (!paths.empty()) { attach_paths(paths); return; }
+        ed.paste(text);
     }
 
     void say(const std::string & s, char level = 'd') { stream.note(s, level); }
@@ -414,16 +618,18 @@ struct App {
         return true;
     }
 
-    void send_text(const std::string & shown, const std::string & full) {
+    bool send_text(const std::string & shown, const std::string & full, const std::vector<std::string> & ids = {},
+                   const std::vector<std::string> & chips = {}) {
         if (stream.running()) {
-            queued.push_back(full);
-            return;
+            queued.push_back({full, ids, chips});
+            return true;
         }
         json body = {{"content", full}, {"cwd", cwd}, {"mode", mode}};
+        if (!ids.empty()) body["attachments"] = ids;
         auto r = api.call("POST", "/api/sessions/" + (sid.empty() ? std::string("new") : sid) + "/messages", body.dump());
-        if (r.status != 200) { say("send failed: " + err_text(r), 'e'); return; }
+        if (r.status != 200) { say("send failed: " + err_text(r), 'e'); comp.error(now_s()); return false; }
         std::string got = r.body["session"].is_string() ? r.body["session"].get<std::string>() : jstr(r.body["session"], "id");
-        stream.user_message(shown);
+        stream.user_message(shown, chips);
         stream.set_running(true);
         turn_start = now_s();
         if (sid.empty() || sid != got) {
@@ -431,6 +637,7 @@ struct App {
             stop_follow();
             start_follow(-1);
         }
+        return true;
     }
 
     // ---- commands -------------------------------------------------------------------------------------------
@@ -443,6 +650,9 @@ struct App {
         say("  Up/Down history   Ctrl+A/E line start/end   Ctrl+K/U kill to end/start   Ctrl+W delete word");
         say("  Esc interrupt   Ctrl+C cancel turn (twice to quit)   Ctrl+L redraw   Ctrl+O show thinking and full tool output");
         say("  ! cmd runs a shell command locally   @path completes files   Tab completes the menu");
+        say("Attachments: /attach path, /screenshot [region], /paste (clipboard), /detach [n]; dropping a file into the terminal attaches it.");
+        say("  Pending attachments show above the input and are sent with the next message (the text may be empty).");
+        say("Companions: /mascot toggles the pixel companions (terminals at least 100 columns by 30 rows).");
         say("Select and copy with the mouse as usual; /copy copies the last reply (OSC 52, wl-copy as fallback).");
     }
 
@@ -636,18 +846,49 @@ struct App {
             if (p.arg.empty()) { say("usage: /memory <query>", 'w'); return; }
             memory_search(p.arg);
         } else if (n == "learn") send_text("/learn" + (p.arg.empty() ? "" : " " + p.arg), build_learn_prompt(p.arg));
-        else if (n == "quit") quit = true;
+        else if (n == "attach") do_attach(p.arg);
+        else if (n == "screenshot") do_screenshot(p.arg);
+        else if (n == "paste") do_paste_clipboard();
+        else if (n == "detach") do_detach(p.arg);
+        else if (n == "mascot") {
+            if (!comp.ready()) { say("no companions available (the daemon did not serve /sprites.json)", 'w'); return; }
+            mascot_on = !mascot_on;
+            say(mascot_on ? (mascot_visible() ? "companions on" : "companions on (they show in terminals of at least 100 columns by 30 rows)") : "companions off");
+        } else if (n == "quit") quit = true;
     }
 
     void submit() {
         std::string visible = ed.text, full = ed.expanded();
+        // typed or dropped input that is exactly file paths attaches them
+        {
+            auto paths = detect_paths(full, cwd);
+            if (!paths.empty()) { ed.clear(); attach_paths(paths); return; }
+        }
         Parsed p = parse_input(visible);
-        if (p.kind == Parsed::Empty) return;
+        if (p.kind == Parsed::Empty) {
+            if (pending.empty() || visible.find_first_not_of(" \t\r\n") != std::string::npos) return;
+            ed.clear();
+            send_with_pending("", "");
+            return;
+        }
         hist.add(visible.size() > 4000 ? visible : full.size() < 20000 ? full : visible);
         ed.clear();
         if (p.kind == Parsed::Slash) run_slash(p);
         else if (p.kind == Parsed::Shell) run_shell(p.arg);
-        else send_text(visible, full);
+        else send_with_pending(visible, full);
+    }
+
+    void send_with_pending(const std::string & visible, const std::string & full) {
+        attach_errs.clear();
+        std::vector<std::string> ids, chips;
+        for (auto & a : pending) {
+            ids.push_back(a.id);
+            chips.push_back(a.kind == "image" ? std::string("\xF0\x9F\x96\xBC ") + a.name
+                                              : std::string("\xF0\x9F\x93\x8E ") + a.name + " (" + a.kind + ", " + std::to_string(a.text_chars) + " chars)");
+        }
+        auto keep = pending;
+        pending.clear();
+        if (!send_text(visible, full, ids, chips)) pending = keep;
     }
 
     // ---- keys -----------------------------------------------------------------------------------------------
@@ -729,7 +970,7 @@ struct App {
         }
         switch (k.type) {
             case Key::Paste:
-                if (!picking) ed.paste(k.text);
+                if (!picking) handle_paste(k.text);
                 break;
             case Key::Char:
                 if (picking) break;
@@ -807,12 +1048,12 @@ struct App {
         std::deque<json> evs;
         { std::lock_guard<std::mutex> lk(net->mu); evs.swap(net->events); }
         bool was = stream.running();
-        for (auto & e : evs) stream.on_event(e);
+        for (auto & e : evs) { comp.on_event(e, now_s()); stream.on_event(e); }
         if (!was && stream.running()) turn_start = now_s();
         if (was && !stream.running() && !queued.empty()) {
-            std::string next = queued.front();
+            Queued next = queued.front();
             queued.erase(queued.begin());
-            send_text(next, next);
+            send_text(next.text, next.text, next.ids, next.chips);
         }
     }
 
@@ -842,6 +1083,7 @@ struct App {
         }
         stream.commit({"", pal.accent + pal.bold + "Judas" + pal.reset + pal.dim + "  " + jstr(api.get("/health").body, "model") + "  " + cwd + pal.reset,
                        pal.dim + std::string("/help for commands, ! for a shell, Esc to interrupt, Ctrl+C twice to quit") + pal.reset});
+        load_companions();
         std::thread poller(poll_thread, net, cfg.server.port);
         std::string target = opts.session;
         if (target.empty() && opts.resume_last) {
@@ -853,7 +1095,9 @@ struct App {
 
         double next_tick = 0;
         while (!quit && !g_term) {
-            int timeout = dec.pending() ? 40 : (stream.running() ? 100 : 1000);
+            int base_timeout = dec.pending() ? 40 : (stream.running() ? 100 : 1000);
+            int timeout = base_timeout;
+            if (mascot_visible()) timeout = std::min(timeout, std::max(10, (int) ((sprite_next - now_s()) * 1000)));
             pollfd pf[2] = {{STDIN_FILENO, POLLIN, 0}, {wake_r, POLLIN, 0}};
             int pr = poll(pf, 2, timeout);
             bool dirty = false;
@@ -877,8 +1121,9 @@ struct App {
             double t = now_s();
             if (stream.running() && t >= next_tick) { spin++; next_tick = t + 0.12; dirty = true; }
             if (!flash.empty() && t >= flash_until) { flash.clear(); dirty = true; }
-            if (pr == 0) dirty = true;
+            if (pr == 0 && t - last_paint >= base_timeout / 1000.0 - 0.02) dirty = true;
             if (dirty && !quit) repaint();
+            else if (!quit && mascot_visible() && t >= sprite_next) repaint_sprites();
         }
         // leave: clear the live area, say how to come back
         net->quit = true;

@@ -18,9 +18,9 @@ find_package(SQLite3 REQUIRED)
 # llama.cpp: libllama + libllama-common (chat templates, tool-call parsing, sampling) and its vendored headers
 add_library(llama_deps INTERFACE)
 target_include_directories(llama_deps INTERFACE
-    ${LLAMA_DIR}/include ${LLAMA_DIR}/ggml/include ${LLAMA_DIR}/common ${LLAMA_DIR}/vendor)
+    ${LLAMA_DIR}/include ${LLAMA_DIR}/ggml/include ${LLAMA_DIR}/common ${LLAMA_DIR}/vendor ${LLAMA_DIR}/tools/mtmd)
 target_link_directories(llama_deps INTERFACE ${LLAMA_LIB_DIR})
-target_link_libraries(llama_deps INTERFACE llama-common llama ggml ggml-base Threads::Threads)
+target_link_libraries(llama_deps INTERFACE llama-common mtmd llama ggml ggml-base Threads::Threads)
 
 # cpp-httplib: libllama-common already exports it (built with OpenSSL). Use that copy with the SAME defines;
 # a second copy with other defines breaks the class layouts at runtime (Release crash, 2026-10-13).

@@ -42,7 +42,9 @@ public:
     bool verbose() const { return verbose_; }
     void reset();                                   // new or switched session: drop all state
 
-    void user_message(const std::string & text);    // commits the "> text" block and ends the previous reply
+    // Commits the "> text" block and ends the previous reply. Attachment markers in `text` are collapsed to chips;
+    // `chips` are extra chip lines (attachments sent with this message), shown dim.
+    void user_message(const std::string & text, const std::vector<std::string> & chips = {});
     void on_event(const judas::json & ev);          // one SSE frame
     // Stored messages of a session (GET /api/sessions/<id> messages + agents) rendered as scrollback.
     // Messages with id > max_id are skipped (a turn in progress is replayed from events instead); max_id < 0 = all.

@@ -24,6 +24,7 @@
 
 #include "cpp-httplib/httplib.h"
 #include "agent/autoresume.h"
+#include "attach/attach.h"
 #include "channels/channels.h"
 #include "core/json.h"
 #include "core/skin.h"
@@ -195,6 +196,7 @@ struct Server::Impl {
     AgentManager & agents;
     Store & store;
     Journal & journal;
+    AttachmentStore attachments;
     std::vector<std::unique_ptr<httplib::Server>> servers;
     std::atomic<bool> stopping{false};
     std::thread scheduler;
@@ -442,7 +444,7 @@ struct Server::Impl {
     }
 
     Impl(const Config & c, Engine & e, AgentManager & a, Store & s, Journal & j)
-        : cfg(c), engine(e), agents(a), store(s), journal(j) {
+        : cfg(c), engine(e), agents(a), store(s), journal(j), attachments(c) {
         std::vector<std::string> binds = {cfg.server.bind};
         for (auto & b : cfg.server.extra_binds) binds.push_back(b);
         bind_addrs = binds;
@@ -790,7 +792,7 @@ void Server::Impl::cors_headers(const httplib::Request & req, httplib::Response 
 
 void Server::Impl::setup(httplib::Server & svr) {
     svr.new_task_queue = [] { return new httplib::ThreadPool(32, http_max_threads()); };
-    svr.set_payload_max_length(64u * 1024 * 1024);
+    svr.set_payload_max_length(std::max<size_t>(64u * 1024 * 1024, (size_t) cfg.attachments.max_bytes + (4u << 20)));
 
     // There is no auth, so the browser is the threat model: a page on another site must not be able to drive
     // the API. Host must name this machine (DNS rebinding), cross-origin writes need a listed origin (a plain
@@ -846,6 +848,8 @@ void Server::Impl::setup(httplib::Server & svr) {
             ss.push_back({{"id", s.id}, {"title", s.title}, {"updated_ms", s.updated_ms}});
         j["sessions"] = ss;
         j["version"] = version();
+        j["vision"] = engine.vision();
+        j["ui"] = {{"mascot", cfg.ui.mascot}};
         send_json(res, j);
     };
     svr.Get("/state", state_handler);
@@ -949,16 +953,33 @@ void Server::Impl::setup(httplib::Server & svr) {
     });
     svr.Post(R"(/api/sessions/([^/]+)/messages)", [this](const httplib::Request & req, httplib::Response & res) {
         json b = json::parse(req.body, nullptr, false);
-        if (!b.is_object() || !b.contains("content") || !b["content"].is_string())
+        if (!b.is_object()) return send_json(res, error_json("body needs content", "invalid_request_error"), 400);
+        // Attachments: ids from POST /api/attachments. Their message_block text is appended to the content.
+        std::vector<Attachment> atts;
+        if (b.contains("attachments")) {
+            if (!b["attachments"].is_array()) return send_json(res, error_json("attachments must be an array of ids", "invalid_request_error"), 400);
+            for (auto & v : b["attachments"]) {
+                auto a = v.is_string() ? attachments.get(v.get<std::string>()) : std::nullopt;
+                if (!a) return send_json(res, error_json("unknown attachment " + (v.is_string() ? v.get<std::string>() : v.dump()), "invalid_request_error"), 400);
+                atts.push_back(*a);
+            }
+        }
+        if (!b.contains("content") && !atts.empty()) b["content"] = "";
+        if (!b.contains("content") || !b["content"].is_string())
             return send_json(res, error_json("body needs content", "invalid_request_error"), 400);
+        std::string content = b["content"];
+        std::string typed = content;
+        if (content.empty() && atts.empty())
+            return send_json(res, error_json("body needs content", "invalid_request_error"), 400);
+        for (auto & a : atts) content += std::string(content.empty() ? "" : "\n\n") + attachments.message_block(a);
         std::string id = req.matches[1];
         std::string cwd = b.value("cwd", "");
         std::string mode = b.contains("mode") && b["mode"].is_string() ? b["mode"].get<std::string>() : "";
         if (!mode.empty() && !valid_mode(mode))
             return send_json(res, error_json("mode must be chat, cowork or code", "invalid_request_error"), 400);
         if (id == "new") {
-            std::string text = b["content"];
-            std::string title = text.substr(0, 60);
+            std::string title = typed.substr(0, 60);
+            if (typed.empty() && !atts.empty()) title = atts[0].name;
             for (auto & c : title) if (c == '\n') c = ' ';
             if (cwd.empty()) cwd = std::filesystem::current_path().string();   // store the effective folder
             id = store.create_session(title, cwd, engine.model_name(), mode.empty() ? "chat" : mode).id;
@@ -972,8 +993,69 @@ void Server::Impl::setup(httplib::Server & svr) {
         } else {
             return send_json(res, error_json("no such session", "not_found"), 404);
         }
-        std::string sid = agents.submit(id, b["content"], cwd);
+        std::string sid = agents.submit(id, content, cwd);
         send_json(res, {{"session", sid}});
+    });
+    // Attachments. Upload: raw body with ?name=, or multipart/form-data with field `file`.
+    svr.Post("/api/attachments", [this](const httplib::Request & req, httplib::Response & res) {
+        std::string bytes, name = req.get_param_value("name"), mime;
+        if (req.is_multipart_form_data()) {
+            if (!req.form.has_file("file")) return send_json(res, error_json("multipart body needs a file field named 'file'", "invalid_request_error"), 400);
+            auto f = req.form.get_file("file");
+            bytes = f.content;
+            if (name.empty()) name = f.filename;
+            mime = f.content_type;
+        } else {
+            bytes = req.body;
+            mime = req.get_header_value("Content-Type");
+            if (name.empty()) name = req.get_header_value("X-File-Name");
+        }
+        if (bytes.empty()) return send_json(res, error_json("empty upload", "invalid_request_error"), 400);
+        if ((long long) bytes.size() > cfg.attachments.max_bytes)
+            return send_json(res, error_json("upload is larger than attachments.max_bytes (" + std::to_string(cfg.attachments.max_bytes) + ")", "invalid_request_error"), 413);
+        try {
+            send_json(res, attachment_json(attachments.ingest(bytes, name, mime)));
+        } catch (const std::exception & e) {
+            send_json(res, error_json(e.what(), "server_error"), 500);
+        }
+    });
+    svr.Get(R"(/api/attachments/([^/]+))", [this](const httplib::Request & req, httplib::Response & res) {
+        auto a = attachments.get(req.matches[1]);
+        if (!a) return send_json(res, error_json("no such attachment", "not_found"), 404);
+        if (req.get_param_value("meta") == "1") return send_json(res, attachment_json(*a));
+        std::string bytes = attachments.read_bytes(a->id);
+        // Inline only types a browser cannot run script from; anything else (html, svg, xml) is served as text.
+        std::string mime = a->mime;
+        static const char * safe[] = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "application/pdf"};
+        bool ok = false;
+        for (auto s : safe) if (mime == s) ok = true;
+        if (!ok) mime = "text/plain; charset=utf-8";
+        std::string fname = a->name;
+        for (auto & c : fname) if (c == '"' || c == '\\' || (unsigned char) c < 0x20) c = '_';
+        res.set_header("Cache-Control", "public, max-age=31536000, immutable");
+        res.set_header("X-Content-Type-Options", "nosniff");
+        res.set_header("Content-Disposition", "inline; filename=\"" + fname + "\"");
+        res.set_content(bytes, mime);
+    });
+    // Screenshot of the host screen (grim; region with slurp), ingested as an image attachment.
+    svr.Post("/api/screenshot", [this](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object()) return send_json(res, error_json("bad json", "invalid_request_error"), 400);
+        bool region = b.value("region", false);
+        std::string err;
+        std::string png = capture_screenshot(region, err);
+        if (png.empty()) {
+            if (err == "no-grim") return send_json(res, error_json("grim is not installed on the host", "not_implemented"), 501);
+            return send_json(res, error_json(err, err == "cancelled" ? "invalid_request_error" : "server_error"), err == "cancelled" ? 400 : 500);
+        }
+        char stamp[32];
+        std::time_t t = std::time(nullptr);
+        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&t));
+        try {
+            send_json(res, attachment_json(attachments.ingest(png, std::string("screenshot-") + stamp + ".png", "image/png")));
+        } catch (const std::exception & e) {
+            send_json(res, error_json(e.what(), "server_error"), 500);
+        }
     });
     // Learn: rewrite the request into the shared /learn prompt and start it as a normal turn. A missing
     // session creates one, so the TUI and web chat keep their usual turn and event handling.

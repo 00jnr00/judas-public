@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Judas</title>
 <link rel="stylesheet" href="/skin.css" id="skin-link">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+<div id="drop-overlay" class="drop-overlay" hidden><div>Drop to attach</div></div>
 <div id="banner" class="banner" hidden>The Judas daemon is not running. Start it with <code>judas serve</code>.</div>
 <header class="top">
   <div class="brand"><span class="coin" aria-hidden="true">Ag</span><span class="brand-name">JUDAS</span><span class="brand-sub">the betrayer harness</span></div>
@@ -86,8 +88,26 @@
         <div class="work-body">
           <div class="conv">
             <div id="log" class="log"></div>
+            <div id="companion-dock" class="companion-dock">
+              <div id="companion" class="companion" hidden aria-hidden="true">
+                <div id="comp-bubble" class="comp-bubble" hidden></div>
+                <canvas id="comp-canvas" class="comp-canvas" width="16" height="16"></canvas>
+              </div>
+            </div>
             <form id="composer" class="composer" autocomplete="off">
+              <div id="att-chips" class="att-chips" hidden></div>
+              <div id="att-hint" class="att-hint small" role="status" hidden></div>
               <div class="comp-row">
+                <div class="comp-tools">
+                  <button type="button" id="attach" class="btn icon" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2"/></svg></button>
+                  <div class="menu-wrap">
+                    <button type="button" id="shot" class="btn icon" title="Add a screenshot" aria-label="Add a screenshot" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="12" cy="12" r="3"/></svg></button>
+                    <div id="shot-menu" class="pop-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" id="shot-display">Capture a screen or window</button>
+                      <button type="button" role="menuitem" id="shot-host">Screenshot this computer</button>
+                    </div>
+                  </div>
+                </div>
                 <textarea id="input" rows="2" placeholder="Ask anything. Enter sends, Shift+Enter for a new line." aria-label="Message"></textarea>
                 <div class="comp-btns">
                   <button type="submit" id="send" class="btn primary">Send</button>
@@ -95,6 +115,7 @@
                   <button type="button" id="sched" class="btn" hidden title="Turn this prompt into a saved task">Schedule this</button>
                 </div>
               </div>
+              <input type="file" id="file" multiple hidden>
             </form>
           </div>
           <aside class="side" id="side">
@@ -187,6 +208,9 @@
         <h3>Theme</h3>
         <p class="dim">Click a theme to try it right now. The choice is saved in this browser only, for now (not on the server). Themes also restyle the terminal UI.</p>
         <div id="skins" class="skins"></div>
+        <h3>Companion</h3>
+        <p class="dim">A small pixel buddy that reacts while Judas works. It only moves a little and stops when this tab is hidden.</p>
+        <div id="companion-settings" class="companion-settings"></div>
         <h3>Model</h3>
         <p class="dim">Judas loads one model at a time, shared by every agent. Switching saves the choice and restarts the daemon so the new model loads; running chats are interrupted.</p>
         <div id="model-switch" class="model-switch"></div>
@@ -201,6 +225,8 @@
 
   </main>
 </div>
+<script src="/vendor/katex/katex.min.js"></script>
+<script src="/companion.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -1,5 +1,7 @@
 #include "tui/view.h"
 
+#include "tui/attach.h"
+
 #include <algorithm>
 
 namespace judas::tui {
@@ -121,23 +123,22 @@ std::vector<std::string> Stream::replies() const {
     return r;
 }
 
-void Stream::user_message(const std::string & text) {
+void Stream::user_message(const std::string & text, const std::vector<std::string> & chips) {
     flush_text(true);
     flush_reasoning();
     end_reply();
     out_.push_back("");
     bool first = true;
-    size_t pos = 0;
-    while (true) {
-        size_t nl = text.find('\n', pos);
-        std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+    auto emit = [&](const std::string & line, const std::string & color) {
         for (auto & r : wrap(line, width_ - 2)) {
-            out_.push_back(pal_.user + (first ? "> " : "  ") + r.text + pal_.reset);
+            out_.push_back(color + (first ? "> " : "  ") + r.text + pal_.reset);
             first = false;
         }
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
-    }
+    };
+    if (!text.empty())
+        for (auto & dl : collapse_attachments(text)) emit(dl.text, dl.chip ? pal_.dim : pal_.user);
+    for (auto & c : chips) emit(c, pal_.dim);
+    if (first) out_.push_back(pal_.user + std::string("> ") + pal_.reset);
     out_.push_back("");
 }
 

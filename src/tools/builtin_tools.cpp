@@ -741,6 +741,13 @@ json bln(const char * d) { return {{"type", "boolean"}, {"description", d}}; }
 
 }  // namespace
 
+std::string check_read_path(const ToolContext & ctx, const std::string & path, std::string & resolved) {
+    fs::path p;
+    std::string d = read_denied(ctx, path, p);
+    resolved = p.string();
+    return d;
+}
+
 std::string check_write_path(const ToolContext & ctx, const std::string & path, std::string & resolved) {
     fs::path p = resolve_path(ctx, path);
     resolved = p.string();

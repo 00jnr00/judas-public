@@ -14,6 +14,8 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <cctype>
+#include <filesystem>
 #include <list>
 #include <mutex>
 #include <stdexcept>
@@ -25,6 +27,8 @@
 #include "common.h"
 #include "ggml-backend.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include "sampling.h"
 
 namespace judas {
@@ -77,6 +81,75 @@ ggml_type kv_ggml_type(const std::string & t) {
     return GGML_TYPE_Q8_0;
 }
 
+// ---- base64 and image sniffing (vision) ----
+
+std::string b64_encode(const std::string & in) {
+    static const char * tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        unsigned v = ((unsigned char) in[i] << 16) | ((unsigned char) in[i + 1] << 8) | (unsigned char) in[i + 2];
+        out += tbl[v >> 18];
+        out += tbl[(v >> 12) & 63];
+        out += tbl[(v >> 6) & 63];
+        out += tbl[v & 63];
+    }
+    if (i + 1 == in.size()) {
+        unsigned v = (unsigned char) in[i] << 16;
+        out += tbl[v >> 18];
+        out += tbl[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == in.size()) {
+        unsigned v = ((unsigned char) in[i] << 16) | ((unsigned char) in[i + 1] << 8);
+        out += tbl[v >> 18];
+        out += tbl[(v >> 12) & 63];
+        out += tbl[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+
+// Lenient: skips whitespace and stops at padding; any other stray character yields false.
+bool b64_decode(const std::string & in, std::string & out) {
+    out.clear();
+    unsigned acc = 0;
+    int bits = 0;
+    for (char ch : in) {
+        int v;
+        if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') v = ch - 'a' + 26;
+        else if (ch >= '0' && ch <= '9') v = ch - '0' + 52;
+        else if (ch == '+' || ch == '-') v = 62;
+        else if (ch == '/' || ch == '_') v = 63;
+        else if (ch == '=') break;
+        else if (std::isspace((unsigned char) ch)) continue;
+        else return false;
+        acc = (acc << 6) | (unsigned) v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += (char) ((acc >> bits) & 0xff);
+        }
+    }
+    return true;
+}
+
+const char * sniff_image_mime(const std::string & d) {
+    if (d.compare(0, 8, "\x89PNG\r\n\x1a\n") == 0) return "image/png";
+    if (d.size() >= 3 && (unsigned char) d[0] == 0xff && (unsigned char) d[1] == 0xd8) return "image/jpeg";
+    if (d.compare(0, 4, "GIF8") == 0) return "image/gif";
+    if (d.size() >= 12 && d.compare(0, 4, "RIFF") == 0 && d.compare(8, 4, "WEBP") == 0) return "image/webp";
+    if (d.compare(0, 2, "BM") == 0) return "image/bmp";
+    return "image/png";
+}
+
+uint32_t fnv1a(const std::string & s) {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : s) h = (h ^ c) * 16777619u;
+    return h;
+}
+
 size_t common_prefix(const std::vector<llama_token> & a, const std::vector<llama_token> & b) {
     size_t n = std::min(a.size(), b.size()), i = 0;
     while (i < n && a[i] == b[i]) i++;
@@ -91,6 +164,16 @@ struct Request {
     const std::atomic<bool> * cancel = nullptr;
 
     std::vector<llama_token> prompt;
+    // Images (vision): each is one span of prompt, filled with unique negative placeholder tokens so that a
+    // token index is a llama position everywhere. The scheduler never batches a span; it evaluates the chunk
+    // through mtmd instead (the placeholders only enter the sequence's token list afterwards).
+    struct Media {
+        size_t start = 0, n_pos = 0;
+        const mtmd_input_chunk * chunk = nullptr;
+    };
+    std::vector<Media> media;
+    std::unique_ptr<mtmd_input_chunks, void (*)(mtmd_input_chunks *)> chunks{nullptr, mtmd_input_chunks_free};
+    size_t kv_extra = 0;                 // KV cells the images need beyond their positions (M-RoPE uses fewer positions)
     size_t prompt_base = 0;              // rendered prompt length; after a preemption prompt = base + generated
     size_t boundary = 0;                 // end of the shared prefix (system prompt) worth snapshotting
     common_chat_parser_params parser;
@@ -200,7 +283,44 @@ public:
         }
         tmpls_ = common_chat_templates_init(model_, tmpl_override);
         path_ = path;
+        init_vision(path);
         thread_ = std::thread([this] { loop(); });
+    }
+
+    // Projector for image input. A missing or broken projector only turns vision off.
+    void init_vision(const std::string & model_path) {
+        if (mcfg_.mmproj == "none") return;
+        std::string proj;
+        if (mcfg_.mmproj.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            for (const auto & e : fs::directory_iterator(fs::path(model_path).parent_path(), ec)) {
+                std::string n = e.path().filename().string();
+                for (auto & c : n) c = (char) std::tolower((unsigned char) c);
+                if (n.rfind("mmproj", 0) == 0 && n.size() > 5 && n.compare(n.size() - 5, 5, ".gguf") == 0) {
+                    proj = e.path().string();
+                    break;
+                }
+            }
+            if (proj.empty()) return;
+        } else {
+            proj = expand_home(mcfg_.mmproj);
+        }
+        if (!getenv("JUDAS_DEBUG"))
+            mtmd_helper_log_set(
+                [](ggml_log_level level, const char * text, void *) {
+                    if (level >= GGML_LOG_LEVEL_ERROR) fputs(text, stderr);
+                },
+                nullptr);
+        auto mp = mtmd_context_params_default();
+        mp.use_gpu = mcfg_.mmproj_gpu;
+        mp.n_threads = mcfg_.threads;
+        if (mcfg_.image_max_tokens > 0) mp.image_max_tokens = mcfg_.image_max_tokens;
+        mp.print_timings = false;
+        mp.warmup = false;
+        mp.flash_attn_type = mcfg_.flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        mctx_ = mtmd_init_from_file(proj.c_str(), model_, mp);
+        if (!mctx_) fprintf(stderr, "judas: could not load vision projector %s, images are off\n", proj.c_str());
     }
 
     ~LlamaEngine() override {
@@ -211,11 +331,14 @@ public:
         cv_.notify_all();
         if (thread_.joinable()) thread_.join();
         llama_batch_free(batch_);
+        if (mctx_) mtmd_free(mctx_);
         llama_free(ctx_);
         llama_model_free(model_);
     }
 
     std::string model_name() const override { return cfg_.engine.model; }
+
+    bool vision() const override { return mctx_ && mtmd_support_vision(mctx_); }
 
     int count_tokens(const std::string & text) const override {
         int n = -llama_tokenize(vocab_, text.c_str(), text.size(), nullptr, 0, false, true);
@@ -299,8 +422,22 @@ private:
         // Judas injects mid-conversation system notes (the plan, skills, a compaction summary, clm nudges), so
         // demote any non-leading system message to a user message with a [system] marker, keeping its guidance.
         bool seen_nonsystem = false;
+        bool use_media = false;
+        std::vector<const std::string *> images;   // in marker order
+        if (vision())
+            for (const auto & m : r.req.messages)
+                if (!m.images.empty()) use_media = true;
         for (const auto & m : r.req.messages) {
             common_chat_msg c = to_common(m);
+            if (use_media && !m.images.empty()) {
+                std::string marks;
+                for (const auto & img : m.images) {
+                    marks += mtmd_default_marker();
+                    marks += "\n";
+                    images.push_back(&img);
+                }
+                c.content = marks + c.content;
+            }
             if (c.role == "system" && seen_nonsystem) {
                 c.role = "user";
                 c.content = "[system] " + c.content;
@@ -322,7 +459,17 @@ private:
         for (const auto & [k, v] : mcfg_.template_kwargs) in.chat_template_kwargs[k] = json(v).dump();
         auto params = common_chat_templates_apply(tmpls_.get(), in);
 
-        r.prompt = tokenize(params.prompt);
+        if (use_media) {
+            std::string err = tokenize_media(r, params.prompt, images);
+            if (!err.empty()) {
+                r.result.finish_reason = "error";
+                r.result.error = err;
+                r.finished = true;
+                return;
+            }
+        } else {
+            r.prompt = tokenize(params.prompt);
+        }
         r.parser = common_chat_parser_params(params);
         r.parser.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
         r.parser.parse_tool_calls = !r.req.tools.empty();
@@ -368,7 +515,7 @@ private:
         r.borrowing = ctx.borrow;
 
         r.prompt_base = r.prompt.size();
-        if (!kv_.can_ever_fit((int) r.prompt.size())) {
+        if (!kv_.can_ever_fit((int) (r.prompt.size() + r.kv_extra))) {
             r.result.finish_reason = "error";
             r.result.error = "prompt is " + std::to_string(r.prompt.size()) + " tokens, larger than the whole KV pool (ctx_total " +
                              std::to_string(kv_.total()) + "); shorten the conversation or raise ctx_total";
@@ -386,6 +533,77 @@ private:
         r.smpl = common_sampler_init(model_, sp);
         r.max_tokens = ctx_generation_cap((int) r.prompt.size(), r.ctx_limit, r.req.sampling.max_tokens,
                                           cfg_.engine.max_tokens);
+    }
+
+    // Tokenize a prompt that holds image markers through mtmd. Text chunks keep their tokens; every image chunk
+    // becomes n_pos placeholder tokens (negative, unique per image content and offset, so prefix matching never
+    // confuses two images). Returns an error text, empty on success.
+    std::string tokenize_media(Request & r, const std::string & text, const std::vector<const std::string *> & images) {
+        std::vector<mtmd_bitmap *> bitmaps;
+        auto free_bitmaps = [&] {
+            for (auto * b : bitmaps) mtmd_bitmap_free(b);
+        };
+        for (size_t i = 0; i < images.size(); i++) {
+            auto w = mtmd_helper_bitmap_init_from_buf(mctx_, (const unsigned char *) images[i]->data(), images[i]->size(),
+                                                      false, mtmd_helper_init_opt_default());
+            if (w.video_ctx) mtmd_helper_video_free(w.video_ctx);
+            if (!w.bitmap) {
+                free_bitmaps();
+                return "could not read image " + std::to_string(i + 1);
+            }
+            bitmaps.push_back(w.bitmap);
+        }
+        r.chunks.reset(mtmd_input_chunks_init());
+        mtmd_input_text it;
+        it.text = text.c_str();
+        it.text_len = text.size();
+        it.add_special = llama_vocab_get_add_bos(vocab_);
+        it.parse_special = true;
+        int32_t rc = mtmd_tokenize(mctx_, r.chunks.get(), &it, bitmaps.data(), bitmaps.size());
+        free_bitmaps();
+        if (rc != 0) return "image tokenization failed (rc " + std::to_string(rc) + ")";
+        size_t n = mtmd_input_chunks_size(r.chunks.get());
+        r.prompt.clear();
+        r.media.clear();
+        r.kv_extra = 0;
+        bool last_text = false;
+        for (size_t c = 0; c < n; c++) {
+            const mtmd_input_chunk * ch = mtmd_input_chunks_get(r.chunks.get(), c);
+            auto type = mtmd_input_chunk_get_type(ch);
+            if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                size_t nt = 0;
+                const llama_token * t = mtmd_input_chunk_get_tokens_text(ch, &nt);
+                r.prompt.insert(r.prompt.end(), t, t + nt);
+                last_text = nt > 0;
+            } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                size_t np = (size_t) std::max<llama_pos>(1, mtmd_input_chunk_get_n_pos(ch));
+                const char * id = mtmd_input_chunk_get_id(ch);
+                uint32_t h = fnv1a(id ? id : std::to_string(c));
+                r.media.push_back({r.prompt.size(), np, ch});
+                for (size_t i = 0; i < np; i++)
+                    r.prompt.push_back((llama_token) (0x80000000u | ((h + (uint32_t) i * 2654435761u) & 0x7fffffffu)));
+                r.kv_extra += mtmd_input_chunk_get_n_tokens(ch) > np ? mtmd_input_chunk_get_n_tokens(ch) - np : 0;
+                last_text = false;
+            } else {
+                return "unsupported media in the prompt";
+            }
+        }
+        if (!last_text) return "the prompt ends with an image; the chat template must add text after it";
+        return "";
+    }
+
+    // The image span of r that starts at `pos`, or null.
+    static const Request::Media * media_at(const Request & r, size_t pos) {
+        for (const auto & m : r.media)
+            if (m.start == pos) return &m;
+        return nullptr;
+    }
+
+    // Move pos to the start of the image span that strictly contains it (no change if it is outside every span).
+    static size_t outside_media(const Request & r, size_t pos) {
+        for (const auto & m : r.media)
+            if (pos > m.start && pos < m.start + m.n_pos) return m.start;
+        return pos;
     }
 
     std::vector<llama_token> tokenize(const std::string & s) const {
@@ -503,6 +721,7 @@ private:
 
         size_t reuse = best_reuse;
         if (reuse >= r.prompt.size()) reuse = r.prompt.size() - 1;  // must decode at least one token for logits
+        reuse = outside_media(r, reuse);                            // an image is all or nothing
         if (snap) {
             llama_memory_seq_rm(mem_, best, -1, -1);
             if (llama_state_seq_set_data(ctx_, snap->data.data(), snap->data.size(), best) > 0) {
@@ -532,7 +751,7 @@ private:
             }
             q.truncate(reuse);
         }
-        if (hybrid_ && r.prompt.size() > reuse + 64) r.ckpt_at = r.prompt.size() - 32;
+        if (hybrid_ && r.prompt.size() > reuse + 64) r.ckpt_at = outside_media(r, r.prompt.size() - 32);
         q.owner = &r;
         q.last_used = ++clock_;
         r.seq = best;
@@ -811,6 +1030,7 @@ private:
         gen.clear();
         pre = nullptr;
         pre_end = 0;
+        media_pending_ = nullptr;
         std::vector<PrefillCandidate> waiting;
         for (auto * r : active) {
             if (r->phase == Phase::generate) {
@@ -833,9 +1053,16 @@ private:
                     pre = r;
                     break;
                 }
+        if (pre && media_at(*pre, pre->n_done)) {
+            // The next piece is an image: nothing of it goes in this batch, step() evaluates it after the decode.
+            media_pending_ = pre;
+            pre = nullptr;
+        }
         if (pre) {
             size_t chunk = (size_t) std::max(1, pick.chunk);
             pre_end = std::min(pre->prompt.size(), pre->n_done + chunk);
+            for (const auto & m : pre->media)
+                if (m.start > pre->n_done && m.start < pre_end) pre_end = m.start;  // stop in front of an image
             if (pre->boundary > pre->n_done && pre->boundary < pre_end) pre_end = pre->boundary;  // stop at the snapshot point
             if (pre->ckpt_at > pre->n_done && pre->ckpt_at < pre_end) pre_end = pre->ckpt_at;     // and at the checkpoint
             for (size_t j = pre->n_done; j < pre_end; j++)
@@ -914,7 +1141,7 @@ private:
         ++step_clock_;
         build_batch(active, gen, pre, pre_end);
 
-        int rc = llama_decode(ctx_, batch_);
+        int rc = batch_.n_tokens > 0 ? llama_decode(ctx_, batch_) : 0;  // an image-only step has no batch
         std::unique_lock lk(mu_);
         if (rc == 1) rc = recover_kv(lk, active, gen, pre, pre_end);
         if (rc != 0) {
@@ -955,6 +1182,42 @@ private:
         lk.unlock();
         deliver(touched);
         flush_completed();
+        // An image is evaluated after the text work of this step (and after its callbacks), and without mu_:
+        // the vision encoder can take a while and state() must stay answerable. Only this thread moves phases.
+        if (media_pending_ && media_pending_->phase == Phase::prefill) eval_media(*media_pending_);
+        media_pending_ = nullptr;
+    }
+
+    // Encode and decode the image chunk that starts at r.n_done into r's sequence.
+    void eval_media(Request & r) {
+        const Request::Media * m = media_at(r, r.n_done);
+        if (!m) return;
+        if (r.cancel && r.cancel->load()) {
+            std::lock_guard lk(mu_);
+            finish(r, "cancelled");
+            flush_completed();
+            return;
+        }
+        llama_pos new_past = (llama_pos) r.n_done;
+        int32_t rc = mtmd_helper_eval_chunk_single(mctx_, ctx_, m->chunk, (llama_pos) r.n_done, r.seq, mcfg_.batch, false,
+                                                   &new_past);
+        {
+            std::lock_guard lk(mu_);
+            auto & q = seqs_[r.seq];
+            if (rc != 0) {
+                // drop whatever of the image reached the KV; a sequence that cannot be cut is cleared
+                if (!llama_memory_seq_rm(mem_, r.seq, (llama_pos) q.tokens.size(), -1)) drop_cache(r.seq);
+                finish(r, "error", "image did not fit or failed to encode (rc " + std::to_string(rc) + ")");
+            } else if (m->start + m->n_pos >= r.prompt.size()) {
+                finish(r, "error", "the prompt ends with an image");
+            } else {
+                q.tokens.insert(q.tokens.end(), r.prompt.begin() + m->start, r.prompt.begin() + m->start + m->n_pos);
+                r.n_done = m->start + m->n_pos;
+                r.t_chunk = clk::now();
+                if (r.cancel && r.cancel->load()) finish(r, "cancelled");
+            }
+        }
+        flush_completed();
     }
 
     const Config & cfg_;
@@ -966,6 +1229,8 @@ private:
     llama_memory_t mem_ = nullptr;
     common_chat_templates_ptr tmpls_;
     llama_batch batch_{};
+    mtmd_context * mctx_ = nullptr;
+    Request * media_pending_ = nullptr;  // prefill request whose next piece is an image (set by build_batch)
     std::string path_;
     bool hybrid_ = false;
     int n_seq_ = 1;
@@ -1032,6 +1297,14 @@ public:
         json msgs = json::array();
         for (const auto & m : req.messages) {
             json j = {{"role", m.role}, {"content", m.content}};
+            if (!m.images.empty() && m_.vision) {
+                json parts = json::array();
+                parts.push_back({{"type", "text"}, {"text", m.content}});
+                for (const auto & img : m.images)
+                    parts.push_back({{"type", "image_url"},
+                                     {"image_url", {{"url", std::string("data:") + sniff_image_mime(img) + ";base64," + b64_encode(img)}}}});
+                j["content"] = parts;
+            }
             if (!m.tool_calls.empty()) {
                 json tcs = json::array();
                 for (const auto & tc : m.tool_calls)
@@ -1159,6 +1432,7 @@ public:
     }
     std::string model_name() const override { return name_; }
     int count_tokens(const std::string & text) const override { return (int) (text.size() / 3.5) + 1; }
+    bool vision() const override { return m_.vision; }
 
 private:
     ModelConfig m_;
@@ -1189,8 +1463,22 @@ std::vector<ChatMessage> messages_from_oai(const json & messages) {
             if (ct.is_string()) {
                 c.content = ct.get<std::string>();
             } else if (ct.is_array()) {
-                for (const auto & part : ct)
-                    if (part.value("type", "") == "text") c.content += part.value("text", "");
+                for (const auto & part : ct) {
+                    std::string type = part.value("type", "");
+                    if (type == "text") {
+                        c.content += part.value("text", "");
+                    } else if (type == "image_url" && part.contains("image_url")) {
+                        // only inline data: URLs are used; the engine never fetches a remote URL
+                        const auto & iu = part["image_url"];
+                        std::string url = iu.is_string() ? iu.get<std::string>() : iu.value("url", "");
+                        size_t comma = url.find(',');
+                        if (url.rfind("data:", 0) == 0 && comma != std::string::npos &&
+                            url.substr(0, comma).find(";base64") != std::string::npos) {
+                            std::string bytes;
+                            if (b64_decode(url.substr(comma + 1), bytes) && !bytes.empty()) c.images.push_back(std::move(bytes));
+                        }
+                    }
+                }
             }
         }
         c.reasoning = m.value("reasoning_content", "");

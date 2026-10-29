@@ -4,7 +4,8 @@ Base: `http://127.0.0.1:<port>` (default 8079). CORS `*` on `/v1` and `/api`.
 
 ## State and skins
 - `GET /health` -> `{status:"ok", model}`
-- `GET /state` -> EngineState: `{model, model_path, loaded, hybrid, max_agents, active, queued, ctx_total, ctx_used, vram_used_mib, vram_total_mib, gen_tok_s, seqs:[{id, tag, phase:"idle|prefill|generate", tokens, priority}], total_prompt_tokens, total_completion_tokens, requests, sessions:[{id,title,updated_ms}], version}`
+- `GET /state` -> EngineState: `{model, model_path, loaded, hybrid, max_agents, active, queued, ctx_total, ctx_used, vram_used_mib, vram_total_mib, gen_tok_s, seqs:[{id, tag, phase:"idle|prefill|generate", tokens, priority}], total_prompt_tokens, total_completion_tokens, requests, sessions:[{id,title,updated_ms}], version, vision:bool, ui:{mascot:bool}}`
+  (`vision` = the loaded model takes images; `ui.mascot` = the companions setting from `[ui]`)
 - `GET /skin.css` -> the active skin as `:root{--bg;--surface;--surface2;--border;--title;--accent;--text;--dim;--ok;--warn;--error;--thinking;--added;--removed;--accent-soft}`. `?name=<skin>` for a specific one.
 - `GET /api/skins` -> `{skins:[{name,label,dark,colors:{...}}]}`
 
@@ -20,6 +21,16 @@ Base: `http://127.0.0.1:<port>` (default 8079). CORS `*` on `/v1` and `/api`.
 - `POST /api/sessions/<id>/cancel` -> `{ok:true}`
 - `POST /api/sessions/<id>/recover` -> `{ok,restored,removed,conflicts,irreversible,error}` (undo every change this chat made; cancels it first)
 - `POST /api/sessions/<id>/seal` -> `{ok:true, freed_bytes}` (keep the current result, drop this chat's undo history to save disk, end the chat)
+
+## Attachments and vision
+Files users attach in the chat bar (web and TUI). Storage and extraction rules: [ATTACHMENTS.md](ATTACHMENTS.md).
+- `POST /api/attachments?name=<filename>` body = raw file bytes (`Content-Type` = the file's mime type). Also accepts `multipart/form-data` with a field `file`. Returns the attachment:
+  `{"id","name","mime","kind","bytes","text_chars","truncated","pages":[ids],"url":"/api/attachments/ID"}`. `kind` is `image`, `pdf`, `doc` or `text`; `pages` lists the page images of a scanned PDF. 400 on an empty body, 413 over `attachments.max_bytes`. The same bytes always get the same `id`.
+- `GET /api/attachments/<id>` -> the original bytes, inline, with their mime type. `GET /api/attachments/<id>?meta=1` -> the attachment JSON above.
+- `POST /api/sessions/<id|new>/messages` takes an optional `"attachments": ["ID", ...]` next to `content`. The server appends each attachment's block to the message text, so `content` may be empty when attachments are present. A new session sent with empty text is titled after the first attachment's name.
+- `POST /api/screenshot` `{"region": false}` -> takes a screenshot of the host screen with `grim` (`region: true` lets you select an area with `slurp`), stores it as an attachment and returns its attachment JSON. 501 when `grim` is not installed.
+
+Images reach a model only when it has vision (`vision` in `/api/state`). Without it, the image is described by its OCR text instead.
 
 ## Learning
 - `POST /api/learn` `{request?, session?, cwd?}` -> `{session}`. Rewrites the request to the same `[/learn]` prompt the TUI uses and starts it as a normal turn; watch the session's events like any other turn. An empty or missing `request` reviews the current conversation. With `session` it appends to that session; without it a new chat session is created. `cwd` is the working folder for a new session and the fallback for an existing one. Typing `/learn <request>` in the TUI or the web chat does the same.
@@ -47,6 +58,7 @@ Base: `http://127.0.0.1:<port>` (default 8079). CORS `*` on `/v1` and `/api`.
 
 ## OpenAI-compatible
 - `GET /v1/models`, `POST /v1/chat/completions` (stream + non-stream, tools, `chat_template_kwargs.enable_thinking`).
+- Message `content` may be an array of parts: `{"type":"text","text":...}` and `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`. Only `data:` URLs are read; `http(s)` URLs are ignored. Images need a model with vision (see `vision` in `/api/state`).
 
 ## Scheduled tasks (the Tasks surface)
 - `GET /api/tasks` -> `{tasks:[{id,title,prompt,cwd,kind,run_at_ms,interval_s,next_ms,enabled,last_session,last_run_ms,created_ms}]}`

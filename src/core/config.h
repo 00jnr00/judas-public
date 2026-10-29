@@ -37,6 +37,13 @@ struct ModelConfig {
     // (e.g. a big model served on http://127.0.0.1:8081). unit = systemd user unit started on load and stopped when a
     // local model loads (so it frees the GPU). remote_model = model name sent upstream.
     std::string url, unit, remote_model;
+    // Vision. mmproj: projector GGUF path; "" = auto (an mmproj*.gguf next to the model), "none" = off.
+    // mmproj_gpu: put the projector on the GPU (faster encode, costs VRAM). image_max_tokens caps tokens per image.
+    // vision: for a remote model, whether the upstream accepts image_url parts.
+    std::string mmproj;
+    bool mmproj_gpu = false;
+    int image_max_tokens = 1024;
+    bool vision = false;
 };
 
 struct EngineConfig {
@@ -239,8 +246,21 @@ struct McpConfig {
     std::vector<std::string> ignored_project_servers;  // [mcp.servers.*] found in ./.judas/config.toml and dropped
 };
 
+struct AttachmentsConfig {
+    long long max_bytes = 50LL << 20;   // largest upload accepted
+    int max_text_chars = 120000;        // extracted document text kept per attachment (head kept, rest cut)
+    int pdf_max_pages = 6;              // scanned PDFs (no text layer): pages rendered to images for vision
+    bool ocr = true;                    // run tesseract on images when it is installed (text for non-vision models)
+};
+
+struct UiConfig {
+    bool mascot = true;                 // pixel-art companions in the TUI and web UI
+};
+
 struct Config {
     EngineConfig engine;
+    AttachmentsConfig attachments;
+    UiConfig ui;
     std::map<std::string, ModelConfig> models;
     ServerConfig server;
     PermissionsConfig permissions;

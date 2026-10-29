@@ -56,21 +56,97 @@
     s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
     return s;
   }
-  function md(text) {
-    var parts = String(text).split(/```/);
+  /* Rich messages: attachment chips, image thumbnails and math are lifted out into tokens before the markdown
+     pass (so it cannot mangle them) and put back afterwards. Token chars: \u0001 inline, \u0002 own-line block. */
+  var ATT_RE = /<attachment\s+([^>]*)>\n?([\s\S]*?)\n?<\/attachment>/g;
+  var IMG_RE = /\[\[image:([0-9a-fA-F]+)\|([^\]\n]*)\]\]/g;
+  var TOK_RE = /[\u0001\u0002](\d+)[\u0001\u0002]/g;
+  var attBodies = {};          // attachment id -> extracted text, copied into a chip when it is first opened
+  function attrs(str) { var o = {}; str.replace(/(\w+)="([^"]*)"/g, function (m, k, v) { o[k] = v; return ""; }); return o; }
+  function kindLabel(k) { return { image: "IMG", pdf: "PDF", doc: "DOC", text: "TXT" }[k] || "FILE"; }
+  function stash(store, html, block) {
+    store.push(html);
+    var c = block ? "\u0002" : "\u0001";
+    return c + (store.length - 1) + c;
+  }
+  function imgHTML(id, name) {
+    var u = "/api/attachments/" + encodeURIComponent(id);
+    return '<button type="button" class="att-thumb" data-full="' + esc(u) + '" data-name="' + esc(name) + '" title="' + esc(name) + '">' +
+      '<img loading="lazy" decoding="async" alt="' + esc(name) + '" src="' + esc(u) + '"></button>';
+  }
+  function chipHTML(name, id, kind, body) {
+    attBodies[id] = body;
+    var n = body.length;
+    var meta = kind || "file";
+    meta += n ? " · " + n.toLocaleString() + " characters" : " · no text read";
+    return '<details class="att-chip" data-id="' + esc(id) + '"><summary><span class="att-ico">' + esc(kindLabel(kind)) + '</span>' +
+      '<span class="att-name">' + esc(name) + '</span><span class="att-meta">' + esc(meta) + '</span></summary><pre class="att-body"></pre></details>';
+  }
+  function extractAtt(text, store) {
+    text = text.replace(ATT_RE, function (m, a, body) {
+      var o = attrs(a);
+      return "\n" + stash(store, chipHTML(o.name || "file", o.id || ("n" + store.length), o.kind || "text", body), true) + "\n";
+    });
+    return text.replace(IMG_RE, function (m, id, name) { return "\n" + stash(store, imgHTML(id, name), true) + "\n"; });
+  }
+  function stripAtt(text) { return String(text).replace(ATT_RE, "").replace(IMG_RE, "").trim(); }
+
+  var mathCache = {};
+  function mathTok(store, m, tex, display) {
+    var key = (display ? "D" : "I") + tex;
+    var html = mathCache[key];
+    if (html == null) {
+      try { html = window.katex.renderToString(tex.trim(), { displayMode: display, throwOnError: false, output: "htmlAndMathml" }); }
+      catch (e) { return m; }
+      if (Object.keys(mathCache).length > 400) mathCache = {};
+      mathCache[key] = html;
+    }
+    return stash(store, html, display);
+  }
+  function mathPiece(s, store) {
+    s = s.replace(/\$\$([\s\S]+?)\$\$/g, function (m, t) { return mathTok(store, m, t, true); });
+    s = s.replace(/\\\[([\s\S]+?)\\\]/g, function (m, t) { return mathTok(store, m, t, true); });
+    s = s.replace(/\\\(([\s\S]+?)\\\)/g, function (m, t) { return mathTok(store, m, t, false); });
+    // single dollars: no space just inside, not followed by a digit or letter, so "$5 and $10" stays money
+    s = s.replace(/(^|[^\\$\w])\$([^\s$](?:[^$\n]*[^\s$\\])?)\$(?![\w])/g, function (m, pre, t) {
+      var r = mathTok(store, m.slice(pre.length), t, false);
+      return pre + r;
+    });
+    return s;
+  }
+  function mathText(seg, store) {
+    if (!window.katex || (seg.indexOf("$") < 0 && seg.indexOf("\\") < 0)) return seg;
+    var pieces = seg.split(/(`[^`\n]*`)/);   // inline code is never math
+    for (var i = 0; i < pieces.length; i += 2) pieces[i] = mathPiece(pieces[i], store);
+    return pieces.join("");
+  }
+  function fillTokens(html, store) {
+    return html.replace(TOK_RE, function (m, i) { return store[+i] != null ? store[+i] : ""; });
+  }
+
+  /* rich=true is for chat messages: tokens, math and a Copy button on each code block */
+  function md(text, rich) {
+    var store = [];
+    text = String(text);
+    if (rich) text = extractAtt(text, store);
+    var parts = text.split(/```/);
     var out = "";
     for (var i = 0; i < parts.length; i++) {
       if (i % 2 === 1) {
         var body = parts[i].replace(/^[^\n]*\n/, function (m) { return /^\s*[\w+-]*\s*\n$/.test(m) ? "" : m; });
-        out += "<pre><code>" + esc(body.replace(/\n$/, "")) + "</code></pre>";
+        out += "<pre>" + (rich ? '<button type="button" class="code-copy">Copy</button>' : "") +
+          "<code>" + esc(body.replace(/\n$/, "")) + "</code></pre>";
         continue;
       }
-      var lines = parts[i].split("\n"), list = null, para = [];
+      var seg = rich ? mathText(parts[i], store) : parts[i];
+      var lines = seg.split("\n"), list = null, para = [];
       var flushPara = function () { if (para.length) { out += "<p>" + para.join("<br>") + "</p>"; para = []; } };
       var flushList = function () { if (list) { out += "</" + list + ">"; list = null; } };
       for (var j = 0; j < lines.length; j++) {
         var ln = lines[j], m;
-        if ((m = /^\s*[-*]\s+(.*)$/.exec(ln))) {
+        if (/^\s*(\u0002\d+\u0002\s*)+$/.test(ln)) {
+          flushPara(); flushList(); out += ln;
+        } else if ((m = /^\s*[-*]\s+(.*)$/.exec(ln))) {
           flushPara(); if (list !== "ul") { flushList(); out += "<ul>"; list = "ul"; }
           out += "<li>" + inline(m[1]) + "</li>";
         } else if ((m = /^\s*\d+[.)]\s+(.*)$/.exec(ln))) {
@@ -84,7 +160,23 @@
       }
       flushPara(); flushList();
     }
-    return out;
+    return rich ? fillTokens(out, store) : out;
+  }
+  /* A user message keeps its line breaks; only the attachment markers become chips and thumbnails. */
+  function userHTML(text) {
+    var store = [], t = extractAtt(String(text), store);
+    var segs = t.split(/([\u0001\u0002]\d+[\u0001\u0002])/), html = "";
+    segs.forEach(function (sg) {
+      if (/^[\u0001\u0002]\d+[\u0001\u0002]$/.test(sg)) { html += fillTokens(sg, store); return; }
+      sg = sg.replace(/^\n+|\n+$/g, "");
+      if (sg.trim()) html += '<div class="utext">' + esc(sg) + "</div>";
+    });
+    return html;
+  }
+  function contentText(c) {
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) return c.map(function (p) { return p && typeof p.text === "string" ? p.text : ""; }).filter(Boolean).join("\n");
+    return c == null ? "" : JSON.stringify(c);
   }
 
   /* ---------- tab info: one source for the screen blurbs and the Guide ---------- */
@@ -200,6 +292,7 @@
   function pollState() {
     getJSON("/state").then(function (s) {
       lastState = s;
+      if (window.JudasCompanion) window.JudasCompanion.setServer(!(s.ui && s.ui.mascot === false));
       var model = s.loaded ? (s.model || "model") : "no model loaded";
       $("#hdr-model").textContent = model + (s.hybrid ? " (hybrid)" : "");
       $("#hdr-model").title = s.model_path || "";
@@ -347,7 +440,47 @@
     cowork: "Describe the job below. The lead agent plans it and may spawn workers; watch them on the agent board.",
     code: "Enter a project folder above, then tell Judas what to read or change. Every edit becomes a snapshot."
   };
-  function showEmpty() { logEl.appendChild(el("div", "empty", EMPTY_HINT[curMode])); }
+  var STARTERS = [
+    { t: "Summarize a document", d: "Attach a PDF or Word file", file: true,
+      p: "Summarize the attached document in plain language. Give me the key points first, then anything I need to act on." },
+    { t: "Explain my homework step by step", d: "Type it or attach a photo", file: false,
+      p: "Explain this homework problem step by step, like a patient tutor. Do not just hand me the answer; help me understand each step.\n\n" },
+    { t: "Solve a math problem from a photo", d: "Snap it, attach it", file: true,
+      p: "Solve the math problem in the attached photo. Show every step and check the answer at the end." },
+    { t: "Proofread my writing", d: "Paste it or attach a file", file: false,
+      p: "Proofread the following. Fix spelling, grammar and clarity, keep my voice, and list what you changed.\n\n" },
+    { t: "Draft an email", d: "Tell me who and why", file: false,
+      p: "Help me write an email. I will tell you who it is to and what I need to say; ask me for anything you are missing, then write the draft.\n\n" },
+    { t: "Make a study guide or flashcards", d: "From notes or a chapter", file: true,
+      p: "Make a study guide and 15 flashcards (question on one side, answer on the other) from the attached material." },
+    { t: "Analyze a spreadsheet", d: "Attach an Excel or CSV file", file: true,
+      p: "Look at the attached spreadsheet. Tell me what it contains, point out anything that looks off, and summarize the main trends." },
+    { t: "Translate something", d: "Any language", file: false,
+      p: "Translate the following into English. Tell me which language it was written in first, and note anything that does not translate cleanly.\n\n" }
+  ];
+  function showEmpty() {
+    var box = el("div", "empty");
+    box.appendChild(el("p", "empty-hint", EMPTY_HINT[curMode]));
+    if (curMode === "chat") {
+      box.classList.add("starter");
+      box.appendChild(el("div", "starter-cap", "Or start with one of these"));
+      var grid = el("div", "starters");
+      STARTERS.forEach(function (st) {
+        var b = el("button", "starter-card"); b.type = "button";
+        b.appendChild(el("b", null, st.t));
+        b.appendChild(el("span", null, st.d));
+        b.onclick = function () {
+          input.value = st.p;
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+          if (st.file) openPicker();
+        };
+        grid.appendChild(b);
+      });
+      box.appendChild(grid);
+    }
+    logEl.appendChild(box);
+  }
   function clearEmpty() { Array.prototype.forEach.call(logEl.querySelectorAll(".empty"), function (n) { n.remove(); }); }
 
   function applyMode(m) {
@@ -592,8 +725,111 @@
   function nearBottom() { return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80; }
   function scrollDown(force) { if (force || nearBottom()) logEl.scrollTop = logEl.scrollHeight; }
   function addNote(text, bad) { var d = el("div", "msg assistant" + (bad ? " err" : ""), text); logEl.appendChild(d); scrollDown(true); return d; }
-  function addUser(text) { lastUserText = text; logEl.appendChild(el("div", "msg user", text)).style.whiteSpace = "pre-wrap"; scrollDown(true); }
-  function addAssistant(text) { var d = el("div", "msg assistant"); d.innerHTML = md(text); logEl.appendChild(d); return d; }
+  function addUser(text) {
+    lastUserText = stripAtt(text) || lastUserText;
+    var d = el("div", "msg user");
+    d.innerHTML = userHTML(text);
+    logEl.appendChild(d); scrollDown(true);
+  }
+  function addAssistant(text) {
+    var d = el("div", "msg assistant");
+    d.innerHTML = md(text, true);
+    decorate(d, text);
+    logEl.appendChild(d);
+    return d;
+  }
+
+  /* ---------- per-answer actions: copy, download as Markdown, read aloud ---------- */
+  var canSpeak = "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function";
+  var speakingEl = null;
+  function decorate(d, raw) {
+    d._raw = raw;
+    var bar = el("div", "msg-actions");
+    [["act-copy", "Copy"], ["act-md", "Download as Markdown"]].concat(canSpeak ? [["act-speak", "Read aloud"]] : []).forEach(function (p) {
+      var b = el("button", "act " + p[0], p[1]); b.type = "button"; bar.appendChild(b);
+    });
+    d.appendChild(bar);
+  }
+  function copyText(text, btn, label) {
+    function done(ok) {
+      if (!btn) return;
+      btn.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(function () { btn.textContent = label; }, 1500);
+    }
+    function legacy() {
+      var t = document.createElement("textarea");
+      t.value = text; t.setAttribute("readonly", ""); t.style.position = "fixed"; t.style.opacity = "0";
+      document.body.appendChild(t); t.select();
+      var ok = false; try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      t.remove(); done(ok);
+    }
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { done(true); }, legacy);
+    else legacy();
+  }
+  function downloadMd(raw) {
+    var title = ($("#chat-title").textContent || "answer").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-").slice(0, 40) || "answer";
+    var name = title + "-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "") + ".md";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([stripAtt(raw) + "\n"], { type: "text/markdown;charset=utf-8" }));
+    a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+  function plainForSpeech(raw) {
+    return stripAtt(raw).replace(/```[\s\S]*?```/g, " (code omitted) ")
+      .replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)/g, " formula ")
+      .replace(/`([^`]*)`/g, "$1").replace(/\*\*/g, "").replace(/^\s*[-*]\s+/gm, "").replace(/^\s*#+\s*/gm, "");
+  }
+  function setSpeaking(d) {
+    if (speakingEl) { var o = speakingEl.querySelector(".act-speak"); if (o) o.textContent = "Read aloud"; }
+    speakingEl = d;
+    if (d) { var n = d.querySelector(".act-speak"); if (n) n.textContent = "Stop reading"; }
+  }
+  function speak(d) {
+    if (!canSpeak) return;
+    var wasThis = speakingEl === d;
+    window.speechSynthesis.cancel(); setSpeaking(null);
+    if (wasThis) return;
+    // long utterances stop early in some browsers, so speak sentence-sized chunks
+    var chunks = plainForSpeech(d._raw || "").match(/[^.!?\n]+[.!?]*\s*|\n+/g) || [];
+    var buf = "", list = [];
+    chunks.forEach(function (c) { if ((buf + c).length > 220 && buf) { list.push(buf); buf = c; } else buf += c; });
+    if (buf.trim()) list.push(buf);
+    if (!list.length) return;
+    setSpeaking(d);
+    list.forEach(function (t, i) {
+      var u = new window.SpeechSynthesisUtterance(t.trim());
+      if (i === list.length - 1) { u.onend = u.onerror = function () { if (speakingEl === d) setSpeaking(null); }; }
+      window.speechSynthesis.speak(u);
+    });
+  }
+  window.addEventListener("beforeunload", function () { if (canSpeak) window.speechSynthesis.cancel(); });
+
+  logEl.addEventListener("click", function (e) {
+    var t = e.target, b;
+    if ((b = t.closest(".code-copy"))) {
+      var code = b.parentNode.querySelector("code");
+      copyText(code ? code.textContent : "", b, "Copy"); return;
+    }
+    if ((b = t.closest(".act"))) {
+      var m = b.closest(".msg.assistant");
+      if (!m) return;
+      if (b.classList.contains("act-copy")) copyText(stripAtt(m._raw || ""), b, "Copy");
+      else if (b.classList.contains("act-md")) downloadMd(m._raw || "");
+      else if (b.classList.contains("act-speak")) speak(m);
+      return;
+    }
+    if ((b = t.closest(".att-thumb"))) openLightbox(b.getAttribute("data-full"), b.getAttribute("data-name"));
+  });
+  // document chips fill their text when first opened (toggle does not bubble, so listen while capturing)
+  logEl.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (!d.classList || !d.classList.contains("att-chip") || !d.open) return;
+    var pre = d.querySelector(".att-body");
+    if (pre && !pre.textContent) {
+      var t = attBodies[d.getAttribute("data-id")];
+      pre.textContent = t ? t : "(no text was read from this file)";
+    }
+  }, true);
   function addThink(text, open) {
     var d = el("details", "think");
     if (open) d.open = true;
@@ -723,11 +959,11 @@
     messages.forEach(function (m) {
       var child = !!(m.agent && childAgents[m.agent]); // workers live on the board, not in the conversation
       var b = m.body || {};
-      if (b.role === "user") { if (!child) addUser(typeof b.content === "string" ? b.content : JSON.stringify(b.content)); return; }
+      if (b.role === "user") { if (!child) addUser(contentText(b.content)); return; }
       if (b.role === "assistant") {
         if (!child) {
           if (b.reasoning_content) addThink(b.reasoning_content, false);
-          if (b.content) addAssistant(typeof b.content === "string" ? b.content : JSON.stringify(b.content));
+          if (b.content) addAssistant(contentText(b.content));
         }
         (b.tool_calls || []).forEach(function (tc) {
           var f = tc.function || {};
@@ -760,7 +996,19 @@
   function setRunning(on) {
     $("#turn-pill").hidden = !on;
     $("#cancel").hidden = !on;
-    $("#send").disabled = on;
+    updateSend();
+    if (!on && window.JudasCompanion) window.JudasCompanion.settle();
+  }
+  function mascot(state, line) { if (window.JudasCompanion) window.JudasCompanion.set(state, line); }
+  function toolLine(name, args) {
+    var n = String(name || "").toLowerCase(), a = typeof args === "string" ? args : JSON.stringify(args || "");
+    if (/\.pdf/i.test(a)) return "Reading your PDF...";
+    if (/image|screenshot/.test(n)) return "Looking at the picture...";
+    if (/search|web|fetch|browse/.test(n)) return "Looking that up...";
+    if (/write|edit|patch|create|append|replace/.test(n)) return "Writing it down...";
+    if (/read|view|open|list|grep|find|glob/.test(n)) return "Reading your files...";
+    if (/run|shell|bash|exec/.test(n)) return "Running a command...";
+    return "Working on it...";
   }
   function isRunning() { return !$("#cancel").hidden; }
 
@@ -854,6 +1102,7 @@
   function beginTurn(task) {
     live.inTurn = true; live.turnAt = Date.now();
     setRunning(true);
+    mascot("think", "On it...");
     clearEmpty();
     if (!live.echoed && task) addUser(task);
     live.echoed = false;
@@ -877,7 +1126,7 @@
         break;
       case "status":
         a = getAgent(ev.agent);
-        if (d.error) { a.status = "failed"; a.last = "error: " + d.error; if (lead) addNote("Error: " + d.error, true); }
+        if (d.error) { a.status = "failed"; a.last = "error: " + d.error; if (lead) { addNote("Error: " + d.error, true); mascot("sad", "Hmm, that broke"); } }
         else if (lead && d.turn_status === "paused") a.status = "paused";
         else if (d.status) a.status = d.status;
         break;
@@ -890,13 +1139,15 @@
           var stick = nearBottom();
           ensureBubble();
           live.bubbleText += d.text || "";
-          live.bubble.innerHTML = md(live.bubbleText);
+          live.bubble.innerHTML = md(live.bubbleText, true);
+          mascot("work", "Writing your answer...");
           if (stick) scrollDown(true);
         }
         break;
       case "reasoning":
         a = getAgent(ev.agent); a.status = "running";
         if (lead) {
+          mascot("think", "Thinking it over...");
           if (!live.think) { live.think = addThink("", false); live.thinkText = ""; live.thinkBody = live.think.lastChild; }
           live.thinkText += d.text || "";
           live.thinkBody.textContent = live.thinkText;
@@ -909,6 +1160,7 @@
         live.calls[d.id] = d.name; live.callArgs[d.id] = d.args;
         if (lead) {
           live.bubble = null; live.think = null;
+          mascot("work", toolLine(d.name, d.args));
           addToolCall(d.name || "tool", d.args); scrollDown();
         }
         break;
@@ -934,6 +1186,10 @@
         a.status = d.status || "done"; if (d.result && !lead) a.last = String(d.result).replace(/\s+/g, " ").slice(0, 200);
         if (lead) {
           setTurnInfo({ status: d.status === "failed" ? "error" : (d.status || "done"), reason: d.reason || "", open_items: turnInfo.open_items });
+          if (d.status === "failed") mascot("sad", "Hmm, that broke");
+          else if (d.status === "killed" || d.status === "cancelled") mascot("idle", "Stopped.");
+          else if (d.status === "paused") mascot("idle", "Paused. Say resume when ready.");
+          else mascot("happy", "Done!");
           renderBoard(); endTurn(); return;
         }
         break;
@@ -967,16 +1223,289 @@
     }, function () { /* leave the live render as is */ });
   }
 
+  /* ---------- attachments: picker, drag and drop, paste, screenshots ---------- */
+  var atts = [];            // composer chips: {key,name,size,kind,state:"up"|"ok"|"err",id,url,pct,err,xhr,chars,pages}
+  var attKey = 0, hintTimer = 0;
+  var fileInput = $("#file");
+  var KINDS = { png: "image", jpg: "image", jpeg: "image", gif: "image", bmp: "image", webp: "image", pdf: "pdf",
+                docx: "doc", xlsx: "doc", pptx: "doc", odt: "doc", ods: "doc", odp: "doc", rtf: "doc", epub: "doc", html: "doc", htm: "doc" };
+  function guessKind(name, mime) {
+    var m = /\.([A-Za-z0-9]+)$/.exec(name || ""), ext = m ? m[1].toLowerCase() : "";
+    if (KINDS[ext]) return KINDS[ext];
+    if (/^image\//.test(mime || "")) return "image";
+    return "text";
+  }
+  function stamp() { return new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").replace(/^(\d{8})/, "$1-"); }
+  function attHint(text, bad) {
+    var h = $("#att-hint");
+    clearTimeout(hintTimer);
+    h.textContent = text || ""; h.hidden = !text; h.classList.toggle("bad", !!bad);
+    if (text && !bad) hintTimer = setTimeout(function () { h.hidden = true; }, 6000);
+  }
+  function uploading() { return atts.some(function (a) { return a.state === "up"; }); }
+  function updateSend() {
+    $("#send").disabled = isRunning() || uploading();
+    $("#send").title = uploading() ? "Wait for the uploads to finish" : "";
+  }
+  function renderAtts() {
+    var box = $("#att-chips");
+    box.textContent = "";
+    box.hidden = !atts.length;
+    atts.forEach(function (a) {
+      var c = el("div", "cchip " + a.state);
+      var th = el("div", "cc-th");
+      if (a.state === "ok" && a.kind === "image") {
+        var im = el("img"); im.alt = ""; im.src = a.url || ("/api/attachments/" + a.id); th.appendChild(im);
+      } else th.appendChild(el("span", "att-ico", kindLabel(a.kind)));
+      c.appendChild(th);
+      var info = el("div", "cc-info");
+      info.appendChild(el("b", "cc-name", a.name));
+      var meta = kindLabel(a.kind) + " · " + humanBytes(a.size || 0);
+      if (a.state === "up") meta = "Uploading " + Math.round((a.pct || 0) * 100) + "%";
+      else if (a.state === "err") meta = a.err || "Upload failed";
+      else {
+        if (a.pages && a.pages.length) meta += " · " + a.pages.length + " pages read as images";
+        else if (a.kind === "image" && lastState && lastState.vision === false) meta += " · this model cannot see images, text only";
+        else if (a.kind !== "image" && !a.chars) meta += " · no text found";
+      }
+      var mt = el("small", "cc-meta", meta); a.metaEl = mt;
+      info.appendChild(mt);
+      if (a.state === "up") { var pb = el("span", "cc-bar"); var pf = el("i"); pf.style.width = Math.round((a.pct || 0) * 100) + "%"; pb.appendChild(pf); a.barEl = pf; info.appendChild(pb); }
+      c.appendChild(info);
+      var x = el("button", "cc-x", "×"); x.type = "button"; x.title = "Remove " + a.name; x.setAttribute("aria-label", "Remove " + a.name);
+      x.onclick = function () { removeAtt(a); };
+      c.appendChild(x);
+      box.appendChild(c);
+    });
+    updateSend();
+  }
+  function removeAtt(a) {
+    if (a.xhr && a.state === "up") { try { a.xhr.abort(); } catch (e) { /* ignore */ } }
+    atts = atts.filter(function (x) { return x !== a; });
+    if (!atts.some(function (x) { return x.state === "err"; })) attHint("");
+    renderAtts();
+  }
+  function applyResult(a, r) {
+    a.state = "ok"; a.id = r.id; a.kind = r.kind || a.kind; a.url = r.url || ("/api/attachments/" + r.id);
+    a.chars = r.text_chars || 0; a.pages = r.pages || []; a.size = r.bytes || a.size; a.name = r.name || a.name;
+  }
+  function addFiles(list) {
+    var files = Array.prototype.slice.call(list || []);
+    if (!files.length) return;
+    files.forEach(addFile);
+    var k = files[0] ? guessKind(files[0].name, files[0].type) : "file";
+    mascot("work", k === "pdf" ? "Reading your PDF..." : k === "image" ? "Looking at your picture..." : "Reading your file...");
+  }
+  function addFile(file) {
+    var a = { key: ++attKey, name: file.name || "file", size: file.size, kind: guessKind(file.name, file.type), state: "up", pct: 0 };
+    atts.push(a);
+    if (!file.size) { a.state = "err"; a.err = "This file is empty"; renderAtts(); return; }
+    renderAtts();
+    var x = new XMLHttpRequest();
+    a.xhr = x;
+    x.open("POST", "/api/attachments?name=" + encodeURIComponent(a.name));
+    x.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    x.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      a.pct = e.loaded / e.total;
+      if (a.barEl) a.barEl.style.width = Math.round(a.pct * 100) + "%";
+      if (a.metaEl) a.metaEl.textContent = "Uploading " + Math.round(a.pct * 100) + "%";
+    };
+    x.onload = function () {
+      var r = null; try { r = JSON.parse(x.responseText); } catch (e) { /* not json */ }
+      if (x.status >= 200 && x.status < 300 && r && r.id) applyResult(a, r);
+      else {
+        a.state = "err";
+        var je = r && r.error;
+        a.err = x.status === 413 ? "Too big for this server" : ((je && je.message) || (typeof je === "string" ? je : "") || ("Upload failed (" + x.status + ")"));
+      }
+      renderAtts(); afterUploads();
+    };
+    x.onerror = function () { a.state = "err"; a.err = "Could not reach Judas"; renderAtts(); afterUploads(); };
+    x.onabort = function () { /* removed by the user */ };
+    x.send(file);
+  }
+  function afterUploads() {
+    if (uploading()) return;
+    if (atts.some(function (a) { return a.state === "err"; })) mascot("sad", "Hmm, that file did not go through");
+    else if (atts.length) mascot("happy", "Got it!");
+  }
+  function openPicker() { fileInput.click(); }
+  $("#attach").onclick = openPicker;
+  fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
+
+  // drag and drop anywhere on the page
+  var dragDepth = 0, dropEl = $("#drop-overlay");
+  function hasFiles(e) { var t = e.dataTransfer && e.dataTransfer.types; return !!t && Array.prototype.indexOf.call(t, "Files") >= 0; }
+  function workActive() { return $("#screen-work").classList.contains("active"); }
+  document.addEventListener("dragenter", function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth++;
+    if (workActive()) dropEl.hidden = false;
+  });
+  document.addEventListener("dragover", function (e) { if (hasFiles(e)) { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; } });
+  document.addEventListener("dragleave", function (e) {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) dropEl.hidden = true;
+  });
+  document.addEventListener("drop", function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; dropEl.hidden = true;
+    if (workActive()) addFiles(e.dataTransfer.files);
+  });
+
+  // paste: a screenshot or copied file arrives as a file with no text beside it
+  document.addEventListener("paste", function (e) {
+    var cd = e.clipboardData;
+    if (!cd || !workActive()) return;
+    var t = e.target;
+    if (t && t !== input && /^(input|textarea|select)$/i.test(t.tagName || "")) return;
+    var files = [];
+    for (var i = 0; i < (cd.items || []).length; i++) {
+      if (cd.items[i].kind === "file") { var f = cd.items[i].getAsFile(); if (f) files.push(f); }
+    }
+    if (!files.length || cd.getData("text/plain")) return;
+    e.preventDefault();
+    addFiles(files.map(function (f) {
+      if (f.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(f.name)) return f;
+      var ext = ((f.type || "image/png").split("/")[1] || "png").replace("jpeg", "jpg");
+      return new File([f], "pasted-image-" + stamp() + "." + ext, { type: f.type || "image/png" });
+    }));
+  });
+
+  // screenshots: a screen or window picked in the browser, or the whole host screen
+  var shotMenu = $("#shot-menu");
+  function closeShot() { shotMenu.hidden = true; $("#shot").setAttribute("aria-expanded", "false"); }
+  var canDisplay = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  var hostShot = true;
+  function syncShotMenu() {
+    $("#shot-display").hidden = !canDisplay;
+    $("#shot-host").hidden = !hostShot;
+    $("#shot").hidden = !canDisplay && !hostShot;
+  }
+  syncShotMenu();
+  $("#shot").onclick = function () {
+    var open = shotMenu.hidden;
+    shotMenu.hidden = !open;
+    $("#shot").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) { var f = shotMenu.querySelector("button:not([hidden])"); if (f) f.focus(); }
+  };
+  document.addEventListener("click", function (e) { if (!e.target.closest(".menu-wrap")) closeShot(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !shotMenu.hidden) { closeShot(); $("#shot").focus(); } });
+  $("#shot-display").onclick = function () {
+    closeShot();
+    var stream = null;
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }).then(function (st) {
+      stream = st;
+      var v = document.createElement("video");
+      v.muted = true; v.playsInline = true; v.srcObject = st;
+      return v.play().then(function () { return new Promise(function (r) { setTimeout(r, 350); }); }).then(function () {
+        var c = document.createElement("canvas");
+        c.width = v.videoWidth; c.height = v.videoHeight;
+        c.getContext("2d").drawImage(v, 0, 0);
+        return new Promise(function (res, rej) { c.toBlob(function (b) { b ? res(b) : rej(new Error("Could not read the screen")); }, "image/png"); });
+      });
+    }).then(function (blob) {
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      addFiles([new File([blob], "screenshot-" + stamp() + ".png", { type: "image/png" })]);
+    }, function (err) {
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      if (err && (err.name === "NotAllowedError" || err.name === "AbortError")) return; // the user cancelled the picker
+      attHint("Could not capture the screen: " + ((err && err.message) || err), true);
+    });
+  };
+  $("#shot-host").onclick = function () {
+    closeShot();
+    var a = { key: ++attKey, name: "screenshot", size: 0, kind: "image", state: "up", pct: 1 };
+    atts.push(a); renderAtts();
+    fetch("/api/screenshot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region: false }) }).then(function (r) {
+      return r.text().then(function (t) {
+        if (r.status === 501) { hostShot = false; syncShotMenu(); throw new Error("This computer cannot take screenshots (grim is not installed)."); }
+        var j = null; try { j = JSON.parse(t); } catch (e) { /* not json */ }
+        if (!r.ok || !j || !j.id) throw new Error((j && j.error && (j.error.message || j.error)) || ("Screenshot failed (" + r.status + ")"));
+        applyResult(a, j);
+      });
+    }).catch(function (e) {
+      removeAtt(a);
+      attHint(e.message, true);
+    }).then(function () { renderAtts(); afterUploads(); });
+  };
+
+  /* ---------- lightbox ---------- */
+  var lb = null, lbScale = 0, lbFrom = null;
+  function lbApply() {
+    var im = lb.img;
+    if (!lbScale) { im.style.width = ""; im.style.maxWidth = "100%"; im.style.maxHeight = "100%"; lb.stage.classList.remove("zoomed"); }
+    else { im.style.maxWidth = "none"; im.style.maxHeight = "none"; im.style.width = Math.round(im.naturalWidth * lbScale) + "px"; lb.stage.classList.add("zoomed"); }
+  }
+  function lbZoom(f) {
+    var im = lb.img;
+    if (!lbScale) lbScale = im.naturalWidth ? im.clientWidth / im.naturalWidth : 1;
+    lbScale = Math.max(0.1, Math.min(8, lbScale * f));
+    lbApply();
+  }
+  function closeLightbox() {
+    if (!lb || lb.root.hidden) return;
+    lb.root.hidden = true; lb.img.removeAttribute("src");
+    if (lbFrom && lbFrom.focus) lbFrom.focus();
+  }
+  function openLightbox(src, name) {
+    if (!lb) {
+      var root = el("div", "lightbox"); root.setAttribute("role", "dialog"); root.setAttribute("aria-modal", "true"); root.setAttribute("aria-label", "Image preview");
+      var bar = el("div", "lb-bar"), nm = el("span", "lb-name");
+      bar.appendChild(nm);
+      function btn(label, title, fn) { var b = el("button", "btn small", label); b.type = "button"; b.title = title; b.setAttribute("aria-label", title); b.onclick = fn; bar.appendChild(b); return b; }
+      btn("−", "Zoom out", function () { lbZoom(1 / 1.25); });
+      btn("+", "Zoom in", function () { lbZoom(1.25); });
+      btn("Fit", "Fit to window", function () { lbScale = 0; lbApply(); });
+      btn("100%", "Actual size", function () { lbScale = 1; lbApply(); });
+      var close = btn("Close", "Close (Esc)", closeLightbox);
+      var stage = el("div", "lb-stage"), im = el("img");
+      im.alt = "";
+      stage.appendChild(im); root.appendChild(bar); root.appendChild(stage);
+      stage.addEventListener("click", function (e) { if (e.target === stage) closeLightbox(); });
+      im.addEventListener("dblclick", function () { lbScale = lbScale ? 0 : 1; lbApply(); });
+      stage.addEventListener("wheel", function (e) { if (e.ctrlKey || e.metaKey) { e.preventDefault(); lbZoom(e.deltaY < 0 ? 1.1 : 1 / 1.1); } }, { passive: false });
+      document.body.appendChild(root);
+      lb = { root: root, img: im, stage: stage, name: nm, close: close };
+      document.addEventListener("keydown", function (e) {
+        if (lb.root.hidden) return;
+        if (e.key === "Escape") { e.preventDefault(); closeLightbox(); }
+        else if (e.key === "+" || e.key === "=") lbZoom(1.25);
+        else if (e.key === "-") lbZoom(1 / 1.25);
+        else if (e.key === "0") { lbScale = 0; lbApply(); }
+      });
+    }
+    lbFrom = document.activeElement;
+    lbScale = 0; lbApply();
+    lb.name.textContent = name || "";
+    lb.img.alt = name || "";
+    lb.img.src = src;
+    lb.root.hidden = false;
+    lb.close.focus();
+  }
+
   /* ---------- sending ---------- */
   var input = $("#input");
   input.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
   });
   $("#cwd").addEventListener("input", function () { $("#cwd-err").hidden = true; });
+  function attMarkers(list) {
+    return list.map(function (a) {
+      var nm = String(a.name).replace(/["\]|\n]/g, "'");
+      return a.kind === "image" ? "[[image:" + a.id + "|" + nm + "]]"
+        : '<attachment name="' + nm + '" id="' + a.id + '" kind="' + a.kind + '">\n\n</attachment>';
+    }).join("\n");
+  }
   $("#composer").addEventListener("submit", function (e) {
     e.preventDefault();
     var text = input.value.trim();
-    if (!text || isRunning()) return;
+    var ready = atts.filter(function (a) { return a.state === "ok"; });
+    if ((!text && !ready.length) || isRunning() || uploading()) return;
+    if (atts.some(function (a) { return a.state === "err"; })) { attHint("Remove the file that failed (the x on it) to send.", true); return; }
+    attHint("");
     var cwd = $("#cwd").value.trim(), mode = curMode;
     if (mode === "code" && !cwd) { $("#cwd-err").hidden = false; $("#cwd").focus(); return; }
     var body, url;
@@ -986,24 +1515,29 @@
       if (cur.id) body.session = cur.id;
       if (mode !== "chat" && cwd) body.cwd = cwd;
       url = "/api/learn";
+      ready = [];
     } else {
       body = { content: text };
+      if (ready.length) body.attachments = ready.map(function (a) { return a.id; });
       if (mode !== "chat" && cwd) body.cwd = cwd; // Chat sends no folder; the daemon uses its default
       var id = cur.id || "new";
       body.mode = mode; // the server owns the mode; a new session is created with it
       url = "/api/sessions/" + encodeURIComponent(id) + "/messages";
     }
+    var title = (text || (ready[0] && ready[0].name) || "").slice(0, 60);
     clearEmpty();
-    addUser(text);
+    addUser(ready.length ? (text ? text + "\n" : "") + attMarkers(ready) : text);
     if (live) live.echoed = true; // the turn's spawned event must not draw this message a second time
     input.value = "";
+    atts = atts.filter(function (a) { return ready.indexOf(a) < 0; }); renderAtts();
     setRunning(true);
+    mascot("think", "On it...");
     postJSON(url, body).then(function (r) {
       var sid = typeof r.session === "string" ? r.session : ((r.session || {}).id || cur.id); // POST replies with the bare id
       if (!sid) throw new Error("server returned no session");
       var fresh = !cur.id;
       cur.id = sid;
-      cur.session = { id: sid, title: text.slice(0, 60), cwd: cwd, mode: mode };
+      cur.session = { id: sid, title: title, cwd: cwd, mode: mode };
       syncSessionActions();
       if (mode !== "chat" && cwd) pushRecent(cwd);
       $("#chat-title").textContent = cur.session.title;
@@ -1018,7 +1552,9 @@
       if (live) live.echoed = false;
       setRunning(false);
       addNote("Send failed: " + err.message, true);
+      mascot("sad", "Hmm, that broke");
       input.value = text;
+      atts = ready.concat(atts); renderAtts();
     });
   });
   $("#cancel").onclick = function () {
@@ -1916,7 +2452,32 @@
       setTimeout(check, 2000);
     }, function (e) { say("err", "Switch failed: " + ((e && e.message) || e || "no answer from Judas")); });
   }
+  function renderCompanionSettings() {
+    var box = $("#companion-settings"), C = window.JudasCompanion;
+    if (!box) return;
+    box.textContent = "";
+    if (!C) { box.appendChild(el("p", "dim", "The companion is not available.")); return; }
+    var row = el("label", "cs-row");
+    var cb = el("input"); cb.type = "checkbox"; cb.checked = C.isOn();
+    cb.onchange = function () { C.setOn(cb.checked); };
+    row.appendChild(cb); row.appendChild(el("span", null, "Show the companion near the chat bar"));
+    box.appendChild(row);
+    var r2 = el("label", "cs-row");
+    r2.appendChild(el("span", null, "Who:"));
+    var sel = el("select");
+    C.chars().forEach(function (n) {
+      var o = el("option", null, n === "jude" ? "Jude (hooded, with a red glint)" : n === "pip" ? "Pip (a silver coin)" : n);
+      o.value = n; if (n === C.char()) o.selected = true; sel.appendChild(o);
+    });
+    sel.onchange = function () { C.setChar(sel.value); C.set("happy", "Hi!"); };
+    r2.appendChild(sel);
+    box.appendChild(r2);
+    if (!C.serverAllows()) box.appendChild(el("p", "dim small", "Judas is configured to hide the companion (ui.mascot is off), so it stays hidden whatever you pick here."));
+    var pm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (pm) box.appendChild(el("p", "dim small", "Your system asks for reduced motion, so the companion shows a still picture."));
+  }
   function renderSettings() {
+    renderCompanionSettings();
     renderDaemon();
     renderModels();
     getJSON("/api/skins").then(function (r) {
