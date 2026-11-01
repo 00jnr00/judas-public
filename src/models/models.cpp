@@ -93,6 +93,7 @@ std::string canon(const std::string & p) {
 }
 
 // Sum the sizes of every part of a split model; path is part 1.
+
 void count_parts(GgufInfo & m) {
     std::smatch sm;
     std::string file = fs::path(m.path).filename().string();
@@ -213,6 +214,13 @@ std::unique_ptr<httplib::Client> hf_client() {
 
 }  // namespace
 
+bool is_helper_name(const std::string & file_name) {
+    std::string l = lower(fs::path(file_name).filename().string());
+    // MTP: speculative-decoding drafts such as mtp-gemma-4-26B-A4B-it.gguf, mtp-q2_0.gguf, X-mtp-Q8.gguf
+    return l.find("embed") != std::string::npos || l.find("rerank") != std::string::npos || l.rfind("mtp-", 0) == 0 ||
+           l.find("-mtp") != std::string::npos;
+}
+
 std::string human_bytes(uint64_t b) {
     char buf[32];
     if (b >= GiB) std::snprintf(buf, sizeof buf, "%.1f GB", b / (double) GiB);
@@ -251,8 +259,7 @@ GgufInfo gguf_info(const std::string & path) {
     }
     m.projector = m.arch == "clip" || lower(m.label).find("mmproj") != std::string::npos;
     {
-        std::string l = lower(m.label);
-        m.helper = l.find("embed") != std::string::npos || l.find("rerank") != std::string::npos ||
+        m.helper = is_helper_name(m.label) ||
                    (m.arch.size() > 4 && m.arch.compare(m.arch.size() - 4, 4, "-mtp") == 0);
     }
     gguf_free(g);
@@ -335,6 +342,20 @@ uint64_t gpu_vram_total() {
     return best;
 }
 
+uint64_t gpu_vram_free() {
+    uint64_t best_total = 0, free_b = 0;
+    for (int card = 0; card < 8; card++) {
+        std::string d = "/sys/class/drm/card" + std::to_string(card) + "/device/";
+        std::ifstream ft(d + "mem_info_vram_total"), fu(d + "mem_info_vram_used");
+        uint64_t t = 0, u = 0;
+        if ((ft >> t) && (fu >> u) && t > best_total) {
+            best_total = t;
+            free_b = t > u ? t - u : 0;
+        }
+    }
+    return free_b;
+}
+
 std::string fit_verdict(uint64_t model_bytes, uint64_t vram) {
     if (!vram || !model_bytes) return "?";
     uint64_t need = model_bytes + OVERHEAD + GiB / 2;   // plus a small KV pool
@@ -389,7 +410,8 @@ std::string model_block(const std::string & name, const GgufInfo & m, uint64_t v
     o << "\npath = \"" << m.path << "\"\n";
     o << (cpu ? "gpu_layers = 0                # CPU only\n" : "gpu_layers = 99\n");
     if (fit == "too big" && m.experts) {
-        o << "cpu_moe = true               # too big for " << human_bytes(vram) << " of VRAM: experts stay in RAM\n";
+        o << "cpu_moe = \"auto\"              # too big for " << human_bytes(vram)
+          << " of VRAM: experts of the last layers go on the GPU as far as they fit, the rest stay in RAM\n";
     } else if (fit == "too big") {
         o << "# too big for " << human_bytes(vram) << " of VRAM: lower gpu_layers until it loads (slow), or pick a smaller quant\n";
     }

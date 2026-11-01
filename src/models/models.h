@@ -28,6 +28,9 @@ struct GgufInfo {
     std::string config_name;   // [models.<x>] that points at this file, if any
 };
 
+// File names that are loadable but not chat models: embedding, reranker and MTP draft heads.
+bool is_helper_name(const std::string & file_name);
+
 // Read one GGUF header (no tensor data). Works for split files (pass part 1).
 GgufInfo gguf_info(const std::string & path);
 
@@ -40,6 +43,9 @@ std::vector<GgufInfo> scan_models(const Config & cfg, const std::vector<std::str
 
 // Total VRAM of the biggest GPU in bytes (AMD sysfs, else nvidia-smi), 0 when unknown.
 uint64_t gpu_vram_total();
+
+// Free VRAM of the biggest GPU right now (total minus used, AMD sysfs only), 0 when unknown.
+uint64_t gpu_vram_free();
 
 // "fits" | "tight" | "too big" (for offloading the whole model) given the file size and VRAM.
 std::string fit_verdict(uint64_t model_bytes, uint64_t vram);

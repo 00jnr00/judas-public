@@ -25,6 +25,8 @@ struct ToolContext {
     // Asks the user to approve an action (permission mode "suggest", or irreversible actions in "auto-edit").
     // Returns true if approved. Null = deny everything that needs approval.
     std::function<bool(const std::string & what)> approve;
+    // Long tools report progress here (the agent loop turns it into a "swarm" UI event). May be null.
+    std::function<void(const json &)> progress;
 };
 
 struct ToolResult {

@@ -1,0 +1,13 @@
+[Unit]
+Description=Judas swarm instance (small Liquid LFM model on the CPU, :8083) for swarm_map bulk jobs
+After=network.target
+
+[Service]
+EnvironmentFile=-%h/.config/judas/secrets.env
+Type=simple
+ExecStart=%h/.local/bin/judas serve
+Environment=JUDAS_CONFIG=%h/.config/judas/swarm.toml
+Restart=no
+
+[Install]
+WantedBy=default.target

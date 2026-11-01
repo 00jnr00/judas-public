@@ -107,7 +107,8 @@ static bool same(const Config & a, const Config & b) {
            same_hooks(a.hooks.hooks, b.hooks.hooks) && a.context.mode == b.context.mode &&
            a.context.trigger_pct == b.context.trigger_pct && a.context.target_pct == b.context.target_pct &&
            a.context.keep_turns == b.context.keep_turns && a.context.recall == b.context.recall &&
-           a.context.clm_max_edits == b.context.clm_max_edits;
+           a.context.clm_max_edits == b.context.clm_max_edits && a.context.window == b.context.window &&
+           a.context.pin_tokens == b.context.pin_tokens && a.context.pin_total == b.context.pin_total;
 }
 
 static void test_defaults() {
@@ -128,6 +129,7 @@ static void test_defaults() {
     CHECK(f.ctx_per_agent_max == 0);  // borrowing off by default
     CHECK(c.context.mode == "compact" && c.context.trigger_pct == 0.75 && c.context.target_pct == 0.45 &&
           c.context.keep_turns == 3 && c.context.recall && c.context.clm_max_edits == 4);
+    CHECK(c.context.window == "auto" && c.context.pin_tokens == 1200 && c.context.pin_total == 3000);
     CHECK(c.agents.read_streak_nudge == 8 && c.agents.read_streak_force == 14);
     CHECK(!c.agents.auto_resume && c.agents.auto_resume_max == 20 && c.agents.auto_resume_delay_s == 30);
     CHECK(c.prompt.max_memory_tokens == 3000);
@@ -190,6 +192,19 @@ static void test_phase3() {
     setenv("JUDAS_CONFIG", f.c_str(), 1);
     write(f, "[git]\nbogus = 1\n");
     CHECK(load_error(root / "none").find("unknown key git.bogus") != std::string::npos);
+    write(f, "[context]\nwindow = \"fixed\"\npin_tokens = 500\npin_total = 900\n");
+    {
+        Config w = load_config((root / "none").string());
+        CHECK(w.context.window == "fixed" && w.context.pin_tokens == 500 && w.context.pin_total == 900);
+        auto flags = [&](const std::string & what) {
+            for (auto & pr : validate_config(w))
+                if (pr.find(what) != std::string::npos) return true;
+            return false;
+        };
+        CHECK(!flags("context.window"));
+        w.context.window = "sideways";
+        CHECK(flags("context.window"));
+    }
     write(f, "[context]\nbogus = 1\n");
     CHECK(load_error(root / "none").find("unknown key context.bogus") != std::string::npos);
     write(f, "[[hooks.hooks]]\nevent = \"pre-tool\"\ncommand = \"x\"\nwhen = 1\n");
@@ -548,6 +563,32 @@ static void test_validate() {
     CHECK(threw);
 }
 
+static void test_swarm() {
+    clear_env();
+    fs::path home = root / "home-sw";
+    fs::create_directories(home);
+    setenv("HOME", home.c_str(), 1);
+    Config d = load_config(root / "none");
+    CHECK(!d.swarm.enabled && d.swarm.url == "http://127.0.0.1:8083");
+    CHECK(d.swarm.max_parallel == 8 && d.swarm.max_item_chars == 24000);
+    fs::path f = root / "sw.toml";
+    setenv("JUDAS_CONFIG", f.c_str(), 1);
+    write(f, "[swarm]\nenabled = true\nurl = \"http://10.0.0.5:9000\"\nmax_parallel = 4\nmax_item_chars = 8000\n");
+    Config c = load_config(root / "none");
+    CHECK(c.swarm.enabled && c.swarm.url == "http://10.0.0.5:9000" && c.swarm.max_parallel == 4 &&
+          c.swarm.max_item_chars == 8000);
+    write(root / "sw-dump.toml", dump_config(c));
+    setenv("JUDAS_CONFIG", (root / "sw-dump.toml").c_str(), 1);
+    Config c2 = load_config(root / "none");
+    CHECK(c2.swarm.enabled && c2.swarm.max_parallel == 4 && c2.swarm.url == c.swarm.url);
+    Config b = c; b.swarm.max_parallel = 0;
+    CHECK(!validate_config(b).empty());
+    write(f, "[swarm]\nbogus = 1\n");
+    setenv("JUDAS_CONFIG", f.c_str(), 1);
+    CHECK(!load_error(root / "none").empty());
+    clear_env();
+}
+
 int main() {
     root = fs::path(JUDAS_TEST_TMP "/judas-test-config");
     fs::remove_all(root);
@@ -564,6 +605,7 @@ int main() {
     test_validate();
     test_phase3();
     test_phase4();
+    test_swarm();
     std::printf("test_config: done\n");
     TEST_MAIN_END();
 }

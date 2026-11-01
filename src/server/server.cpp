@@ -26,6 +26,7 @@
 #include "agent/autoresume.h"
 #include "attach/attach.h"
 #include "channels/channels.h"
+#include "core/cpu_topology.h"
 #include "core/json.h"
 #include "core/skin.h"
 #include "engine/engine.h"
@@ -38,6 +39,10 @@
 #include "skills/skills.h"
 #include "skills/usage.h"
 #include "tools/memory_tools.h"
+#include "tools/swarm_tools.h"
+#ifdef JUDAS_MACH12
+#include "mach12/mach12.h"
+#endif
 #include <linux/close_range.h>
 #include <unistd.h>
 
@@ -75,7 +80,7 @@ json session_json(const SessionRow & s) {
             {"created_ms", s.created_ms}, {"updated_ms", s.updated_ms}};
 }
 
-bool valid_mode(const std::string & m) { return m == "chat" || m == "cowork" || m == "code"; }
+bool valid_mode(const std::string & m) { return m == "chat" || m == "cowork" || m == "code" || m == "learn" || m == "swarm"; }
 
 // Max worker threads per listener (JUDAS_HTTP_THREADS, default 512, floor 32). Every open SSE stream holds
 // one thread for as long as the page is open (two per browser tab: its session stream and the global feed),
@@ -224,6 +229,10 @@ struct Server::Impl {
     std::map<std::string, long long> msg_floor;   // session -> last stored message id when its turn began
     std::mutex hb_mu;
     HeartbeatReport last_hb;
+#ifdef JUDAS_MACH12
+    std::unique_ptr<mach12::Planner> planner;   // built-in day planner, served under /mach12/
+    std::atomic<bool> mach12_on{false};          // live switch (Settings); the config key is rewritten with it
+#endif
 
     // Summarize the stack facts with a model: the local engine, or a remote OpenAI-compatible endpoint when
     // heartbeat.endpoint is a URL (so it can run off the laptop when the GPU is busy). Returns (summary, severity).
@@ -448,6 +457,10 @@ struct Server::Impl {
         std::vector<std::string> binds = {cfg.server.bind};
         for (auto & b : cfg.server.extra_binds) binds.push_back(b);
         bind_addrs = binds;
+#ifdef JUDAS_MACH12
+        planner = std::make_unique<mach12::Planner>(cfg.mach12.data_dir);
+        if (cfg.mach12.enabled) { mach12_on = true; planner->start_background(); }
+#endif
         for (size_t i = 0; i < binds.size(); i++) {
             auto s2 = std::make_unique<httplib::Server>();
             setup(*s2);
@@ -463,12 +476,29 @@ struct Server::Impl {
         stopping = true;
         hub.wake();
         agents.remove_listener(listener_handle);
+#ifdef JUDAS_MACH12
+        if (planner) planner->stop_background();
+#endif
         if (scheduler.joinable()) scheduler.join();
         if (heartbeat_thread.joinable()) heartbeat_thread.join();
         if (resume_thread.joinable()) resume_thread.join();
     }
 
     std::vector<std::string> bind_addrs;
+
+    // Pages may frame this server and the origins of the configured Tools tabs, nothing else.
+    std::string frame_csp() const {
+        std::string out = "frame-src 'self'";
+        std::set<std::string> seen;
+        for (auto & t : cfg.tools.tabs) {
+            size_t a = t.url.find("://");
+            if (a == std::string::npos) continue;
+            size_t e = t.url.find('/', a + 3);
+            std::string origin = t.url.substr(0, e == std::string::npos ? std::string::npos : e);
+            if (seen.insert(origin).second) out += " " + origin;
+        }
+        return out;
+    }
 
     // Scheduled and task runs are delegated work: they belong to the Cowork surface.
     void mark_task_session(const std::string & sid) {
@@ -901,7 +931,7 @@ void Server::Impl::setup(httplib::Server & svr) {
         if (!req.body.empty()) b = json::parse(req.body, nullptr, false);
         if (!b.is_object()) return send_json(res, error_json("bad json", "invalid_request_error"), 400);
         std::string mode = b.value("mode", "chat");
-        if (!valid_mode(mode)) return send_json(res, error_json("mode must be chat, cowork or code", "invalid_request_error"), 400);
+        if (!valid_mode(mode)) return send_json(res, error_json("mode must be chat, cowork, code, learn or swarm", "invalid_request_error"), 400);
         std::string cwd = b.value("cwd", "");
         if (cwd.empty()) cwd = std::filesystem::current_path().string();
         auto s = store.create_session(b.value("title", "New session"), cwd, engine.model_name(), mode);
@@ -916,7 +946,7 @@ void Server::Impl::setup(httplib::Server & svr) {
         if (!store.get_session(id)) return send_json(res, error_json("no such session", "not_found"), 404);
         if (b.contains("mode")) {
             if (!b["mode"].is_string() || !valid_mode(b["mode"]))
-                return send_json(res, error_json("mode must be chat, cowork or code", "invalid_request_error"), 400);
+                return send_json(res, error_json("mode must be chat, cowork, code, learn or swarm", "invalid_request_error"), 400);
             store.set_session_mode(id, b["mode"]);
         }
         if (b.contains("title") && b["title"].is_string() && !b["title"].get<std::string>().empty())
@@ -976,7 +1006,7 @@ void Server::Impl::setup(httplib::Server & svr) {
         std::string cwd = b.value("cwd", "");
         std::string mode = b.contains("mode") && b["mode"].is_string() ? b["mode"].get<std::string>() : "";
         if (!mode.empty() && !valid_mode(mode))
-            return send_json(res, error_json("mode must be chat, cowork or code", "invalid_request_error"), 400);
+            return send_json(res, error_json("mode must be chat, cowork, code, learn or swarm", "invalid_request_error"), 400);
         if (id == "new") {
             std::string title = typed.substr(0, 60);
             if (typed.empty() && !atts.empty()) title = atts[0].name;
@@ -1333,6 +1363,63 @@ void Server::Impl::setup(httplib::Server & svr) {
                     {"ran_ms", last_hb.ran_ms}, {"pushed", last_hb.pushed},
                     {"enabled", cfg.heartbeat.enabled}, {"interval_s", cfg.heartbeat.interval_s}};
     };
+    // Swarm instance state, proxied so the web app needs no cross-origin access to :8083.
+    svr.Get("/api/swarm/state", [this](const httplib::Request &, httplib::Response & res) {
+        json out = {{"enabled", cfg.swarm.enabled}, {"url", cfg.swarm.url}, {"up", false}};
+        if (cfg.swarm.enabled) {
+            try {
+                httplib::Client cli(cfg.swarm.url);
+                cli.set_connection_timeout(1);
+                cli.set_read_timeout(2);
+                auto r = cli.Get("/state");
+                if (r && r->status == 200) {
+                    json st = json::parse(r->body);
+                    out["up"] = true;
+                    out["state"] = st;
+                }
+            } catch (...) {}
+        }
+        send_json(res, out);
+    });
+    // Cores of the swarm instance: the main server proxies to it and writes its config; the instance (this same
+    // server on :8083) applies a change live. See docs/SWARM.md.
+    auto cores_json = [this](const SwarmCores & c) {
+        return json{{"ok", c.ok}, {"error", c.error}, {"threads", c.threads}, {"nproc", c.nproc}, {"pin", c.pin},
+                    {"cpus", c.cpus}, {"up", c.up}, {"live", c.live}, {"config", c.config_path},
+                    {"enabled", cfg.swarm.enabled}};
+    };
+    svr.Get("/api/swarm/cores", [this, cores_json](const httplib::Request &, httplib::Response & res) {
+        send_json(res, cores_json(swarm_cores_get(cfg)));
+    });
+    svr.Post("/api/swarm/cores", [this, cores_json](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("threads") || !b["threads"].is_number_integer())
+            return send_json(res, error_json("body needs integer threads", "invalid_request_error"), 400);
+        int pin = b.contains("pin") && b["pin"].is_boolean() ? (b["pin"].get<bool>() ? 1 : 0) : -1;
+        SwarmCores c = swarm_cores_set(cfg, b["threads"].get<int>(), pin);
+        send_json(res, cores_json(c), c.ok ? 200 : 400);
+    });
+    // This instance's own cores (what the main server's proxy talks to): live thread count, pinning.
+    svr.Get("/api/cores", [this](const httplib::Request &, httplib::Response & res) {
+        auto cpus = process_affinity();
+        send_json(res, {{"threads", engine.threads()}, {"nproc", cpu_count()}, {"cpus", cpus},
+                        {"pinned", !cpus.empty() && (int) cpus.size() < cpu_count()}});
+    });
+    svr.Post("/api/cores", [this](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("threads") || !b["threads"].is_number_integer())
+            return send_json(res, error_json("body needs integer threads", "invalid_request_error"), 400);
+        int n = b["threads"].get<int>();
+        if (n < 1 || n > cpu_count())
+            return send_json(res, error_json("threads must be 1.." + std::to_string(cpu_count()), "invalid_request_error"), 400);
+        if (!engine.set_threads(n))
+            return send_json(res, error_json("this engine cannot change threads live; restart it", "invalid_request_error"), 409);
+        bool pin = b.value("pin", false);
+        pin_process(pin ? cpu_pin_set(n) : std::vector<int>{});
+        auto cpus = process_affinity();
+        send_json(res, {{"ok", true}, {"applied", "live"}, {"threads", n}, {"nproc", cpu_count()}, {"cpus", cpus},
+                        {"pinned", pin}});
+    });
     svr.Get("/api/heartbeat", [this, hb_json](const httplib::Request &, httplib::Response & res) {
         send_json(res, hb_json());
     });
@@ -1453,8 +1540,69 @@ void Server::Impl::setup(httplib::Server & svr) {
         }
         res.set_content(json({{"skins", arr}}).dump(), "application/json");
     });
+    // Tools tab: the configured sub-tabs. A tab named "mach12" points at the built-in planner when it is on.
+    svr.Get("/api/tools/tabs", [this](const httplib::Request &, httplib::Response & res) {
+        bool have = false, on = false;
+#ifdef JUDAS_MACH12
+        have = true;
+        on = mach12_on.load();
+#endif
+        json tabs = json::array();
+        for (auto & t : cfg.tools.tabs) {
+            std::string url = t.url;
+            bool builtin = have && on && t.name == "mach12";
+            if (builtin) url = "/mach12/";
+            tabs.push_back({{"name", t.name}, {"label", t.label.empty() ? t.name : t.label}, {"url", url},
+                            {"skill", t.skill}, {"prompt_hint", t.prompt_hint}, {"builtin", builtin}});
+        }
+        send_json(res, {{"tabs", tabs}, {"mach12", {{"available", have}, {"enabled", on}}}});
+    });
+    // Built-in mach12 planner: status and a live on/off switch (also saved to [mach12].enabled in the config).
+    svr.Get("/api/mach12", [this](const httplib::Request &, httplib::Response & res) {
+        bool have = false, on = false;
+#ifdef JUDAS_MACH12
+        have = true;
+        on = mach12_on.load();
+#endif
+        send_json(res, {{"available", have}, {"enabled", on}, {"data_dir", cfg.mach12.data_dir}, {"path", "/mach12/"}});
+    });
+    svr.Post("/api/mach12", [this](const httplib::Request & req, httplib::Response & res) {
+#ifdef JUDAS_MACH12
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("enabled") || !b["enabled"].is_boolean())
+            return send_json(res, error_json("body needs enabled (true or false)", "invalid_request_error"), 400);
+        bool want = b["enabled"];
+        if (!set_toml_value_in_file(user_config_path(), "mach12", "enabled", want ? "true" : "false"))
+            return send_json(res, error_json("could not write " + user_config_path(), "internal_error"), 500);
+        if (want) planner->start_background(); else planner->stop_background();
+        mach12_on = want;
+        send_json(res, {{"ok", true}, {"enabled", want}, {"live", true}});
+#else
+        (void) req;
+        send_json(res, error_json("this build has no mach12 (JUDAS_MACH12=OFF)", "not_found"), 404);
+#endif
+    });
+#ifdef JUDAS_MACH12
+    svr.Get(R"(/mach12)", [](const httplib::Request &, httplib::Response & res) { res.set_redirect("/mach12/"); });
+    auto mach12_route = [this](const httplib::Request & req, httplib::Response & res) {
+        if (!mach12_on.load()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"mach12 is off; switch it on in Settings\"}", "application/json");
+            return;
+        }
+        std::map<std::string, std::string> q;
+        for (auto & [k, v] : req.params) q.emplace(k, v);
+        auto r = planner->handle(req.method, std::string(req.matches[1]).empty() ? "/" : std::string(req.matches[1]), q, req.body);
+        res.status = r.status;
+        res.set_header("Cache-Control", r.cache);
+        res.set_content(r.body, r.ctype);
+    };
+    svr.Get(R"(/mach12(/.*))", mach12_route);
+    svr.Post(R"(/mach12(/.*))", mach12_route);
+#endif
+
     // Static files from the embedded table; "/" serves index.html. Registered last so /api and /v1 win.
-    svr.Get(R"((/.*))", [](const httplib::Request & req, httplib::Response & res) {
+    svr.Get(R"((/.*))", [this](const httplib::Request & req, httplib::Response & res) {
         std::string path = req.matches[1];
         if (path == "/") path = "/index.html";
         size_t n = 0;
@@ -1464,12 +1612,14 @@ void Server::Impl::setup(httplib::Server & svr) {
                 res.set_content(reinterpret_cast<const char *>(t[i].data), t[i].size, t[i].mime);
                 // no-cache: a stale app.js after an upgrade broke sends; assets are tiny and local
                 res.set_header("Cache-Control", "no-cache");
+                if (path == "/index.html") res.set_header("Content-Security-Policy", frame_csp());
                 return;
             }
         // SPA fallback: unknown non-asset path returns index.html if we have one, else 404.
         for (size_t i = 0; i < n; i++)
             if (std::string(t[i].path) == "/index.html") {
                 res.set_content(reinterpret_cast<const char *>(t[i].data), t[i].size, t[i].mime);
+                res.set_header("Content-Security-Policy", frame_csp());
                 return;
             }
         res.status = 404;

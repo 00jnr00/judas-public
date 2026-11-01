@@ -1,0 +1,27 @@
+/* Tools tab. Colors come only from /skin.css variables. */
+#screen-tools{display:none;flex-direction:column}
+#screen-tools.active{display:flex}
+.tools-bar{display:flex;gap:var(--s2);flex-wrap:wrap;padding:var(--s3) var(--s5) 0;border-bottom:1px solid var(--border);flex:none}
+.tools-tab{background:transparent;border:1px solid var(--border);border-bottom:none;border-radius:8px 8px 0 0;padding:.4em 1em;color:var(--dim)}
+.tools-tab.active{background:var(--surface2);color:var(--title);border-color:var(--accent)}
+.tools-body{flex:1;min-height:0;display:flex}
+.tools-wrap{flex:1;min-width:0;display:flex}
+.tools-frame{flex:1;min-width:0;position:relative;display:flex;flex-direction:column}
+.tools-frame iframe{flex:1;width:100%;border:0;background:var(--surface)}
+.tools-open{position:absolute;right:var(--s3);bottom:var(--s2);background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.1em .6em;color:var(--dim)}
+.tools-panel{width:340px;max-width:42%;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--surface);min-height:0}
+.tp-head{display:flex;gap:var(--s2);align-items:center;padding:var(--s2) var(--s3);border-bottom:1px solid var(--border)}
+.tp-head b{flex:1;color:var(--title)}
+.tp-head select{padding:.15em .4em;font-size:var(--fs-sm)}
+.tp-log{flex:1;min-height:0;overflow:auto;padding:var(--s3);display:flex;flex-direction:column;gap:var(--s2)}
+.tp-msg{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.95rem;line-height:1.5}
+.tp-msg.user{background:var(--surface2);border-left:3px solid var(--accent);border-radius:6px;padding:.4em .6em}
+.tp-msg.tool{color:var(--dim);font-size:var(--fs-sm)}
+.tp-msg.err{color:var(--error)}
+.tp-form{display:flex;gap:var(--s2);padding:var(--s2) var(--s3);align-items:flex-end}
+.tp-form textarea{resize:none}
+.tp-note{padding:0 var(--s3) var(--s2)}
+@media (max-width:800px){
+  .tools-wrap.with-panel{flex-direction:column}
+  .tools-panel{width:100%;max-width:none;height:45%;border-left:0;border-top:1px solid var(--border)}
+}

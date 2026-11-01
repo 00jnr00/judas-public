@@ -806,8 +806,8 @@ struct App {
             queued.clear();
             say("cancel requested");
         } else if (n == "mode") {
-            if (p.arg.empty()) { say("mode: " + mode + "  (/mode chat|cowork|code)"); return; }
-            if (p.arg != "chat" && p.arg != "cowork" && p.arg != "code") { say("mode must be chat, cowork or code", 'w'); return; }
+            if (p.arg.empty()) { say("mode: " + mode + "  (/mode chat|cowork|code|learn|swarm)"); return; }
+            if (p.arg != "chat" && p.arg != "cowork" && p.arg != "code" && p.arg != "learn" && p.arg != "swarm") { say("mode must be chat, cowork, code, learn or swarm", 'w'); return; }
             mode = p.arg;
             if (!sid.empty()) {
                 auto r = api.patch("/api/sessions/" + sid, {{"mode", mode}});

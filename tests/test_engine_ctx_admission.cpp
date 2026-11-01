@@ -1,4 +1,5 @@
 // Context-borrow admission: soft cap, hard cap, pool fit, victim choice and the generation cap. Pure logic.
+#include "core/config.h"
 #include "engine/sched.h"
 #include "test.h"
 
@@ -99,7 +100,39 @@ static void test_default_off() {
     CHECK(over.limit == 8000);
 }
 
+static void test_effective_window() {
+    ModelConfig m;
+    m.ctx_total = 98304;
+    m.ctx_per_agent = 24576;
+    ContextConfig c;  // window = auto
+    // A lone agent gets the whole pool; the share shrinks as agents go live, never below ctx_per_agent.
+    CHECK(effective_ctx_cap(m, c, 1) == 98304);
+    CHECK(effective_ctx_cap(m, c, 2) == 49152);
+    CHECK(effective_ctx_cap(m, c, 3) == 32768);
+    CHECK(effective_ctx_cap(m, c, 4) == 24576);
+    CHECK(effective_ctx_cap(m, c, 8) == 24576);
+    CHECK(effective_ctx_cap(m, c, 0) == 98304);
+    // ctx_per_agent_max is the ceiling when set.
+    m.ctx_per_agent_max = 60000;
+    CHECK(effective_ctx_cap(m, c, 1) == 60000);
+    CHECK(effective_ctx_cap(m, c, 2) == 49152);
+    CHECK(ctx_hard_cap(m, c) == 60000);
+    // fixed: the old static behavior, and no implicit borrowing without ctx_per_agent_max.
+    c.window = "fixed";
+    CHECK(effective_ctx_cap(m, c, 1) == 24576);
+    CHECK(ctx_hard_cap(m, c) == 60000);
+    m.ctx_per_agent_max = 0;
+    CHECK(ctx_hard_cap(m, c) == 0);
+    c.window = "auto";
+    CHECK(ctx_hard_cap(m, c) == 98304);
+    // The engine admits a lone agent's big prompt under the auto hard cap, and refuses one over the pool.
+    KvBudget b(98304, 500);
+    std::vector<KvLive> none;
+    CHECK(decide_ctx_admission(80000, m.ctx_per_agent, ctx_hard_cap(m, c), b, none).start_now());
+}
+
 int main() {
+    test_effective_window();
     test_fits_soft_cap();
     test_borrows_when_pool_free();
     test_refused_when_pool_busy();

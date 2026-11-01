@@ -53,6 +53,11 @@ Restart=no
 [Install]
 WantedBy=default.target
 UNITEOF
+    # Swarm unit (CPU instance for bulk jobs, docs/SWARM.md): installed only if absent, never enabled or started.
+    if [ -f contrib/judas-swarm.service ] && [ ! -f "$UNIT/judas-swarm.service" ]; then
+        echo "[judas] writing $UNIT/judas-swarm.service (not enabled)"
+        install -m644 contrib/judas-swarm.service "$UNIT/judas-swarm.service"
+    fi
     systemctl --user daemon-reload
     HAVE_UNIT=1
 else
@@ -104,6 +109,11 @@ StartupNotify=true
 DESKEOF
 fi
 update-desktop-database "$APPS" 2>/dev/null || true
+
+if [ -f contrib/swarm.toml ] && [ ! -f "$CONF/swarm.toml" ]; then
+    echo "[judas] writing swarm config -> $CONF/swarm.toml (point its model path at your LFM GGUF)"
+    install -m644 contrib/swarm.toml "$CONF/swarm.toml"
+fi
 
 echo "[judas] config init"
 touch "$CONF/secrets.env"; chmod 600 "$CONF/secrets.env"

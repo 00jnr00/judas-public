@@ -1,4 +1,8 @@
 // Compaction: shrink an agent's message history when it nears the context cap, losing as little as possible.
+// Rule pinning: read_file results of instruction files (AGENTS.md, CLAUDE.md, .judas/*.md, any path named in the
+// first user message) that compaction drops or summarizes are kept, up to cfg.pin_tokens each and cfg.pin_total
+// overall, in one "[pinned: ...]" system message right after the first user message. It is never dropped or
+// summarized by later passes, and the harness (not the model) maintains it.
 // Strategy (mode "compact"): keep the first user message and the last keep_turns turns verbatim; in the older
 // span, drop or condense tool results, replacing a big one with a one-line digest plus a recall id so the full
 // text (still in the store) can be fetched with the recall tool; only if still over target, summarize the
@@ -25,6 +29,9 @@ struct CompactionResult {
 using TokenCounter = std::function<int(const std::string &)>;
 // Summarize a span of messages into one short assistant-visible note (caller wraps the engine).
 using SpanSummarizer = std::function<std::string(const std::vector<ChatMessage> &)>;
+
+// True if `m` is the pinned-rules message produced by compact().
+bool is_pinned_message(const ChatMessage & m);
 
 // Decide and apply compaction. If the history already fits under target, returns it unchanged (changed=false).
 // `recall_ref(msg)` returns a stable id for a tool message whose body was stored (so the digest can cite it);

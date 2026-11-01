@@ -115,6 +115,10 @@ public:
     // True when the loaded model can see ChatMessage::images (local model with an mmproj, or a remote
     // model with vision = true). Images sent to a model without vision are dropped by the caller.
     virtual bool vision() const { return false; }
+    // CPU threads for decode and prefill. set_threads applies live (llama_set_n_threads between two decode
+    // steps, no reload) and returns true; engines that cannot (remote) return false. threads() is 0 when unknown.
+    virtual bool set_threads(int) { return false; }
+    virtual int threads() const { return 0; }
 };
 
 // OpenAI chat-completions JSON <-> engine types (used by the /v1 server and tests).

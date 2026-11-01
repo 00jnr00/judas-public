@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/skin.css" id="skin-link">
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/tools.css">
 </head>
 <body>
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop to attach</div></div>
@@ -27,6 +28,8 @@
       <button type="button" data-screen="chat" class="active"><i aria-hidden="true">&#9993;</i><span class="rl"><b>Chat</b><small>Quick questions</small></span></button>
       <button type="button" data-screen="cowork"><i aria-hidden="true">&#10070;</i><span class="rl"><b>Cowork</b><small>Delegate bigger jobs</small></span></button>
       <button type="button" data-screen="code"><i aria-hidden="true">{ }</i><span class="rl"><b>Code</b><small>Work in a project</small></span></button>
+      <button type="button" data-screen="learn"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Learn</b><small>Understand something</small></span></button>
+      <button type="button" data-screen="swarm"><i aria-hidden="true">&#8756;</i><span class="rl"><b>Swarm</b><small>Bulk jobs on small models</small></span></button>
     </div>
     <div class="rail-group rail-tools" id="rail-tools">
       <div class="rail-cap">Tools</div>
@@ -37,6 +40,7 @@
       <button type="button" data-screen="resources"><i aria-hidden="true">&#9636;</i><span class="rl"><b>Resources</b></span></button>
       <button type="button" data-screen="heartbeat"><i aria-hidden="true">&#9829;</i><span class="rl"><b>Heartbeat</b></span></button>
       <button type="button" data-screen="stats"><i aria-hidden="true">&#9641;</i><span class="rl"><b>Statistics</b></span></button>
+      <button type="button" data-screen="tools" hidden><i aria-hidden="true">&#8801;</i><span class="rl"><b>Tools</b></span></button>
       <button type="button" data-screen="settings"><i aria-hidden="true">&#9881;</i><span class="rl"><b>Settings</b></span></button>
       <button type="button" data-screen="guide"><i aria-hidden="true">?</i><span class="rl"><b>Guide</b></span></button>
     </div>
@@ -44,7 +48,7 @@
   </nav>
   <main class="main">
 
-    <!-- Chat, Cowork and Code share this screen; the mode changes layout and defaults -->
+    <!-- Chat, Cowork, Code and Swarm share this screen; the mode changes layout and defaults -->
     <section id="screen-work" class="screen active" data-mode="chat">
       <aside class="sess" id="sess-pane">
         <div class="sess-head"><b>Sessions</b><button type="button" id="new-session" class="btn small primary">+ New</button></div>
@@ -64,12 +68,17 @@
             <button type="button" id="panel-toggle" class="btn small ghost" hidden>Panel</button>
           </div>
           <p id="work-desc" class="desc"></p>
+          <div id="swarm-strip" class="swarm-strip" hidden>
+            <span id="swarm-dot" class="sw-dot" aria-hidden="true"></span>
+            <span id="swarm-text">Swarm: checking...</span>
+            <span id="swarm-bar" class="sw-bar" hidden><span id="swarm-fill" class="sw-fill"></span></span>
+          </div>
           <div id="cwd-bar" class="cwd-bar">
             <label for="cwd" id="cwd-label">Project folder</label>
             <input id="cwd" class="cwd" type="text" list="cwd-recent" placeholder="/home/you/project" spellcheck="false" autocomplete="off">
             <datalist id="cwd-recent"></datalist>
             <div id="cwd-chips" class="chips"></div>
-            <div id="cwd-err" class="field-err" hidden>Code mode needs a project folder. Enter one above.</div>
+            <div id="cwd-err" class="field-err" hidden>This mode needs a folder. Enter one above.</div>
           </div>
           <div class="title-row">
             <div id="chat-title" class="chat-title">New session</div>
@@ -214,9 +223,20 @@
         <h3>Model</h3>
         <p class="dim">Judas loads one model at a time, shared by every agent. Switching saves the choice and restarts the daemon so the new model loads; running chats are interrupted.</p>
         <div id="model-switch" class="model-switch"></div>
+        <div id="swarm-cores-wrap" hidden>
+          <h3>Swarm cores</h3>
+          <p class="dim">CPU threads for the swarm instance (small model, bulk jobs). Applied live, no restart; saved in its own config. Pinning keeps it on whole physical cores of one CCD first, away from the rest of the machine.</p>
+          <div id="swarm-cores" class="swarm-cores"></div>
+        </div>
         <h3>Daemon</h3>
         <dl class="kv" id="daemon-kv"></dl>
       </div>
+    </section>
+
+    <section id="screen-tools" class="screen">
+      <div class="page-head-bar"><h2>Tools</h2><p class="desc" data-desc="tools"></p></div>
+      <div id="tools-bar" class="tools-bar" role="tablist"></div>
+      <div id="tools-body" class="tools-body"></div>
     </section>
 
     <section id="screen-guide" class="screen">
@@ -228,5 +248,6 @@
 <script src="/vendor/katex/katex.min.js"></script>
 <script src="/companion.js"></script>
 <script src="/app.js"></script>
+<script src="/tools.js"></script>
 </body>
 </html>

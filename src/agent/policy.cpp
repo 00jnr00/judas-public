@@ -94,7 +94,37 @@ bool is_announcement(const std::string & sentence) {
     return false;
 }
 
-bool announces_next_action(const std::string & text) { return is_announcement(last_sentence(last_line(text))); }
+// "I'll summarize: ...", "Let me tell you what changed." introduce the answer that follows; they are not work.
+bool speech_act(const std::string & sentence) {
+    std::string l = lower_apostrophes(ltrim(sentence));
+    for (const char * a : {"let me ", "let's ", "let us ", "i'll ", "i will "}) {
+        if (!starts_with(l, a)) continue;
+        std::string rest = l.substr(std::string(a).size());
+        for (const char * v : {"summarize", "summarise", "tell", "note", "explain", "say", "mention", "clarify",
+                               "recap", "point out", "describe", "list what", "walk you", "be brief", "add that"})
+            if (starts_with(rest, v)) return true;
+    }
+    return false;
+}
+
+// Any sentence of the last line counts: "Now let me spawn 6 workers, one per module. Each gets the rules." still
+// announces work it has not started, even though its last sentence only describes the plan.
+bool announces_next_action(const std::string & text) {
+    std::string line = last_line(text);
+    while (!line.empty()) {
+        std::string s = last_sentence(line);
+
+        if (is_announcement(s) && (s == last_sentence(last_line(text)) || !speech_act(s))) return true;
+
+        if (s.size() >= line.size()) break;
+        line = line.substr(0, line.size() - s.size());
+        while (!line.empty() && std::isspace((unsigned char) line.back())) line.pop_back();
+        if (!line.empty()) line.pop_back();   // the sentence's own . ! or ?
+        while (!line.empty() && std::isspace((unsigned char) line.back())) line.pop_back();
+        if (!line.empty()) line += ".";      // keep a terminator so last_sentence splits the rest
+    }
+    return false;
+}
 
 }  // namespace
 

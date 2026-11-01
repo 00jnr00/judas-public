@@ -17,6 +17,9 @@
 
 #include "agent/agent.h"
 #include "core/config.h"
+#include "core/cpu_topology.h"
+#include "tools/swarm_tools.h"
+#include <algorithm>
 #include "cpp-httplib/httplib.h"
 #include "engine/engine.h"
 #include "learning/curator.h"
@@ -62,6 +65,7 @@ usage:
   judas curator status | run [--dry-run]
                                       skill library curator: state, or run a pass (dry = report only)
   judas config show|validate|init     effective config, check it, or write ~/.config/judas/config.toml
+  judas swarm cores [N] [--pin|--no-pin]   threads (and optional CPU pinning) of the swarm instance, applied live
   judas models [list] [--all] [--dir D]
                                       GGUF models on this machine (your dirs, LM Studio, Hugging Face cache,
                                       Ollama), with size, quant, context and whether they fit your GPU
@@ -218,6 +222,13 @@ int cmd_serve(std::vector<std::string> args) {
                          C_RED, mib, C_RESET);
             return 1;
         }
+    }
+    if (cfg.engine.pin_cores) {  // before the model loads, so every thread it starts inherits the mask
+        auto it = cfg.models.find(cfg.engine.model);
+        int n = it != cfg.models.end() && it->second.threads > 0 ? it->second.threads : cpu_count();
+        auto cpus = cpu_pin_set(n);
+        std::fprintf(stderr, "judas: pinning to %zu CPU(s), first %d\n", cpus.size(), cpus.empty() ? -1 : cpus.front());
+        pin_process(cpus);
     }
     std::fprintf(stderr, "judas %s: loading %s\n", version(), cfg.engine.model.c_str());
     auto engine = Engine::create(cfg);
@@ -544,7 +555,7 @@ int models_list(const Config & cfg, std::vector<std::string> & args) {
     std::printf("\n %3s  %-2s %-46s %9s  %-9s %7s  %-8s %s\n", "#", "", "MODEL", "SIZE", "QUANT", "CTX", "FIT", "FROM");
     int n = 0, hidden = 0;
     for (auto & m : found) {
-        if (m.projector) {
+        if (m.projector || (m.helper && m.config_name.empty())) {
             hidden++;
             if (!all) continue;
         }
@@ -562,7 +573,7 @@ int models_list(const Config & cfg, std::vector<std::string> & args) {
         if (!m.error.empty()) std::printf("      %s%s%s\n", C_RED, m.error.c_str(), C_RESET);
     }
     std::printf("\n%s* = loaded by the daemon, + = in the config", C_DIM);
-    if (hidden && !all) std::printf("; %d vision projector file(s) hidden, --all shows them", hidden);
+    if (hidden && !all) std::printf("; %d projector/helper file(s) hidden (mmproj, embed, rerank, MTP drafts), --all shows them", hidden);
     std::printf("%s\n", C_RESET);
     std::printf("Load one:  judas models use <#>        Details: judas models info <#>\n");
     return 0;
@@ -809,6 +820,38 @@ int models_pull(const Config & cfg, std::vector<std::string> & args) {
     return models_add(cfg, rest, &m);
 }
 
+int cmd_swarm(std::vector<std::string> args) {
+    Config cfg = load_or_die();
+    std::string sub = args.empty() ? "cores" : args[0];
+    if (!args.empty()) args.erase(args.begin());
+    if (sub != "cores") {
+        std::fprintf(stderr, "usage: judas swarm cores [N] [--pin|--no-pin]\n");
+        return 2;
+    }
+    int n = 0, pin = -1;
+    for (auto & a : args) {
+        if (a == "--pin") pin = 1;
+        else if (a == "--no-pin") pin = 0;
+        else if (!a.empty() && std::all_of(a.begin(), a.end(), ::isdigit)) n = std::atoi(a.c_str());
+        else {
+            std::fprintf(stderr, "usage: judas swarm cores [N] [--pin|--no-pin]\n");
+            return 2;
+        }
+    }
+    SwarmCores c = n > 0 ? swarm_cores_set(cfg, n, pin) : swarm_cores_get(cfg);
+    if (!c.ok) {
+        std::fprintf(stderr, "judas swarm: %s\n", c.error.c_str());
+        return 1;
+    }
+    std::string cpus;
+    for (int x : c.cpus) cpus += (cpus.empty() ? "" : ",") + std::to_string(x);
+    std::printf("swarm cores: %d of %d, pinning %s%s%s, instance %s\n", c.threads, c.nproc, c.pin ? "on" : "off",
+                cpus.empty() ? "" : " (cpus ", cpus.empty() ? "" : (cpus + ")").c_str(),
+                c.up ? (n > 0 ? (c.live ? "updated live (no restart)" : "up") : "up") : "down; the new value applies when it starts");
+    std::printf("config: %s\n", c.config_path.c_str());
+    return 0;
+}
+
 int cmd_models(std::vector<std::string> args) {
     if (!::isatty(1)) C_SILVER = C_BRIGHT = C_DIM = C_RED = C_RESET = "";
     Config cfg = load_or_die();
@@ -838,7 +881,21 @@ int cmd_models(std::vector<std::string> args) {
 
 }  // namespace
 
+#ifdef JUDAS_WITH_STRATA
+int strata_main(int argc, char ** argv);   // Strata's engine main(), compiled in (cmake/strata.cmake)
+#endif
+
 int main(int argc, char ** argv) {
+#ifdef JUDAS_WITH_STRATA
+    // Hidden: the Strata backend starts /proc/self/exe __strata-engine --serve ... as its engine process.
+    if (argc >= 2 && std::string(argv[1]) == "__strata-engine") {
+        std::vector<char *> sargv;
+        sargv.push_back(argv[0]);
+        for (int i = 2; i < argc; i++) sargv.push_back(argv[i]);
+        sargv.push_back(nullptr);
+        return strata_main((int) sargv.size() - 1, sargv.data());
+    }
+#endif
     std::vector<std::string> args(argv + 1, argv + argc);
     if (!args.empty() && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")) {
         std::printf("%s", USAGE);
@@ -858,6 +915,7 @@ int main(int argc, char ** argv) {
         if (cmd == "config") return cmd_config(args);
         if (cmd == "skills") return cmd_skills(args);
         if (cmd == "models") return cmd_models(args);
+        if (cmd == "swarm") return cmd_swarm(args);
         if (cmd == "prompt-size") {
             Config cfg = load_or_die();
             auto est = [](const std::string & s) { return (long) (s.size() / 4); };  // ~4 bytes/token

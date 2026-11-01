@@ -1,0 +1,27 @@
+# Swarm backend: a second Judas instance on the CPU running a small Liquid LFM model. The main instance's
+# swarm_map tool sends it many small independent jobs in parallel (docs/SWARM.md). It never touches VRAM.
+# Install: cp contrib/swarm.toml ~/.config/judas/swarm.toml (install.sh does this if the file is absent).
+data_dir = "~/.local/share/judas-swarm"
+
+[engine]
+model = "lfm2-5-2-6b"
+max_agents = 8
+
+[models.lfm2-5-2-6b]
+path = "~/models/gguf/lfm2.5-2.6b/LFM2.5-2.6B-QAD-Q4_0.gguf"
+gpu_layers = 0
+kv_type = "f16"
+ctx_total = 65536        # 8 requests x 8k
+ctx_per_agent = 8192
+threads = 10
+mmproj = "none"
+[models.lfm2-5-2-6b.sampling]
+temp = 0.1               # Liquid's recommendation (also top_k 50, repetition penalty about 1.05)
+top_p = 1.0
+top_k = 50
+
+[server]
+port = 8083
+
+[permissions]
+sandbox = "bwrap"

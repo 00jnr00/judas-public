@@ -32,6 +32,8 @@ static void test_classify() {
 }
 
 static void test_announce() {
+    CHECK(classify_reply("Now let me spawn 6 workers, one per module. Each gets the house rules and its module's function specs.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("All six modules pass. Let me know if you want more tests.", false, "stop") != ReplyKind::Announce);
     // Replies that only say what the agent is about to do: no tool call means the turn must continue.
     for (const char * s : {
              "Let me read the file.",

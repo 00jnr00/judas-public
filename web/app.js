@@ -190,6 +190,12 @@
     code: { label: "Code", mode: true,
       desc: "Point the model at a project folder and let it read and edit files. Every change is saved as a snapshot you can undo.",
       when: "Use it when the agent should work in your repo. A project folder is required (recent folders are remembered). The Changes panel lists the files touched and links each one to its snapshot." },
+    learn: { label: "Learn", mode: true,
+      desc: "A tutor that starts from what you already know. It reads your goals and notes, asks a few questions to find where your understanding stops, plans the shortest route to your goal, and teaches one small step at a time.",
+      when: "Use it when you want to understand something, not just get an answer. Answer in your own words; it adapts to your reasoning. Your goals and notes files are read only, and your progress per topic is kept in Judas's data folder." },
+    swarm: { label: "Swarm", mode: true,
+      desc: "Hand the model a bulk job over many files or items. It plans and checks; a swarm of small fast models on the CPU does the repetitive part in parallel.",
+      when: "Use it to summarize, extract from or classify dozens or hundreds of files or snippets. Pick the folder that holds them. Small models are good at extraction, summaries and tagging, not at coding or long reasoning. It needs the swarm instance running (docs/SWARM.md)." },
     agents: { label: "Agents",
       desc: "Judas runs one model shared by many agents at once. A lead agent can spawn worker agents that each take on part of a job and run at the same time on that one model. This board shows every agent in the current session: the lead on top, its workers nested under it, each with its status and token count. It is how you see parallel work happening.",
       when: "Open it while a job is running to see who is doing what.",
@@ -223,12 +229,15 @@
     settings: { label: "Settings",
       desc: "Pick a theme and see the API version. Themes restyle both the web app and the terminal UI.",
       when: "Change the look here. The choice is saved in this browser only, for now." },
+    tools: { label: "Tools",
+      desc: "Pages and helpers you add yourself, one sub-tab each. A tool can show a web page and a Plan with Judas panel that works on it with a skill.",
+      when: "Add a [[tools.tabs]] entry to config.toml (name, label, url, skill, prompt_hint). The tab appears only when at least one is set." },
     guide: { label: "Guide",
       desc: "Plain-language help for every tab. Start with the three modes, then the tools." }
   };
-  var MODES = ["chat", "cowork", "code"];
-  var SCREENS = ["chat", "cowork", "code", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "settings", "guide"];
-  var SCREEN_IDS = ["work", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "settings", "guide"];
+  var MODES = ["chat", "cowork", "code", "learn", "swarm"];
+  var SCREENS = ["chat", "cowork", "code", "learn", "swarm", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
+  var SCREEN_IDS = ["work", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
   var curScreen = "chat", curMode = "chat", sideHidden = false;
 
   function pageHead(name) {
@@ -262,7 +271,7 @@
     if (MODES.indexOf(name) >= 0) enterMode(name, opts && opts.keep);
     markNav(name);
     if (name === "snapshots") loadSnapshots();
-    if (name === "agents" || name === "cowork") renderBoard();
+    if (name === "agents" || name === "cowork" || name === "swarm") renderBoard();
     if (name === "code") renderChanges();
     if (name === "tasks") { loadTasks(); applyTaskPrefill(); }
     if (name === "guide") renderGuide();
@@ -271,6 +280,7 @@
     if (name === "heartbeat") openHeartbeat();
     if (name === "stats") loadStats();
     if (name === "memory") loadMemory();
+    if (name === "tools" && window.JudasTools) window.JudasTools.open();
   }
   $("#rail").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-screen]");
@@ -433,12 +443,16 @@
   var MODE_UI = {
     chat: { title: "Chat", send: "Send", ph: "Ask anything. Enter sends, Shift+Enter for a new line.", cwd: "" },
     cowork: { title: "Cowork", send: "Delegate", ph: "Describe the larger job. Enter sends, Shift+Enter for a new line.", cwd: "Working folder (optional)" },
+    learn: { title: "Learn", send: "Send", ph: "Say what you want to understand. Enter sends, Shift+Enter for a new line.", cwd: "" },
+    swarm: { title: "Swarm", send: "Run", ph: "Describe the bulk job, for example: summarize every .md file in this folder in two lines each. Enter sends, Shift+Enter for a new line.", cwd: "Folder with the files (required)" },
     code: { title: "Code", send: "Send", ph: "Tell Judas what to read or change in this project. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (required)" }
   };
   var EMPTY_HINT = {
     chat: "Ask anything below. Chat needs no project folder.",
     cowork: "Describe the job below. The lead agent plans it and may spawn workers; watch them on the agent board.",
-    code: "Enter a project folder above, then tell Judas what to read or change. Every edit becomes a snapshot."
+    learn: "Say what you want to understand. Judas reads your goals first, then asks a few questions before teaching.",
+    code: "Enter a project folder above, then tell Judas what to read or change. Every edit becomes a snapshot.",
+    swarm: "Enter the folder that holds the files, then describe the bulk job. The lead plans it and sends the items to the swarm; progress shows in the strip above."
   };
   var STARTERS = [
     { t: "Summarize a document", d: "Attach a PDF or Word file", file: true,
@@ -500,6 +514,39 @@
     pt.hidden = m === "chat";
     pt.textContent = (sideHidden ? "Show " : "Hide ") + (m === "code" ? "changes" : "agents");
     renderRecent(); renderSessions(); renderChanges(); renderBoard();
+    $("#swarm-strip").hidden = m !== "swarm";
+    if (m === "swarm") pollSwarm();
+  }
+
+  /* ---------- swarm status strip (Swarm mode) ---------- */
+  var swarmUp = null, swarmTimer = null, swarmProg = null;
+  function renderSwarmStrip() {
+    var strip = $("#swarm-strip");
+    if (!strip) return;
+    var dot = $("#swarm-dot"), txt = $("#swarm-text"), bar = $("#swarm-bar"), fill = $("#swarm-fill");
+    dot.className = "sw-dot " + (swarmUp === null ? "" : swarmUp.up ? "up" : "down");
+    if (swarmUp === null) txt.textContent = "Swarm: checking...";
+    else if (!swarmUp.enabled) txt.textContent = "Swarm is off. Set enabled = true under [swarm] in config.toml, then restart Judas (docs/SWARM.md).";
+    else if (!swarmUp.up) txt.textContent = "Swarm instance is down. Start it: systemctl --user start judas-swarm";
+    else {
+      var st = swarmUp.state || {};
+      txt.textContent = "Swarm up: " + (st.model || "model") + ", " + (st.active || 0) + " running, " + (st.queued || 0) +
+        " queued" + (st.gen_tok_s ? ", " + Math.round(st.gen_tok_s) + " tok/s" : "");
+    }
+    if (swarmProg && swarmProg.total) {
+      bar.hidden = false;
+      fill.style.width = Math.round(100 * swarmProg.done / swarmProg.total) + "%";
+      txt.textContent += " | job " + swarmProg.done + "/" + swarmProg.total;
+    } else {
+      bar.hidden = true;
+    }
+  }
+  function pollSwarm() {
+    clearTimeout(swarmTimer);
+    if (curMode !== "swarm") return;
+    getJSON("/api/swarm/state").then(function (r) { swarmUp = r; renderSwarmStrip(); },
+      function () { swarmUp = { enabled: true, up: false }; renderSwarmStrip(); });
+    swarmTimer = setTimeout(pollSwarm, 4000);
   }
 
   /* picking a mode from the rail moves to that mode's latest session, or a fresh one */
@@ -660,7 +707,7 @@
     showEmpty();
     $("#chat-title").textContent = "New session";
     syncSessionActions();
-    $("#cwd").value = m === "code" ? (recents()[0] || "") : "";
+    $("#cwd").value = (m === "code" || m === "swarm") ? (recents()[0] || "") : "";
     renderSessions(); renderBoard(); renderChanges();
   }
   $("#new-session").onclick = function () { newSession(curMode); $("#sess-pane").classList.remove("open"); };
@@ -1119,6 +1166,10 @@
     }
     if (lead && !live.inTurn && ev.type !== "done" && ev.type !== "status") beginTurn(ev.type === "spawned" ? d.task : "");
     switch (ev.type) {
+      case "swarm":
+        swarmProg = { done: d.done || 0, total: d.total || 0 };
+        renderSwarmStrip();
+        break;
       case "spawned":
         if (lead) setTurnInfo({ status: "running" });
         a = live.agents[ev.agent] || (live.agents[ev.agent] = newAgentRec(ev.agent, ev.parent, d.role || ev.role, d.task));
@@ -1507,7 +1558,7 @@
     if (atts.some(function (a) { return a.state === "err"; })) { attHint("Remove the file that failed (the x on it) to send.", true); return; }
     attHint("");
     var cwd = $("#cwd").value.trim(), mode = curMode;
-    if (mode === "code" && !cwd) { $("#cwd-err").hidden = false; $("#cwd").focus(); return; }
+    if ((mode === "code" || mode === "swarm") && !cwd) { $("#cwd-err").hidden = false; $("#cwd").focus(); return; }
     var body, url;
     if (/^\/learn(?:\s|$)/.test(text)) {
       // The server rewrites /learn to the shared prompt, so the TUI and the web chat send identical text.
@@ -1971,18 +2022,18 @@
     box.textContent = "";
     box.appendChild(pageHead("guide"));
     var intro = el("div", "note");
-    intro.appendChild(el("p", null, "Judas is a local AI agent harness. One model runs on this machine and every agent shares it. The three modes are three ways to work with it. The tools are for watching, scheduling and undoing what it does."));
+    intro.appendChild(el("p", null, "Judas is a local AI agent harness. One model runs on this machine and every agent shares it. The four modes are four ways to work with it. The tools are for watching, scheduling and undoing what it does."));
     intro.appendChild(el("p", null, "Not sure where to start? Use Chat for a question, Code to work on a project, and Cowork to hand off a bigger job."));
     intro.lastChild.style.marginBottom = "0";
     box.appendChild(intro);
-    box.appendChild(el("h3", null, "The three modes"));
+    box.appendChild(el("h3", null, "The four modes"));
     var g1 = el("div", "ggrid");
     MODES.forEach(function (m) { g1.appendChild(guideCard(m)); });
     box.appendChild(g1);
     box.appendChild(el("h3", null, "Tools"));
     box.appendChild(guideCard("agents", true));
     var g2 = el("div", "ggrid");
-    ["tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
+    ["tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
     box.appendChild(g2);
   }
 
@@ -2429,6 +2480,37 @@
       });
     }, function () { box.textContent = ""; box.appendChild(el("p", "dim", "Could not load models.")); });
   }
+  function renderSwarmCores() {
+    var wrap = $("#swarm-cores-wrap"), box = $("#swarm-cores"); if (!wrap || !box) return;
+    getJSON("/api/swarm/cores").then(function (c) {
+      wrap.hidden = !c.enabled;
+      if (!c.enabled) return;
+      box.textContent = "";
+      var max = c.nproc || 1, val = c.threads || Math.min(max, 8);
+      var row = el("label", "cs-row");
+      row.appendChild(el("span", null, "Cores:"));
+      var rng = el("input"); rng.type = "range"; rng.min = 1; rng.max = max; rng.step = 1; rng.value = val;
+      var out = el("b", "mono", String(val));
+      rng.oninput = function () { out.textContent = rng.value; };
+      row.appendChild(rng); row.appendChild(out); row.appendChild(el("span", "dim small", "of " + max));
+      box.appendChild(row);
+      var r2 = el("label", "cs-row");
+      var cb = el("input"); cb.type = "checkbox"; cb.checked = !!c.pin;
+      r2.appendChild(cb); r2.appendChild(el("span", null, "Pin to those cores"));
+      box.appendChild(r2);
+      var msg = el("p", "dim small", c.up ? "Swarm instance is up." + (c.cpus && c.cpus.length && c.pin ? " Bound to CPUs " + c.cpus.join(",") + "." : "")
+                                         : "Swarm instance is down; the value is saved and applies when it starts.");
+      box.appendChild(msg);
+      function apply() {
+        postJSON("/api/swarm/cores", { threads: parseInt(rng.value, 10), pin: cb.checked }).then(function (r) {
+          msg.className = "dim small";
+          msg.textContent = r.live ? "Applied live: " + r.threads + " threads" + (r.pin && r.cpus ? ", CPUs " + r.cpus.join(",") : ", not pinned") + "."
+                                   : "Saved: " + r.threads + " threads. The swarm instance is down, so it applies when it starts.";
+        }, function (e) { msg.className = "err small"; msg.textContent = "Could not set cores: " + ((e && e.message) || e); });
+      }
+      rng.onchange = apply; cb.onchange = apply;
+    }, function () { wrap.hidden = true; });
+  }
   function switchModel(name, label) {
     if (!confirm("Switch to \u201c" + label + "\u201d? This restarts Judas and interrupts any running chats."))
       return;
@@ -2480,6 +2562,7 @@
     renderCompanionSettings();
     renderDaemon();
     renderModels();
+    renderSwarmCores();
     getJSON("/api/skins").then(function (r) {
       var box = $("#skins"); box.textContent = "";
       var active = lsGet("judas.skin");

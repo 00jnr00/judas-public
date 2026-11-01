@@ -44,7 +44,8 @@ judas run "add a --json flag to export and update the tests"
 - **Sandboxed tools.** Shell commands run in bubblewrap, writes are limited to allowed paths, and privilege escalation (`sudo`, `su`, `doas`, `pkexec`, `passwd`, ...) is blocked in code in every permission mode, including full-auto.
 - **It learns.** Skills are plain Markdown files that load on trigger words. After long turns a background review saves lessons as skills or memory notes, and an idle curator archives skills that stopped earning their place.
 - **OpenAI-compatible.** `/v1/chat/completions` and `/v1/models` for any client, plus a richer Judas API with server-sent events.
-- **Three ways in:** a web app (Chat, Cowork, Code, Agents board, Tasks, Memory, Snapshots, Resources, Heartbeat), a terminal UI, and `judas run "task"` for scripts.
+- **Learn mode.** A tutor that reads your own goals and notes (read only), probes what you know, and teaches in small checked steps; see [docs/LEARN.md](docs/LEARN.md).
+- **Three ways in:** a web app (Chat, Cowork, Code, Learn, Agents board, Tasks, Memory, Snapshots, Resources, Heartbeat), a terminal UI, and `judas run "task"` for scripts.
 
 ## Everyday use
 
@@ -112,7 +113,7 @@ GPU memory: 16.0 GB
    3     ollama:qwen3:14b                   9.3 GB  Q4_K_M     40k  fits     ollama
 ```
 
-It looks in `~/models`, LM Studio (`~/.lmstudio/models`), the Hugging Face cache, Ollama's store (`~/.ollama/models`, read in place, nothing copied), `~/.cache/llama.cpp`, GPT4All and `~/Downloads`. Add your own folders with `judas models --dir /path` or `JUDAS_MODEL_DIRS=/a:/b`. **FIT** compares the file with your GPU memory: `fits` loads fully on the GPU with room for context, `tight` loads with a small context, `too big` needs CPU offload (MoE models get `cpu_moe = true` automatically; dense models get slow).
+It looks in `~/models`, LM Studio (`~/.lmstudio/models`), the Hugging Face cache, Ollama's store (`~/.ollama/models`, read in place, nothing copied), `~/.cache/llama.cpp`, GPT4All and `~/Downloads`. Add your own folders with `judas models --dir /path` or `JUDAS_MODEL_DIRS=/a:/b`. **FIT** compares the file with your GPU memory: `fits` loads fully on the GPU with room for context, `tight` loads with a small context, `too big` needs CPU offload (MoE models get `cpu_moe = "auto"`; dense models get slow).
 
 Load one (or pick it in the web app under Settings > Model, which lists every GGUF found and restarts Judas on it):
 
@@ -120,6 +121,8 @@ Load one (or pick it in the web app under Settings > Model, which lists every GG
 judas models use 2              # writes [models.gemma-4-e4b-it] and makes it the model the daemon loads
 systemctl --user restart judas
 ```
+
+**MoE offload (`cpu_moe`).** For a MoE model that does not fit VRAM the default is GPU-first: `cpu_moe = "auto"` reads the GGUF header, subtracts the non-expert weights, the KV cache for `ctx_total`, compute buffers and a 1.5 GB margin from the free VRAM, puts the experts of the LAST layers on the GPU as far as they fit and leaves the rest in RAM (the decision is logged at load). Models that fit, and dense models, are untouched. Other values: `true` (all experts in RAM), `false` (all on the GPU, fails if too big), or a number N (experts of the first N layers in RAM, like llama.cpp `--n-cpu-moe`). Split GGUFs (`-00001-of-0000N`) load from part 1. See `docs/EXPERT-CACHE.md` for per-expert placement ideas.
 
 `add` picks `ctx_total` and `ctx_per_agent` for the file and your GPU; edit them in the config afterwards if you like. `judas models info 2` shows the metadata and the block it would write.
 
@@ -157,7 +160,7 @@ max_agents = 4
 path = "~/models/your-model.gguf"
 gpu_layers = 99
 ctx_total = 65536        # one KV pool shared by all agents
-ctx_per_agent = 16384
+ctx_per_agent = 16384    # floor of one agent's window; a lone agent can use the whole pool ([context] window = "auto")
 flash_attn = true
 ```
 
@@ -187,9 +190,12 @@ To keep web pages you visit from driving the API, Judas sends no wildcard CORS h
 ## Docs
 
 - [docs/API.md](docs/API.md): Judas API, events, snapshots, tasks, OpenAI-compatible endpoints
+- [docs/LEARN.md](docs/LEARN.md): Learn mode, `[learn] context_files`, progress records
 - [docs/SKILLS.md](docs/SKILLS.md): writing skills and how they load
 - [docs/LEARNING.md](docs/LEARNING.md): background review, curator, `/learn`
 - [docs/MCP.md](docs/MCP.md): connecting MCP servers (sandboxed, fail closed)
+- [docs/SWARM.md](docs/SWARM.md): Swarm mode, bulk jobs on small CPU models via `swarm_map`
+- [docs/TOOLS-TABS.md](docs/TOOLS-TABS.md): the Tools tab (embedded pages with a skill-driven side chat) and the optional built-in planner
 
 ## Testing
 

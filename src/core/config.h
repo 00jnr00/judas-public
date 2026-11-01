@@ -2,6 +2,7 @@
 // (JUDAS_CONFIG = explicit file, JUDAS_PORT, JUDAS_DATA_DIR). Every number lives here, nothing buried in code.
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <string>
@@ -13,7 +14,10 @@ struct ModelConfig {
     std::string name;                // key in [models.<name>]
     std::string path;                // GGUF path (~ expanded)
     int gpu_layers = 99;
-    bool cpu_moe = false;            // keep expert tensors on the CPU
+    // Where routed expert tensors live when the model does not fit VRAM: "auto" (default: as many of the LAST
+    // layers on the GPU as fit, the rest in RAM; no effect on dense models or models that fit), "true" (all on
+    // the CPU), "false" (all on the GPU, fails if too big), or a number N (experts of the first N layers on the CPU).
+    std::string cpu_moe = "auto";
     std::string kv_type = "q8_0";    // q8_0 | f16 | q5_1 | q5_0 | q4_1 | q4_0 (K and V)
     std::string kv_type_k, kv_type_v;  // optional per-tensor override of kv_type ("" = use kv_type)
     int ctx_total = 49152;          // unified KV pool shared by all agents
@@ -44,6 +48,21 @@ struct ModelConfig {
     bool mmproj_gpu = false;
     int image_max_tokens = 1024;
     bool vision = false;
+    // Backend. "llama" (default): libllama in-process. "strata": the Strata engine (docs/STRATA-BACKEND.md), run as
+    // a child process; needs a build with -DJUDAS_STRATA=ON. `path` is then the first GGUF shard.
+    std::string backend = "llama";
+    // Strata only. Empty strings and zeros mean "use the default from docs/STRATA-BACKEND.md".
+    std::string strata_pack;             // pack dir (dense.bin, tokenizer/, ...)
+    std::string strata_mtp;              // MTP draft dir
+    std::string strata_profile;          // expert profile; "" = the copy embedded in judas
+    std::string strata_cwd;              // working dir of the engine (Strata's source tree)
+    std::string strata_kv = "int8";      // KV cache type
+    int strata_kv_resident = 32768;      // KV tokens kept in VRAM
+    int strata_vram_reserve_mib = 3072;  // VRAM left free for the system
+    int strata_resident_budget_gib = 0;  // RAM kept for experts the GPU cache does not hold (0 = Strata's default mode)
+    int strata_spec = 4;                 // MTP draft length
+    double strata_spec_min_p = 0.5;      // draft acceptance floor
+    std::vector<std::string> strata_extra_args;  // appended to the engine command line verbatim
 };
 
 struct EngineConfig {
@@ -57,6 +76,7 @@ struct EngineConfig {
     std::string park_dir = "/dev/shm/judas";
     int prefix_cache = 4;         // RAM snapshots of shared prompt prefixes (LRU)
     int kv_reserve = 512;         // KV tokens held back per live request for generation (admission)
+    bool pin_cores = false;       // pin the process to its first `threads` CPUs (whole cores of one CCD first)
 
     // prefill_chunk_busy defaults to prefill_chunk, so changing the common chunk size also moves the busy one.
     int busy_prefill_chunk() const { return prefill_chunk_busy > 0 ? prefill_chunk_busy : prefill_chunk; }
@@ -171,6 +191,14 @@ struct ContextConfig {
     int keep_turns = 3;             // always keep the last N user/assistant turns verbatim
     bool recall = true;             // keep compacted tool output addressable via the recall tool
     int clm_max_edits = 4;          // clm: max self-edits per turn
+    // Per-agent window. auto: a lone agent may use the whole pool (up to ctx_per_agent_max, else ctx_total) and the
+    // budget splits only while other agents are live; compaction triggers against that effective cap. fixed: the
+    // static ctx_per_agent, as before.
+    std::string window = "auto";    // auto | fixed
+    // Rule pinning: instruction files (AGENTS.md, CLAUDE.md, .judas/*.md, files named in the first user message)
+    // keep their first pin_tokens tokens verbatim in one pinned message when compaction drops or summarizes them.
+    int pin_tokens = 1200;          // per file
+    int pin_total = 3000;           // all pinned files together; 0 = pinning off
 };
 
 // Prompt budget: keep the model's prompt lean.
@@ -184,6 +212,13 @@ struct MemoryConfig {
     std::string path = "~/.local/share/judas/memory.md";
     std::vector<std::string> inject_sections = {"About me", "Rules"};  // put in the system prompt
     bool reject_dashes = false;   // memory_append refuses facts with em or en dashes
+};
+
+// Learn mode: a tutoring session grounded in the learner's own files. context_files are READ ONLY for every
+// agent; they are listed (paths or globs, ~ expanded) so the Learn lead gets a digest and a search tool.
+struct LearnConfig {
+    std::vector<std::string> context_files;   // empty = no grounding files
+    int max_context_tokens = 3000;            // cap on the digest in the lead's prompt (~4 bytes per token)
 };
 
 // A notification channel (ntfy topic, or a user command that receives the message on stdin).
@@ -257,6 +292,32 @@ struct UiConfig {
     bool mascot = true;                 // pixel-art companions in the TUI and web UI
 };
 
+// Swarm: bulk jobs fan out to a second, CPU-only Judas instance running small models (contrib/swarm.toml).
+struct SwarmConfig {
+    bool enabled = false;                           // registers the swarm_map tool
+    std::string url = "http://127.0.0.1:8083";      // the swarm instance
+    int max_parallel = 8;                           // concurrent requests to it
+    int max_item_chars = 24000;                     // longer files are split into chunks of at most this size
+    std::string config = "~/.config/judas/swarm.toml";  // the swarm instance's own config (cores are written there)
+};
+// Tools tab (web): each entry is a sub-tab. `url` is embedded in an iframe, `skill` adds a "Plan with Judas"
+// side chat that loads that skill, `prompt_hint` is its placeholder.
+struct ToolsTab {
+    std::string name;         // id, [a-z0-9-]
+    std::string label;        // shown on the sub-tab (defaults to name)
+    std::string url;          // page to embed (optional)
+    std::string skill;        // Judas skill to load in the side chat (optional)
+    std::string prompt_hint;  // placeholder of the side chat (optional)
+};
+struct ToolsConfig {
+    std::vector<ToolsTab> tabs;
+};
+// Built-in day planner server (compiled in with JUDAS_MACH12). Off unless enabled.
+struct Mach12Config {
+    bool enabled = false;
+    std::string data_dir = "~/.local/share/mach12";
+};
+
 struct Config {
     EngineConfig engine;
     AttachmentsConfig attachments;
@@ -272,10 +333,14 @@ struct Config {
     HooksConfig hooks;
     PromptConfig prompt;
     MemoryConfig memory;
+    LearnConfig learn;
     ContextConfig context;
     HeartbeatConfig heartbeat;
     ChannelsConfig channels;
     McpConfig mcp;
+    SwarmConfig swarm;
+    ToolsConfig tools;
+    Mach12Config mach12;
     std::string data_dir = "~/.local/share/judas";  // sessions.db, snapshots/, logs/
     std::vector<std::string> sources;               // files actually loaded, for `judas config show`
 
@@ -284,6 +349,8 @@ struct Config {
 
 // Load defaults <- user file <- project file <- env. Throws std::runtime_error with file:line on bad input.
 Config load_config(const std::string & project_dir = ".");
+// Defaults plus one config file (no project file, no env); used to read another instance's config.
+Config load_config_file(const std::string & file);
 // Problems that are not parse errors (missing GGUF, max_agents out of 1..8, unknown mode). Empty = valid.
 std::vector<std::string> validate_config(const Config & cfg);
 // Default config.toml text with comments (written by `judas init`).
@@ -297,5 +364,26 @@ std::string expand_home(const std::string & path);
 std::string user_config_path();
 // Set `model = "<name>"` in [engine] of a config file, keeping comments; atomic. False on I/O failure.
 bool set_engine_model_in_file(const std::string & path, const std::string & model);
+// Same for any scalar: writes `key = raw_value` (raw TOML text, e.g. "true") under [section], creating it if absent.
+bool set_toml_value_in_file(const std::string & path, const std::string & section, const std::string & key,
+                            const std::string & raw_value);
 
+}  // namespace judas
+
+namespace judas {
+// Hard per-request context cap: ctx_per_agent_max when set, else the whole pool while the window is auto,
+// else 0 (borrowing off). The engine admits prompts up to this; the agent sizes compaction under it.
+inline int ctx_hard_cap(const ModelConfig & m, const ContextConfig & c) {
+    if (m.ctx_per_agent_max > 0) return m.ctx_per_agent_max;
+    return c.window == "auto" ? m.ctx_total : 0;
+}
+// Effective per-agent cap given how many agents are live in the pool (this one included): the fair share of
+// ctx_total, clamped between the soft ctx_per_agent and the hard cap. fixed = the soft cap.
+inline int effective_ctx_cap(const ModelConfig & m, const ContextConfig & c, int live_agents) {
+    int soft = m.ctx_per_agent;
+    if (c.window != "auto") return soft;
+    int hard = std::max(soft, ctx_hard_cap(m, c));
+    int fair = m.ctx_total / std::max(1, live_agents);
+    return std::clamp(fair, soft, hard);
+}
 }  // namespace judas

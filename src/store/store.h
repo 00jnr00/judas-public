@@ -17,7 +17,7 @@ struct SessionRow {
     std::string title;
     std::string cwd;
     std::string model;
-    std::string mode = "chat"; // chat | cowork | code (the UI surface the session belongs to; unknown values are shown everywhere)
+    std::string mode = "chat"; // chat | cowork | code | learn | swarm (the UI surface the session belongs to; unknown values are shown everywhere)
     int auto_resume = -1;      // -1 follows agents.auto_resume, 0 off, 1 on (per-session override)
     long long created_ms = 0, updated_ms = 0;
 };

@@ -17,6 +17,8 @@
 #include "skills/skills.h"
 #include "skills/usage.h"
 #include "tools/memory_tools.h"
+#include "tutor/tutor.h"
+#include "tools/swarm_tools.h"
 #include "tools/session_tools.h"
 
 #include <unistd.h>
@@ -37,6 +39,15 @@ const char * version();
 namespace fs = std::filesystem;
 
 namespace {
+
+// Appended to the lead's prompt in a Swarm-mode session.
+const char * SWARM_PROMPT = R"(Swarm mode: bulk work is done by a swarm of small, fast models on the CPU through the swarm_map tool.
+- Use the swarm for wide, shallow work: research (save the fetched pages to files, then have the swarm pull the facts and quotes relevant to the question from each), big documents (pass the file; it is chunked automatically, each chunk summarized or searched in parallel), folders of many files (summarize, tag, classify, extract fields), triage (score relevance, then read only the top items yourself) and record cleanup.
+- Break bulk work (many files, records or snippets) into many small, independent items and send them with one swarm_map call: an instruction plus a list of files, globs or "text:..." strings. Items are answered in parallel and independently, so each must make sense alone.
+- Write the swarm instruction like a precise spec: say exactly what to extract or decide and the exact output format (for example one JSON object per item). Try it on 3 to 5 items first, check the replies, then run the rest.
+- Keep your own work to planning, spot-checking and merging the results. Full replies are in the JSONL file swarm_map names; read it in parts instead of pasting it into your context.
+- Small models are good at extraction, short summaries, classification and tagging. They are not good at coding, long reasoning or anything that needs the whole picture; do those yourself.
+- If swarm_map is missing or reports the swarm is down, tell the user: enable [swarm] in config.toml and run systemctl --user start judas-swarm.)";
 
 const char * BASE_PROMPT = R"(You are Judas, a helpful assistant and agent running locally on the user's own machine.
 Nothing the user shares leaves this computer.
@@ -214,6 +225,7 @@ struct AgentManager::Impl {
         bool review = false;     // hidden background-review agent: no events, no hooks, restricted tools
         std::vector<std::string> review_writes;  // successful memory/skill writes, for the review event summary
         std::atomic<bool> cancel{false};
+        std::set<std::string> delivered;  // child agents whose reports this agent has already received
         std::thread thread;
     };
     // How one turn ended. status is the agent row status it maps to.
@@ -265,10 +277,12 @@ struct AgentManager::Impl {
         register_builtin_tools(tools);
         register_attach_tools(tools);
         register_memory_tools(tools);
+        register_learn_tools(tools);
         register_session_tools(tools, store);
         register_agent_tools();
         register_skill_tool();
         if (cfg.skills.enabled && cfg.skills.manage) register_skill_tools(tools, skills, usage.get());
+        if (cfg.swarm.enabled) register_swarm_tool(tools);
         register_notify_tool();
         register_recall_tool();
         register_plan_tool();
@@ -328,13 +342,28 @@ struct AgentManager::Impl {
         return {type, a.row.session, a.row.id, a.row.parent, a.row.role, std::move(data)};
     }
 
+    bool is_learn_session(const Agent & a) {
+        if (a.review) return false;
+        auto sess = store.get_session(a.row.session);
+        return sess && sess->mode == "learn";
+    }
+
     std::string system_prompt(const Agent & a) {
         std::string p = replace_all(replace_all(BASE_PROMPT, "{cwd}", a.cwd), "{date}", today());
         p += "\n\n" + a.role.prompt;
+        if (a.role.name == "lead" && !a.review) {
+            auto sess = store.get_session(a.row.session);
+            if (sess && sess->mode == "swarm") p += "\n\n" + std::string(SWARM_PROMPT);
+        }
         std::string sk = skills.index_block();
         if (!sk.empty()) p += "\n\n" + sk;
         std::string mem = memory_prompt_block(cfg);
         if (!mem.empty()) p += "\n\n" + mem;
+        if (is_learn_session(a)) {
+            p += "\n\n" + std::string(learn_prompt());
+            std::string dg = learn_context_digest(cfg);
+            if (!dg.empty()) p += "\n\nLearner context (read only, from their own files):\n\n" + dg;
+        }
         return p;
     }
 
@@ -394,7 +423,10 @@ struct AgentManager::Impl {
         }
         bool can_spawn = a.depth < cfg.agents.max_depth;
         int mcp_seen = 0;
+        bool learn = is_learn_session(a);
         for (const Tool * t : tools.list()) {
+            // Learn sessions get a read-only toolset; the learner tools exist only there
+            if (learn ? !learn_tool_allowed(t->name) : (t->name == "learner_context" || t->name == "learn_progress")) continue;
             bool agent_tool = t->name.rfind("spawn_agent", 0) == 0 || t->name == "wait_agents" ||
                               t->name == "send_agent" || t->name == "list_agents";
             if (agent_tool && !can_spawn) continue;
@@ -625,7 +657,15 @@ struct AgentManager::Impl {
         if (cfg.context.mode == "append") return;
         int cap = 0;
         try {
-            cap = cfg.active_model().ctx_per_agent;
+            // window = auto: the cap is this agent's share of the pool right now (a lone agent gets all of it),
+            // so a lead that grew big while alone is compacted down before its next request once workers start.
+            int live = 0;
+            {
+                std::lock_guard lk(mu);
+                for (auto & [id, other] : agents)
+                    if (other->running) live++;
+            }
+            cap = effective_ctx_cap(cfg.active_model(), cfg.context, std::max(1, live));
         } catch (...) {
             return;  // model not resolvable (e.g. a test with no models); nothing to size against
         }
@@ -844,6 +884,43 @@ struct AgentManager::Impl {
         return o;
     }
 
+    // Children this agent spawned that are still working (running or with queued input).
+    bool has_live_children(const Agent & a) {
+        std::lock_guard lk(mu);
+        for (auto & [id, c] : agents)
+            if (c->row.parent == a.row.id && (c->running || !c->inbox.empty())) return true;
+        return false;
+    }
+
+    // A lead that answers without a tool call while its workers still run would otherwise burn auto-continues and
+    // pause. Instead the harness waits for the workers itself and hands over every report not yet delivered.
+    // Returns false if nothing was waited for (no live children) or the agent was cancelled meanwhile.
+    bool auto_wait_children(Agent * a) {
+        if (!has_live_children(*a)) return false;
+        emit(event(*a, "status", {{"waiting", "workers"}}));
+        json reports = json::array();
+        {
+            std::unique_lock lk(mu);
+            cv.wait(lk, [&] {
+                if (stopping || a->cancel) return true;
+                for (auto & [id, c] : agents)
+                    if (c->row.parent == a->row.id && (c->running || !c->inbox.empty())) return false;
+                return true;
+            });
+            if (stopping || a->cancel) return false;
+            for (auto & [id, c] : agents) {
+                if (c->row.parent != a->row.id || a->delivered.count(id)) continue;
+                a->delivered.insert(id);
+                reports.push_back({{"agent", id}, {"role", c->row.role}, {"status", c->row.status},
+                                   {"report", c->row.result}});
+            }
+        }
+        nudge(a, "[harness] Your worker agents have finished; their reports follow. Check their work (run the "
+                 "tests), fix or reassign what is wrong, then call done.\n" + reports.dump(2),
+              "auto-wait for workers");
+        return true;
+    }
+
     void nudge(Agent * a, const std::string & text, const std::string & why) {
         a->messages.push_back({"user", text});
         emit(event(*a, "status", {{"nudge", why}, {"text", text}}));
@@ -929,6 +1006,7 @@ struct AgentManager::Impl {
                 finish_hooks(a, msg.content);
                 return {msg.content, "done", ""};
             }
+            if (msg.tool_calls.empty() && kind != ReplyKind::Truncated && auto_wait_children(a)) continue;
             Decision d = should_continue(kind, plan_state(a->plan), ts, cfg.agents.max_auto_continues,
                                          res.completion_tokens);
             if (d.action == Action::Pause) return paused(a, d.reason);
@@ -966,6 +1044,7 @@ struct AgentManager::Impl {
                 ctx.session = a->row.session;
                 ctx.agent = a->row.id;
                 ctx.autonomous = a->review;
+                ctx.progress = [this, a](const json & d) { emit(event(*a, "swarm", d)); };
                 ctx.checkpoint = journal.begin(a->row.session, a->row.id, label.substr(0, 200));
                 if (!a->review) ctx.approve = [this, a](const std::string & what) {
                     std::function<bool(const std::string &, const std::string &)> f;
@@ -1142,6 +1221,8 @@ struct AgentManager::Impl {
                 return true;
             });
             json out = json::array();
+            if (self)
+                for (auto & id : ids) self->delivered.insert(id);
             for (auto & id : ids) {
                 auto it = agents.find(id);
                 if (it == agents.end()) out.push_back({{"agent", id}, {"error", "unknown agent"}});

@@ -85,7 +85,13 @@ int main() {
     // too big for the GPU: an MoE keeps experts on the CPU
     m.bytes = 30 * G;
     m.experts = 128;
-    CHECK(model_block("big", m, 16 * G).find("cpu_moe = true") != std::string::npos);
+    CHECK(model_block("big", m, 16 * G).find("cpu_moe = \"auto\"") != std::string::npos);
+    CHECK(gpu_vram_free() <= gpu_vram_total() || gpu_vram_total() == 0);
+
+    // embed, rerank and MTP draft files are helpers, not chat models
+    CHECK(is_helper_name("mtp-gemma-4-26B-A4B-it.gguf") && is_helper_name("mtp-q2_0.gguf"));
+    CHECK(is_helper_name("Foo-MTP-Q8_0.gguf") && is_helper_name("bge-embed-small.gguf") && is_helper_name("x-rerank.gguf"));
+    CHECK(!is_helper_name("gemma-4-26B-A4B-it-Q4_K_M.gguf") && !is_helper_name("Qwen3.8-Flash-Next-IQ2_XS-00001-of-00002.gguf"));
 
     // scanning finds a file in a JUDAS_MODEL_DIRS folder (unreadable header is reported, not fatal)
     setenv("JUDAS_MODEL_DIRS", root.c_str(), 1);

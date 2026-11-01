@@ -103,6 +103,20 @@ bool get_bool(const Reader & r, const std::string & key, const toml::node & n) {
     fail_at(r, "key " + key + " must be a boolean", &n);
 }
 
+std::string get_cpu_moe(const Reader & r, const std::string & key, const toml::node & n) {
+    if (auto * b = n.as_boolean()) return b->get() ? "true" : "false";
+    if (auto * i = n.as_integer()) {
+        if (i->get() < 0 || i->get() > 100000) fail_at(r, "key " + key + " must be 0 or more", &n);
+        return std::to_string(i->get());
+    }
+    if (auto * s = n.as_string()) {
+        const std::string & v = s->get();
+        bool digits = !v.empty() && v.find_first_not_of("0123456789") == std::string::npos && v.size() < 7;
+        if (v == "auto" || v == "true" || v == "false" || digits) return v;
+    }
+    fail_at(r, "key " + key + " must be true, false, \"auto\" or a layer count", &n);
+}
+
 int get_int(const Reader & r, const std::string & key, const toml::node & n) {
     if (auto * v = n.as_integer()) {
         long long x = v->get();
@@ -183,7 +197,7 @@ void apply_model(const Reader & r, ModelConfig & m, const std::string & prefix, 
         std::string key(k.str()), full = prefix + "." + key;
         if (key == "path") m.path = get_str(r, full, v);
         else if (key == "gpu_layers") m.gpu_layers = get_int(r, full, v);
-        else if (key == "cpu_moe") m.cpu_moe = get_bool(r, full, v);
+        else if (key == "cpu_moe") m.cpu_moe = get_cpu_moe(r, full, v);
         else if (key == "kv_type") m.kv_type = get_str(r, full, v);
         else if (key == "kv_type_k") m.kv_type_k = get_str(r, full, v);
         else if (key == "kv_type_v") m.kv_type_v = get_str(r, full, v);
@@ -210,6 +224,27 @@ void apply_model(const Reader & r, ModelConfig & m, const std::string & prefix, 
         else if (key == "mmproj_gpu") m.mmproj_gpu = get_bool(r, full, v);
         else if (key == "image_max_tokens") m.image_max_tokens = get_int(r, full, v);
         else if (key == "vision") m.vision = get_bool(r, full, v);
+        else if (key == "backend") {
+            m.backend = get_str(r, full, v);
+            if (m.backend != "llama" && m.backend != "strata")
+                fail_at(r, full + ": must be \"llama\" or \"strata\", got \"" + m.backend + "\"", &v);
+        }
+        else if (key == "strata_pack") m.strata_pack = get_str(r, full, v);
+        else if (key == "strata_mtp") m.strata_mtp = get_str(r, full, v);
+        else if (key == "strata_profile") m.strata_profile = get_str(r, full, v);
+        else if (key == "strata_cwd") m.strata_cwd = get_str(r, full, v);
+        else if (key == "strata_kv") m.strata_kv = get_str(r, full, v);
+        else if (key == "strata_kv_resident") m.strata_kv_resident = get_int(r, full, v);
+        else if (key == "strata_vram_reserve_mib") m.strata_vram_reserve_mib = get_int(r, full, v);
+        else if (key == "strata_resident_budget_gib") m.strata_resident_budget_gib = get_int(r, full, v);
+        else if (key == "strata_spec") m.strata_spec = get_int(r, full, v);
+        else if (key == "strata_spec_min_p") m.strata_spec_min_p = get_double(r, full, v);
+        else if (key == "strata_extra_args") {
+            const auto * arr = v.as_array();
+            if (!arr) fail_at(r, full + ": must be an array of strings", &v);
+            m.strata_extra_args.clear();
+            for (auto && e : *arr) m.strata_extra_args.push_back(get_str(r, full, e));
+        }
         else if (key == "sampling") {
             const auto & s = as_table(r, full, v);
             for (auto && [sk, sv] : s) {
@@ -266,6 +301,7 @@ void apply_file(Config & c, const std::string & file) {
                 else if (e == "park_dir") c.engine.park_dir = get_str(r, full, ev);
                 else if (e == "prefix_cache") c.engine.prefix_cache = get_int(r, full, ev);
                 else if (e == "kv_reserve") c.engine.kv_reserve = get_int(r, full, ev);
+                else if (e == "pin_cores") c.engine.pin_cores = get_bool(r, full, ev);
                 else unknown_key(r, full, ev);
             }
         } else if (key == "models") {
@@ -320,6 +356,13 @@ void apply_file(Config & c, const std::string & file) {
                 else if (s == "track_usage") c.skills.track_usage = get_bool(r, full, sv);
                 else unknown_key(r, full, sv);
             }
+        } else if (key == "learn") {
+            for (auto && [lk, lv] : as_table(r, key, v)) {
+                std::string l(lk.str()), full = key + "." + l;
+                if (l == "context_files") c.learn.context_files = get_str_array(r, full, lv);
+                else if (l == "max_context_tokens") c.learn.max_context_tokens = get_int(r, full, lv);
+                else unknown_key(r, full, lv);
+            }
         } else if (key == "learning") {
             for (auto && [lk, lv] : as_table(r, key, v)) {
                 std::string l(lk.str()), full = key + "." + l;
@@ -364,6 +407,16 @@ void apply_file(Config & c, const std::string & file) {
                 else if (m == "inject_sections") c.memory.inject_sections = get_str_array(r, full, mv);
                 else if (m == "reject_dashes") c.memory.reject_dashes = get_bool(r, full, mv);
                 else unknown_key(r, full, mv);
+            }
+        } else if (key == "swarm") {
+            for (auto && [sk, sv] : as_table(r, key, v)) {
+                std::string sw(sk.str()), full = key + "." + sw;
+                if (sw == "enabled") c.swarm.enabled = get_bool(r, full, sv);
+                else if (sw == "url") c.swarm.url = get_str(r, full, sv);
+                else if (sw == "max_parallel") c.swarm.max_parallel = get_int(r, full, sv);
+                else if (sw == "max_item_chars") c.swarm.max_item_chars = get_int(r, full, sv);
+                else if (sw == "config") c.swarm.config = get_str(r, full, sv);
+                else unknown_key(r, full, sv);
             }
         } else if (key == "hooks") {
             for (auto && [hk, hv] : as_table(r, key, v)) {
@@ -424,6 +477,9 @@ void apply_file(Config & c, const std::string & file) {
                 else if (x == "keep_turns") c.context.keep_turns = get_int(r, full, xv);
                 else if (x == "recall") c.context.recall = get_bool(r, full, xv);
                 else if (x == "clm_max_edits") c.context.clm_max_edits = get_int(r, full, xv);
+                else if (x == "window") c.context.window = get_str(r, full, xv);
+                else if (x == "pin_tokens") c.context.pin_tokens = get_int(r, full, xv);
+                else if (x == "pin_total") c.context.pin_total = get_int(r, full, xv);
                 else unknown_key(r, full, xv);
             }
         } else if (key == "heartbeat") {
@@ -486,6 +542,38 @@ void apply_file(Config & c, const std::string & file) {
                 } else {
                     unknown_key(r, full, cv);
                 }
+            }
+        } else if (key == "tools") {
+            for (auto && [tk, tv] : as_table(r, key, v)) {
+                std::string t(tk.str()), full = key + "." + t;
+                if (t == "tabs") {
+                    auto * arr = tv.as_array();
+                    if (!arr) fail_at(r, "key " + full + " must be an array of tables ([[tools.tabs]])", &tv);
+                    c.tools.tabs.clear();
+                    for (auto & e : *arr) {
+                        ToolsTab tab;
+                        for (auto && [ik, iv] : as_table(r, full + "[]", e)) {
+                            std::string i(ik.str()), ifull = full + "." + i;
+                            if (i == "name") tab.name = get_str(r, ifull, iv);
+                            else if (i == "label") tab.label = get_str(r, ifull, iv);
+                            else if (i == "url") tab.url = get_str(r, ifull, iv);
+                            else if (i == "skill") tab.skill = get_str(r, ifull, iv);
+                            else if (i == "prompt_hint") tab.prompt_hint = get_str(r, ifull, iv);
+                            else unknown_key(r, ifull, iv);
+                        }
+                        if (tab.label.empty()) tab.label = tab.name;
+                        c.tools.tabs.push_back(std::move(tab));
+                    }
+                } else {
+                    unknown_key(r, full, tv);
+                }
+            }
+        } else if (key == "mach12") {
+            for (auto && [mk, mv] : as_table(r, key, v)) {
+                std::string m(mk.str()), full = key + "." + m;
+                if (m == "enabled") c.mach12.enabled = get_bool(r, full, mv);
+                else if (m == "data_dir") c.mach12.data_dir = get_str(r, full, mv);
+                else unknown_key(r, full, mv);
             }
         } else if (key == "mcp") {
             for (auto && [mk, mv] : as_table(r, key, v)) {
@@ -578,6 +666,14 @@ void load_bias_file(ModelConfig & m) {
 
 }  // namespace
 
+Config load_config_file(const std::string & file) {
+    Config c = default_config();
+    std::error_code ec;
+    std::string f = expand_home(file);
+    if (fs::is_regular_file(f, ec)) apply_file(c, f);
+    return c;
+}
+
 Config load_config(const std::string & project_dir) {
     Config c = default_config();
 
@@ -664,6 +760,16 @@ std::vector<std::string> validate_config(const Config & cfg) {
             p.push_back("models." + it->first + ".path does not exist: " + expand_home(it->second.path));
     }
     for (auto & [name, m] : cfg.models) {
+        if (m.backend == "strata") {
+            std::error_code sec;
+            const std::pair<const char *, const std::string *> req[] = {{"strata_pack", &m.strata_pack}, {"strata_mtp", &m.strata_mtp}};
+            if (!m.strata_profile.empty() && !fs::exists(expand_home(m.strata_profile), sec))
+                p.push_back("models." + name + ".strata_profile does not exist: " + expand_home(m.strata_profile));
+            for (const auto & [key, val] : req) {
+                if (val->empty()) p.push_back("models." + name + "." + key + " is not set (backend = \"strata\")");
+                else if (!fs::exists(expand_home(*val), sec)) p.push_back("models." + name + "." + key + " does not exist: " + expand_home(*val));
+            }
+        }
         auto kv_ok = [](const std::string & t) {
             return t == "f16" || t == "q8_0" || t == "q5_1" || t == "q5_0" || t == "q4_1" || t == "q4_0";
         };
@@ -718,12 +824,18 @@ std::vector<std::string> validate_config(const Config & cfg) {
             p.push_back("learning.archive_after_days (" + std::to_string(lc.archive_after_days) +
                         ") must be at least stale_after_days (" + std::to_string(lc.stale_after_days) + ")");
     }
+    if (cfg.learn.max_context_tokens < 0)
+        p.push_back("learn.max_context_tokens must be 0 or more, got " + std::to_string(cfg.learn.max_context_tokens));
     const auto & ts = cfg.prompt.tool_schema;
     if (ts != "full" && ts != "lazy")
         p.push_back("prompt.tool_schema must be full or lazy, got '" + ts + "'");
     const auto & cx = cfg.context;
     if (cx.mode != "append" && cx.mode != "compact" && cx.mode != "clm")
         p.push_back("context.mode must be append, compact or clm, got '" + cx.mode + "'");
+    if (cx.window != "auto" && cx.window != "fixed")
+        p.push_back("context.window must be auto or fixed, got '" + cx.window + "'");
+    if (cx.pin_tokens < 0 || cx.pin_total < 0)
+        p.push_back("context.pin_tokens and context.pin_total must be 0 or more");
     if (!(cx.target_pct > 0.0 && cx.target_pct < cx.trigger_pct && cx.trigger_pct <= 0.95))
         p.push_back("context needs 0 < target_pct < trigger_pct <= 0.95, got target_pct " +
                     std::to_string(cx.target_pct) + " and trigger_pct " + std::to_string(cx.trigger_pct));
@@ -753,6 +865,8 @@ std::vector<std::string> validate_config(const Config & cfg) {
             p.push_back("channels.channels[" + std::to_string(i) + "].kind must be ntfy, command or matrix, got '" + k + "'");
     }
     {
+        if (cfg.swarm.max_parallel < 1 || cfg.swarm.max_parallel > 64) p.push_back("swarm.max_parallel must be 1..64");
+        if (cfg.swarm.max_item_chars < 500) p.push_back("swarm.max_item_chars must be at least 500");
         const auto & mc = cfg.mcp;
         if (mc.max_tools_per_agent < 0) p.push_back("mcp.max_tools_per_agent must be 0 (no cap) or more");
         if (mc.max_result_chars < 200) p.push_back("mcp.max_result_chars must be at least 200");
@@ -831,13 +945,14 @@ std::string dump_config(const Config & c) {
       << "max_tokens = " << c.engine.max_tokens << "\n"
       << "park_dir = " << q(c.engine.park_dir) << "\n"
       << "prefix_cache = " << c.engine.prefix_cache << "\n"
-      << "kv_reserve = " << c.engine.kv_reserve << "\n\n";
+      << "kv_reserve = " << c.engine.kv_reserve << "\n"
+      << "pin_cores = " << (c.engine.pin_cores ? "true" : "false") << "\n\n";
     for (auto & [name, m] : c.models) {
         std::string k = "models." + key_name(name);
         o << "[" << k << "]\n"
           << "path = " << q(m.path) << "\n"
           << "gpu_layers = " << m.gpu_layers << "\n"
-          << "cpu_moe = " << (m.cpu_moe ? "true" : "false") << "\n"
+          << "cpu_moe = " << (m.cpu_moe == "true" || m.cpu_moe == "false" ? m.cpu_moe : (m.cpu_moe.find_first_not_of("0123456789") == std::string::npos && !m.cpu_moe.empty() ? m.cpu_moe : q("auto"))) << "\n"
           << "kv_type = " << q(m.kv_type) << "\n"
           << "kv_type_k = " << q(m.kv_type_k) << "\n"
           << "kv_type_v = " << q(m.kv_type_v) << "\n"
@@ -895,6 +1010,9 @@ std::string dump_config(const Config & c) {
       << "autoload = " << q(c.skills.autoload) << "\n"
       << "manage = " << (c.skills.manage ? "true" : "false") << "\n"
       << "track_usage = " << (c.skills.track_usage ? "true" : "false") << "\n\n"
+      << "[learn]\n"
+      << "context_files = " << str_array(c.learn.context_files) << "\n"
+      << "max_context_tokens = " << c.learn.max_context_tokens << "\n\n"
       << "[learning]\n"
       << "review = " << (c.learning.review ? "true" : "false") << "\n"
       << "review_tool_steps = " << c.learning.review_tool_steps << "\n"
@@ -937,7 +1055,10 @@ std::string dump_config(const Config & c) {
       << "target_pct = " << dnum(c.context.target_pct) << "\n"
       << "keep_turns = " << c.context.keep_turns << "\n"
       << "recall = " << (c.context.recall ? "true" : "false") << "\n"
-      << "clm_max_edits = " << c.context.clm_max_edits << "\n";
+      << "clm_max_edits = " << c.context.clm_max_edits << "\n"
+      << "window = " << q(c.context.window) << "\n"
+      << "pin_tokens = " << c.context.pin_tokens << "\n"
+      << "pin_total = " << c.context.pin_total << "\n";
     for (auto & h : c.hooks.hooks) {
         o << "\n[[hooks.hooks]]\n"
           << "event = " << q(h.event) << "\n"
@@ -968,6 +1089,23 @@ std::string dump_config(const Config & c) {
           << "kind = " << q(ch.kind) << "\n"
           << "target = " << q(ch.target) << "\n"
           << "enabled = " << (ch.enabled ? "true" : "false") << "\n";
+    }
+    o << "\n[swarm]\n"
+      << "enabled = " << (c.swarm.enabled ? "true" : "false") << "\n"
+      << "url = " << q(c.swarm.url) << "\n"
+      << "max_parallel = " << c.swarm.max_parallel << "\n"
+      << "max_item_chars = " << c.swarm.max_item_chars << "\n"
+      << "config = " << q(c.swarm.config) << "\n";
+    o << "\n[mach12]\n"
+      << "enabled = " << (c.mach12.enabled ? "true" : "false") << "\n"
+      << "data_dir = " << q(c.mach12.data_dir) << "\n";
+    for (auto & tb : c.tools.tabs) {
+        o << "\n[[tools.tabs]]\n"
+          << "name = " << q(tb.name) << "\n"
+          << "label = " << q(tb.label) << "\n"
+          << "url = " << q(tb.url) << "\n"
+          << "skill = " << q(tb.skill) << "\n"
+          << "prompt_hint = " << q(tb.prompt_hint) << "\n";
     }
     o << "\n[mcp]\n"
       << "enabled = " << (c.mcp.enabled ? "true" : "false") << "\n"
@@ -1016,6 +1154,7 @@ max_tokens = 8192          # default generation cap per turn
 park_dir = "/dev/shm/judas"
 prefix_cache = 4           # RAM snapshots of shared prompt prefixes (LRU)
 kv_reserve = 512           # KV tokens held back per live request for generation (admission control)
+# pin_cores = false        # pin the process to its first `threads` CPUs (whole cores, one CCD first); the swarm instance uses it
 
 # ---- models ----------------------------------------------------------------
 # bias_file format: "1892-inf,2218-inf,..." (token id, then a float or -inf).
@@ -1025,13 +1164,13 @@ kv_reserve = 512           # KV tokens held back per live request for generation
 [models.main]
 path = "~/models/model.gguf"
 gpu_layers = 99
-cpu_moe = false            # keep expert tensors on the CPU
+cpu_moe = "auto"          # MoE too big for VRAM: experts of the last layers on the GPU, the rest in RAM. Also true (all in RAM), false (all on GPU), or N (first N layers in RAM)
 kv_type = "q8_0"           # f16 | q8_0 | q5_1 | q5_0 | q4_1 | q4_0 (q4_0 roughly doubles the pool vs q8_0)
 # kv_type_k = "q8_0"       # optional: K and V cache types separately (K is the quality-sensitive one)
 # kv_type_v = "q4_0"
 ctx_total = 49152         # unified KV pool shared by all agents
-ctx_per_agent = 24576      # soft cap for one agent's sequence (compaction trigger)
-ctx_per_agent_max = 0      # 0 = off; lets one big prompt borrow free KV up to this hard cap
+ctx_per_agent = 24576      # floor of one agent's window (with [context] window = "fixed", also the compaction trigger)
+ctx_per_agent_max = 0      # hard cap of one agent's window; 0 = ctx_total while window = "auto", off while "fixed"
 threads = 4
 ubatch = 256
 batch = 2048
@@ -1040,6 +1179,7 @@ flash_attn = true
 # mmproj_gpu = false       # run the projector on the GPU (faster image encode, costs VRAM)
 # image_max_tokens = 1024  # token cap per image
 # bias_file = "~/.config/judas/bias.txt"   # optional token bans, format above
+# backend = "strata"       # Strata engine instead of llama.cpp (build with -DJUDAS_STRATA=ON); see docs/STRATA-BACKEND.md
 
 [models.main.sampling]
 temp = 0.7
@@ -1129,6 +1269,14 @@ path = "~/.local/share/judas/memory.md"
 inject_sections = ["About me", "Rules"]
 reject_dashes = false      # memory_append refuses facts containing em or en dashes
 
+# ---- learn -----------------------------------------------------------------
+# Learn mode tutors from what the learner already knows and wants. context_files (paths or globs, ~ expanded) are
+# digested into the Learn lead's prompt and searchable with the learner_context tool. They are READ ONLY: no agent
+# may write them. Long-term facts use [memory] above; progress records live in <data_dir>/learn.
+[learn]
+context_files = []
+max_context_tokens = 3000
+
 # ---- hooks -----------------------------------------------------------------
 # events: pre-tool | post-tool | pre-edit | post-edit | turn-end | task-done
 [hooks]
@@ -1165,11 +1313,16 @@ auto_resume_delay_s = 30   # wait this long after a pause before resuming
 # mode: append (never compact) | compact (digest old tool output, summarize last) | clm (model edits its own context)
 [context]
 mode = "compact"
-trigger_pct = 0.75         # compact when ctx_used / ctx_per_agent crosses this
+trigger_pct = 0.75         # compact when ctx_used / the agent's effective cap (see window) crosses this
 target_pct = 0.45          # compact down to about this
 keep_turns = 3             # last N turns always kept verbatim
 recall = true              # compacted tool output stays fetchable via the recall tool
 clm_max_edits = 4          # clm: max self-edits per turn
+window = "auto"            # auto: a lone agent gets the whole pool (up to ctx_per_agent_max, else ctx_total),
+                           #   the budget splits only while other agents are live | fixed: always ctx_per_agent
+pin_tokens = 1200          # instruction files (AGENTS.md, CLAUDE.md, .judas/*.md, files the first message names)
+                           #   keep this many tokens each, verbatim, through compaction
+pin_total = 3000           # cap on all pinned text together; 0 = no pinning
 
 # ---- heartbeat -------------------------------------------------------------
 # Every interval_s, read-only collectors gather facts, a model summarizes and flags
@@ -1197,6 +1350,16 @@ def = ""                   # default channel name for heartbeat alerts
 # kind = "ntfy"
 # target = "https://ntfy.sh/my-judas-topic"
 # enabled = true
+
+# ---- swarm -----------------------------------------------------------------
+# Bulk jobs (summarize, extract, classify many files) fan out to small models on a second CPU-only Judas
+# instance (contrib/swarm.toml, judas-swarm.service). Enabled registers the swarm_map tool. See docs/SWARM.md.
+[swarm]
+enabled = false
+# url = "http://127.0.0.1:8083"
+# max_parallel = 8
+# max_item_chars = 24000
+# config = "~/.config/judas/swarm.toml"   # the swarm instance's own config; `judas swarm cores N` writes threads here
 
 # ---- mcp -------------------------------------------------------------------
 # Tools from MCP servers (stdio), registered as "<prefix><tool>". Third-party servers are untrusted: when
@@ -1234,8 +1397,9 @@ std::string user_config_path() {
 
 // Surgically set `model = "<name>"` inside [engine], preserving the rest of the file (comments and all).
 // Inserts the line right after [engine] if it is missing. Returns false if the file cannot be read/written.
-bool set_engine_model_in_file(const std::string & path_in, const std::string & model) {
-    // Follow a symlinked config to its target; a missing file is created with just [engine].
+bool set_toml_value_in_file(const std::string & path_in, const std::string & section, const std::string & key_name,
+                            const std::string & raw_value) {
+    // Set `key = raw_value` in [section] of a config file, keeping comments; atomic. Follow a symlinked config to its target; a missing file is created with just [engine].
     std::error_code ec;
     std::string path = path_in;
     if (fs::is_symlink(path_in, ec)) {
@@ -1251,7 +1415,8 @@ bool set_engine_model_in_file(const std::string & path_in, const std::string & m
         while (std::getline(in, line)) lines.push_back(line);
         if (in.bad()) return false;
     }
-    const std::string newline = "model = \"" + model + "\"";
+    const std::string newline = key_name + " = " + raw_value;
+    const std::string header = "[" + section + "]";
     bool in_engine = false, done = false;
     int engine_hdr = -1;
     for (size_t i = 0; i < lines.size() && !done; i++) {
@@ -1259,14 +1424,14 @@ bool set_engine_model_in_file(const std::string & path_in, const std::string & m
         std::string s = a == std::string::npos ? "" : lines[i].substr(a);
         if (!s.empty() && s[0] == '[') {
             if (in_engine) break;  // left [engine] without a model line; insert below
-            in_engine = s.rfind("[engine]", 0) == 0;
+            in_engine = s.rfind(header, 0) == 0;
             if (in_engine) engine_hdr = static_cast<int>(i);
             continue;
         }
         size_t eq = s.find('=');
         std::string key = eq == std::string::npos ? "" : s.substr(0, eq);
         while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
-        if (in_engine && key == "model") {
+        if (in_engine && key == key_name) {
             std::string comment;
             size_t h = lines[i].find('#');
             if (h != std::string::npos) comment = "            " + lines[i].substr(h);
@@ -1276,7 +1441,7 @@ bool set_engine_model_in_file(const std::string & path_in, const std::string & m
     }
     if (!done) {
         if (engine_hdr < 0) {
-            lines.push_back("[engine]");
+            lines.push_back(header);
             lines.push_back(newline);
         } else {
             lines.insert(lines.begin() + engine_hdr + 1, newline);
@@ -1302,6 +1467,10 @@ bool set_engine_model_in_file(const std::string & path_in, const std::string & m
         return false;
     }
     return true;
+}
+
+bool set_engine_model_in_file(const std::string & path, const std::string & model) {
+    return set_toml_value_in_file(path, "engine", "model", "\"" + model + "\"");
 }
 
 }  // namespace judas

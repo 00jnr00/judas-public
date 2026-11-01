@@ -4,6 +4,11 @@
 
 #include "engine/engine.h"
 #include "engine/sched.h"
+#include "models/models.h"
+#include "models/moefit.h"
+#ifdef JUDAS_WITH_STRATA
+#include "engine/strata_engine.h"
+#endif
 
 #include <algorithm>
 #include <climits>
@@ -245,13 +250,8 @@ public:
         llama_backend_init();
         auto mp = llama_model_default_params();
         mp.n_gpu_layers = mcfg_.gpu_layers;
-        if (mcfg_.cpu_moe) {
-            overrides_[0] = {"\\.ffn_(up|down|gate)_exps",
-                             ggml_backend_dev_buffer_type(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU))};
-            overrides_[1] = {nullptr, nullptr};
-            mp.tensor_buft_overrides = overrides_;
-        }
         std::string path = expand_home(mcfg_.path);
+        plan_experts(path, mp);
         model_ = llama_model_load_from_file(path.c_str(), mp);
         if (!model_) throw std::runtime_error("cannot load model " + path);
         vocab_ = llama_model_get_vocab(model_);
@@ -268,6 +268,7 @@ public:
         cp.type_k = kv_ggml_type(mcfg_.kv_type_k.empty() ? mcfg_.kv_type : mcfg_.kv_type_k);
         cp.type_v = kv_ggml_type(mcfg_.kv_type_v.empty() ? mcfg_.kv_type : mcfg_.kv_type_v);
         cp.n_threads = cp.n_threads_batch = mcfg_.threads;
+        threads_ = mcfg_.threads;
         ctx_ = llama_init_from_model(model_, cp);
         if (!ctx_) throw std::runtime_error("cannot create context for " + path);
         mem_ = llama_get_memory(ctx_);
@@ -285,6 +286,36 @@ public:
         path_ = path;
         init_vision(path);
         thread_ = std::thread([this] { loop(); });
+    }
+
+    // Where the routed experts go (cpu_moe). "true": all on the CPU. N: first N layers. "auto" (default): look at
+    // the GGUF and free VRAM; if the whole model fits nothing is overridden, otherwise the last layers' experts
+    // go on the GPU as far as they fit. A split GGUF is loaded from part 1; llama.cpp finds the other parts.
+    void plan_experts(const std::string & path, llama_model_params & mp) {
+        int mode = moe_mode_value(mcfg_.cpu_moe);
+        if (mode == 0 || mcfg_.gpu_layers == 0 || mode == -3) return;   // all on GPU (or CPU-only anyway)
+        int n_cpu = mode;
+        if (mode == -2) {
+            if (mcfg_.gpu_layers < 99) return;   // partial layer offload chosen by hand: leave placement alone
+            uint64_t free_vram = gpu_vram_free();
+            if (!free_vram) return;              // unknown VRAM (not amdgpu): load as before
+            ggml_type tk = kv_ggml_type(mcfg_.kv_type_k.empty() ? mcfg_.kv_type : mcfg_.kv_type_k);
+            ggml_type tv = kv_ggml_type(mcfg_.kv_type_v.empty() ? mcfg_.kv_type : mcfg_.kv_type_v);
+            MoeLayout lay = read_moe_layout(path, mcfg_.ctx_total, tk, tv);
+            if (!lay.ok) {
+                fprintf(stderr, "judas: cpu_moe=auto: %s; loading without expert offload\n", lay.error.c_str());
+                return;
+            }
+            MoeFit f = moe_fit(lay, free_vram);
+            if (!f.moe || f.all_gpu) return;
+            fprintf(stderr, "judas: cpu_moe=auto: %s\n", moe_fit_summary(f, lay.n_layers, free_vram).c_str());
+            n_cpu = f.cpu_layers;
+        }
+        if (n_cpu == 0) return;
+        moe_pattern_ = n_cpu < 0 ? std::string("\\.ffn_(up|down|gate)_exps") : moe_cpu_pattern(n_cpu);
+        overrides_[0] = {moe_pattern_.c_str(), ggml_backend_dev_buffer_type(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU))};
+        overrides_[1] = {nullptr, nullptr};
+        mp.tensor_buft_overrides = overrides_;
     }
 
     // Projector for image input. A missing or broken projector only turns vision off.
@@ -339,6 +370,13 @@ public:
     std::string model_name() const override { return cfg_.engine.model; }
 
     bool vision() const override { return mctx_ && mtmd_support_vision(mctx_); }
+    bool set_threads(int n) override {
+        if (n < 1) return false;
+        pending_threads_ = n;
+        cv_.notify_all();
+        return true;
+    }
+    int threads() const override { return pending_threads_ > 0 ? pending_threads_.load() : threads_.load(); }
 
     int count_tokens(const std::string & text) const override {
         int n = -llama_tokenize(vocab_, text.c_str(), text.size(), nullptr, 0, false, true);
@@ -498,13 +536,13 @@ private:
         // The scheduler decides pool admission; here only the configured caps are checked. A prompt over the
         // soft cap may borrow up to ctx_per_agent_max and waits in the queue until the pool can hold it.
         std::vector<KvLive> no_live;
-        CtxDecision ctx = decide_ctx_admission((int) r.prompt.size(), mcfg_.ctx_per_agent, mcfg_.ctx_per_agent_max,
-                                               kv_, no_live);
+        CtxDecision ctx = decide_ctx_admission((int) r.prompt.size(), mcfg_.ctx_per_agent,
+                                               ctx_hard_cap(mcfg_, cfg_.context), kv_, no_live);
         if (!ctx.allowed) {
             r.result.finish_reason = "error";
-            if (mcfg_.ctx_per_agent_max > mcfg_.ctx_per_agent)
+            if (ctx_hard_cap(mcfg_, cfg_.context) > mcfg_.ctx_per_agent)
                 r.result.error = "prompt is " + std::to_string(r.prompt.size()) + " tokens, over ctx_per_agent_max " +
-                                 std::to_string(mcfg_.ctx_per_agent_max);
+                                 std::to_string(ctx_hard_cap(mcfg_, cfg_.context));
             else
                 r.result.error = "prompt is " + std::to_string(r.prompt.size()) + " tokens, over ctx_per_agent " +
                                  std::to_string(mcfg_.ctx_per_agent);
@@ -967,9 +1005,9 @@ private:
                         continue;
                     }
                     CtxDecision ctx = decide_ctx_admission((int) r->prompt.size(), mcfg_.ctx_per_agent,
-                                                           mcfg_.ctx_per_agent_max, kv_, live_set());
+                                                           ctx_hard_cap(mcfg_, cfg_.context), kv_, live_set());
                     if (!ctx.allowed) {  // over the hard cap: waiting cannot help
-                        bool hard_cap = mcfg_.ctx_per_agent_max > mcfg_.ctx_per_agent;
+                        bool hard_cap = ctx_hard_cap(mcfg_, cfg_.context) > mcfg_.ctx_per_agent;
                         finish(*r, "error", "sequence is " + std::to_string(r->prompt.size()) + " tokens, over " +
                                                 (hard_cap ? "ctx_per_agent_max " : "ctx_per_agent ") +
                                                 std::to_string(ctx.limit));
@@ -1135,6 +1173,10 @@ private:
 
     // One decode: every generating request's next token, plus one prefill chunk (foreground first).
     void step(std::vector<Request *> & active) {
+        if (int t = pending_threads_.exchange(0); t > 0) {  // between two decodes, so no graph is running
+            llama_set_n_threads(ctx_, t, t);
+            threads_ = t;
+        }
         std::vector<Request *> gen;
         Request * pre = nullptr;
         size_t pre_end = 0;
@@ -1222,6 +1264,7 @@ private:
 
     const Config & cfg_;
     const ModelConfig & mcfg_;
+    std::string moe_pattern_;   // must outlive model load: overrides_ points into it
     llama_model_tensor_buft_override overrides_[2] = {{nullptr, nullptr}, {nullptr, nullptr}};
     llama_model * model_ = nullptr;
     llama_context * ctx_ = nullptr;
@@ -1243,6 +1286,8 @@ private:
     KvBudget kv_{1, 0};
     std::vector<Request *> completed_;   // finished, caller not yet woken (scheduler thread only)
     std::thread thread_;
+    std::atomic<int> pending_threads_{0};  // set_threads, applied by the scheduler thread at the next step
+    std::atomic<int> threads_{0};
     bool stop_ = false;
     long long clock_ = 0, call_ids_ = 0, admit_clock_ = 0, preemptions_ = 0;
     long long step_clock_ = 0;           // decode steps taken, drives the prefill duty pattern
@@ -1450,6 +1495,13 @@ std::unique_ptr<Engine> Engine::create(const Config & cfg) {
     // a local model needs the GPU: stop any remote model's unit first so its VRAM is freed
     for (const auto & [k, other] : cfg.models)
         if (!other.unit.empty()) std::system(("systemctl --user stop " + other.unit + " 2>/dev/null").c_str());
+    if (m.backend == "strata") {
+#ifdef JUDAS_WITH_STRATA
+        return make_strata_engine(cfg);
+#else
+        throw std::runtime_error("models." + cfg.engine.model + ".backend = \"strata\" needs a build with -DJUDAS_STRATA=ON");
+#endif
+    }
     return std::make_unique<LlamaEngine>(cfg);
 }
 

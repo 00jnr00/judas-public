@@ -16,6 +16,7 @@
 
 #include "cpp-httplib/httplib.h"
 #include "tools/tools.h"
+#include "tutor/tutor.h"
 
 namespace judas {
 namespace fs = std::filesystem;
@@ -754,6 +755,7 @@ std::string check_write_path(const ToolContext & ctx, const std::string & path, 
     std::string h = hard_deny(p, cfg_of(ctx).permissions);
     if (!h.empty()) return h;
     if (std::string j = judas_internal(ctx, p, true); !j.empty()) return j;
+    if (learn_is_context_file(cfg_of(ctx), resolved)) return "path is a read-only Learn context file ([learn] context_files)";
     const auto & perm = cfg_of(ctx).permissions;
     // deny globs: the path or any parent directory matching refuses
     for (auto & dp : perm.deny_paths) {

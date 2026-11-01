@@ -1,2 +1,4 @@
 build*/
 build/
+spike/results-latest.log
+spike/results/*.stderr

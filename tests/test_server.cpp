@@ -252,6 +252,8 @@ int main() {
         CHECK(cj["mode"] == "code" && cj["cwd"] == "/tmp");
         auto cd = json::parse(cli.Post("/api/sessions", "{}", "application/json")->body);
         CHECK(cd["mode"] == "chat" && !cd["cwd"].get<std::string>().empty());
+        auto cl = json::parse(cli.Post("/api/sessions", R"({"mode":"learn"})", "application/json")->body);
+        CHECK(cl["mode"] == "learn");
         auto cbad = cli.Post("/api/sessions", R"({"mode":"zzz"})", "application/json");
         CHECK(cbad && cbad->status == 400);
 
