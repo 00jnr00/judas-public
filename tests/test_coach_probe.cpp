@@ -164,6 +164,13 @@ static void test_probe(const fs::path & base) {
     // Probe sessions (both arms) cannot write global skills or memory.
     for (auto & names : engine.seen_tools)
         for (auto & n : names) CHECK(n != "skill_manage" && n != "memory_append");
+    {   // stored assistant replies carry per-call stats for the web chat footer
+        bool found = false;
+        for (auto & a : store.list_agents(sb.id))
+            for (auto & m : store.messages(sb.id, a.id))
+                if (m.role == "assistant") found = found || (m.body.contains("judas_stats") && m.body["judas_stats"].contains("completion"));
+        CHECK(found);
+    }
     std::string pb = system_prompt_of(store, sb.id), pv = system_prompt_of(store, sv.id);
     CHECK(!pb.empty() && !pv.empty());
     CHECK(pv.find("Always run the tests first") != std::string::npos && pb.find("Always run the tests first") == std::string::npos);

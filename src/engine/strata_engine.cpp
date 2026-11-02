@@ -76,7 +76,7 @@ ChatMessage from_common(const common_chat_msg & c) {
     m.role = c.role.empty() ? "assistant" : c.role;
     m.content = c.content;
     m.reasoning = c.reasoning_content;
-    for (const auto & tc : c.tool_calls) m.tool_calls.push_back({tc.id, tc.name, tc.arguments});
+    for (const auto & tc : c.tool_calls) m.tool_calls.push_back({tc.id, tc.name, fix_tool_args_latex(tc.arguments)});
     return m;
 }
 

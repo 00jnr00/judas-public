@@ -57,7 +57,27 @@ static void test_plain_text_unchanged() {
     CHECK(message_to_oai(out[0])["content"] == "plain");
 }
 
+// Over-escaped LaTeX in tool arguments: the doubled form copied into a raw parameter is repaired; already-correct
+// strings, non-math strings and non-JSON stay as they are.
+static void test_tool_args_latex() {
+    json bad = {{"correctAnswer", "$-\\\\dfrac{1}{\\\\tau}e^{-t/\\\\tau}$"},
+                {"options", json::array({json{{"label", "$-\\dfrac{1}{\\tau}e^{-t/\\tau}$"}}})},
+                {"path", "C:\\\\Users\\\\x"}};
+    json fixed = json::parse(fix_tool_args_latex(bad.dump()));
+    CHECK(fixed["correctAnswer"] == "$-\\dfrac{1}{\\tau}e^{-t/\\tau}$");
+    CHECK(fixed["correctAnswer"] == fixed["options"][0]["label"]);   // now matches the option exactly
+    CHECK(fixed["path"] == "C:\\\\Users\\\\x");                    // no math, untouched
+    json good = {{"q", "$\\tau$ is a time constant"}};
+    CHECK(fix_tool_args_latex(good.dump()) == good.dump());
+    CHECK(fix_tool_args_latex("not json \\\\tau") == "not json \\\\tau");
+    CHECK(fix_tool_args_latex("{}") == "{}");
+    json quoted = {{"a", "\"$-\\\\dfrac{1}{\\\\tau}$\""}, {"b", "\"$x$\""}, {"c", "\"plain quoted\""}};
+    json uq = json::parse(fix_tool_args_latex(quoted.dump()));
+    CHECK(uq["a"] == "$-\\dfrac{1}{\\tau}$" && uq["b"] == "$x$" && uq["c"] == "\"plain quoted\"");
+}
+
 int main() {
+    test_tool_args_latex();
     test_data_url();
     test_remote_url_ignored();
     test_plain_text_unchanged();

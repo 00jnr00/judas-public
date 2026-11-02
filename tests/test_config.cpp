@@ -589,6 +589,18 @@ static void test_swarm() {
     CHECK(load_config(root / "none").swarm.unit == "my-swarm@1.service");
     write(f, "[swarm]\nunit = \"bad;unit\"\n");
     CHECK(!load_error(root / "none").empty());
+    write(f, "[learn]\nvisual_url = \"http://localhost:8024\"\nvisual_unit = \"learnharness\"\n");
+    {
+        Config lc = load_config(root / "none");
+        CHECK(lc.learn.visual_url == "http://localhost:8024" && lc.learn.visual_unit == "learnharness" &&
+              lc.learn.visual_label == "Visual tutor");
+        write(root / "lv-dump.toml", dump_config(lc));
+        setenv("JUDAS_CONFIG", (root / "lv-dump.toml").c_str(), 1);
+        CHECK(load_config(root / "none").learn.visual_unit == "learnharness");
+        setenv("JUDAS_CONFIG", f.c_str(), 1);
+    }
+    write(f, "[learn]\nvisual_unit = \"x; rm -rf\"\n");
+    CHECK(!load_error(root / "none").empty());
     write(f, "[swarm]\nbogus = 1\n");
     setenv("JUDAS_CONFIG", f.c_str(), 1);
     CHECK(!load_error(root / "none").empty());

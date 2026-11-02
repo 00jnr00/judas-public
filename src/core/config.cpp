@@ -367,6 +367,14 @@ void apply_file(Config & c, const std::string & file) {
                 std::string l(lk.str()), full = key + "." + l;
                 if (l == "context_files") c.learn.context_files = get_str_array(r, full, lv);
                 else if (l == "max_context_tokens") c.learn.max_context_tokens = get_int(r, full, lv);
+                else if (l == "visual_url") c.learn.visual_url = get_str(r, full, lv);
+                else if (l == "visual_label") c.learn.visual_label = get_str(r, full, lv);
+                else if (l == "visual_unit") {
+                    c.learn.visual_unit = get_str(r, full, lv);
+                    // it ends up in a systemctl command line: plain unit names only
+                    if (!c.learn.visual_unit.empty() && !valid_unit_name(c.learn.visual_unit))
+                        fail_at(r, full + ": not a systemd unit name: " + c.learn.visual_unit, &lv);
+                }
                 else unknown_key(r, full, lv);
             }
         } else if (key == "coach") {
@@ -1035,7 +1043,10 @@ std::string dump_config(const Config & c) {
       << "track_usage = " << (c.skills.track_usage ? "true" : "false") << "\n\n"
       << "[learn]\n"
       << "context_files = " << str_array(c.learn.context_files) << "\n"
-      << "max_context_tokens = " << c.learn.max_context_tokens << "\n\n"
+      << "max_context_tokens = " << c.learn.max_context_tokens << "\n"
+      << "visual_url = " << q(c.learn.visual_url) << "\n"
+      << "visual_label = " << q(c.learn.visual_label) << "\n"
+      << "visual_unit = " << q(c.learn.visual_unit) << "\n\n"
       << "[coach]\n"
       << "enabled = " << (c.coach.enabled ? "true" : "false") << "\n"
       << "overlay = " << q(c.coach.overlay) << "\n"
@@ -1306,6 +1317,9 @@ reject_dashes = false      # memory_append refuses facts containing em or en das
 [learn]
 context_files = []
 max_context_tokens = 3000
+visual_url = ""             # optional visual tutor app embedded in the Learn screen (e.g. http://localhost:8024)
+visual_label = "Visual tutor"
+visual_unit = ""            # optional systemd user unit started on demand when the view opens
 
 # ---- coach -----------------------------------------------------------------
 # Propose-only review of a past session (`judas coach <session>`, /coach, Coach tab). A proposal is plain files under

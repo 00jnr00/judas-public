@@ -523,7 +523,56 @@
     renderRecent(); renderSessions(); renderChanges(); renderBoard();
     $("#swarm-strip").hidden = m !== "swarm";
     if (m === "swarm") pollSwarm();
+    if (m === "learn") loadLearnVisual(); else showLearnVisual(false);
   }
+
+  /* ---------- Learn: optional visual tutor ([learn] visual_url), embedded beside the tutor chat ---------- */
+  var lv = null, lvOn = false, lvStarting = false;
+  function lvRender(msg) {
+    var strip = $("#learn-strip");
+    strip.hidden = curMode !== "learn" || !lv || !lv.url;
+    if (strip.hidden) return;
+    $("#lv-visual").textContent = lv.label || "Visual tutor";
+    $("#lv-chat").setAttribute("aria-selected", lvOn ? "false" : "true");
+    $("#lv-visual").setAttribute("aria-selected", lvOn ? "true" : "false");
+    $("#lv-dot").className = "sw-dot " + (lv.up ? "up" : "down");
+    $("#lv-text").textContent = msg || (lv.up ? (lv.label || "Visual tutor") + " is running." :
+      lvStarting ? "starting..." : lv.unit ? "Not running; opening it starts it." : "Not running. Start it yourself, then reopen.");
+    var o = $("#lv-open"); o.hidden = !lv.up; o.href = lv.url;
+  }
+  function loadLearnVisual() {
+    getJSON("/api/learn/visual").then(function (r) { lv = r; lvRender(); }, function () { lv = null; lvRender(); });
+  }
+  function showLearnVisual(on) {
+    lvOn = !!on;
+    var box = $("#learn-visual"), fr = $("#lv-frame");
+    box.hidden = !lvOn;
+    $("#log").hidden = lvOn;
+    $("#composer").hidden = lvOn;
+    // the visual tutor gets the full width: no Changes / Agent board panel, no folder bar
+    $("#screen-work").classList.toggle("lv-full", lvOn);
+    if (lvOn && lv && lv.up && fr.getAttribute("src") !== lv.url) fr.setAttribute("src", lv.url);
+    if (lv) lvRender();
+  }
+  function openLearnVisual() {
+    if (!lv || !lv.url) return;
+    if (lv.up) { showLearnVisual(true); return; }
+    if (!lv.unit) { lvRender(); return; }
+    lvStarting = true; lvRender();
+    postJSON("/api/learn/visual", { on: true }).then(function () {
+      var t0 = Date.now();
+      (function check() {
+        getJSON("/api/learn/visual").then(function (r) {
+          lv = r;
+          if (r.up) { lvStarting = false; showLearnVisual(true); }
+          else if (Date.now() - t0 > 45000) { lvStarting = false; lvRender("Did not come up within 45 s. Check the " + r.unit + " unit."); }
+          else { lvRender(); setTimeout(check, 1500); }
+        }, function () { setTimeout(check, 1500); });
+      })();
+    }, function (e) { lvStarting = false; lvRender("Could not start: " + ((e && e.message) || e)); });
+  }
+  $("#lv-chat").onclick = function () { showLearnVisual(false); };
+  $("#lv-visual").onclick = openLearnVisual;
 
   /* ---------- swarm status strip (Swarm mode) ---------- */
   var swarmUp = null, swarmTimer = null, swarmProg = null, swarmStarting = false, swarmStartErr = "";
@@ -836,6 +885,38 @@
     return d;
   }
 
+  /* ---------- per-turn stats footer: tokens, prefill vs generation speed, time ---------- */
+  function newTurnStats() { return { calls: 0, tools: 0, prompt: 0, cached: 0, out: 0, pre_s: 0, gen_s: 0, queue_s: 0, ctx: 0 }; }
+  function addTurnStats(t, u, ntools) {
+    if (!u) return;
+    t.calls++; t.tools += ntools || 0;
+    t.prompt += u.prompt || 0; t.cached += u.cached || 0; t.out += u.completion || 0;
+    t.pre_s += u.prefill_s || 0; t.gen_s += u.generate_s || 0; t.queue_s += u.queue_s || 0;
+    t.ctx = (u.prompt || 0) + (u.completion || 0);   // the last call's window: what the model holds now
+  }
+  function kfmt(n) { return n >= 10000 ? (n / 1000).toFixed(0) + "k" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
+  function sfmt(x) { return x >= 60 ? Math.floor(x / 60) + "m " + Math.round(x % 60) + "s" : x.toFixed(x < 10 ? 1 : 0) + " s"; }
+  function statsLine(t) {
+    var fresh = Math.max(0, t.prompt - t.cached), parts = [];
+    parts.push(kfmt(t.prompt) + " in" + (t.cached ? " (" + kfmt(t.cached) + " cached)" : ""));
+    parts.push(kfmt(t.out) + " out");
+    if (t.pre_s > 0.05 && fresh > 0) parts.push("prefill " + Math.round(fresh / t.pre_s) + " tok/s");
+    if (t.gen_s > 0.05 && t.out > 0) parts.push("gen " + (t.out / t.gen_s).toFixed(1) + " tok/s");
+    parts.push(sfmt(t.pre_s + t.gen_s + t.queue_s) + (t.queue_s >= 0.5 ? " (" + sfmt(t.queue_s) + " queued)" : ""));
+    if (t.calls > 1) parts.push(t.calls + " model calls");
+    if (t.tools) parts.push(t.tools + (t.tools === 1 ? " tool" : " tools"));
+    if (t.ctx) parts.push("ctx " + kfmt(t.ctx));
+    return parts.join(" \u00b7 ");
+  }
+  function setStatsFooter(node, t) {
+    if (!node || !t || !t.calls) return;
+    var f = node.querySelector(":scope > .msg-stats");
+    if (!f) { f = el("div", "msg-stats"); node.appendChild(f); }
+    f.textContent = statsLine(t);
+    f.title = "Prompt tokens in (prefix-cache hits), tokens written, prefill speed on uncached tokens, generation speed, " +
+              "model time, model calls this turn, tool calls, context used by the last call";
+  }
+
   /* ---------- per-answer actions: copy, download as Markdown, read aloud ---------- */
   var canSpeak = "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function";
   var speakingEl = null;
@@ -1053,14 +1134,17 @@
     var childAgents = {};
     cur.agents.forEach(function (a) { if (a.parent) childAgents[a.id] = true; });
     var toolNames = {}, toolArgs = {};
+    var ts = newTurnStats(), lastA = null;
+    function flushStats() { setStatsFooter(lastA, ts); ts = newTurnStats(); lastA = null; }
     messages.forEach(function (m) {
       var child = !!(m.agent && childAgents[m.agent]); // workers live on the board, not in the conversation
       var b = m.body || {};
-      if (b.role === "user") { if (!child) addUser(contentText(b.content)); return; }
+      if (b.role === "user") { if (!child) { flushStats(); addUser(contentText(b.content)); } return; }
       if (b.role === "assistant") {
         if (!child) {
           if (b.reasoning_content) addThink(b.reasoning_content, false);
-          if (b.content) addAssistant(contentText(b.content));
+          if (b.content) lastA = addAssistant(contentText(b.content));
+          addTurnStats(ts, b.judas_stats, (b.tool_calls || []).length);
         }
         (b.tool_calls || []).forEach(function (tc) {
           var f = tc.function || {};
@@ -1076,6 +1160,7 @@
         if (!child) addToolResult(nm, ok, c, cp);
       }
     });
+    flushStats();
     if (keep) logEl.appendChild(keep);
     if (!logEl.childNodes.length) showEmpty();
     if (cur.more) logEl.insertBefore(olderBar(), logEl.firstChild);
@@ -1125,6 +1210,7 @@
   }
   function resetTurnState() {
     live.bubble = null; live.bubbleText = ""; live.think = null; live.thinkText = ""; live.calls = {}; live.callArgs = {};
+    live.stats = null;
   }
 
   /* One event stream stays open for as long as a session is open, across turns: a turn started from this tab,
@@ -1280,7 +1366,16 @@
       case "message":
         a = getAgent(ev.agent);
         if (d.usage) { a.pt += d.usage.prompt || 0; a.ct += d.usage.completion || 0; }
-        if (lead) { live.bubble = null; live.think = null; }
+        if (lead) {
+          live.stats = live.stats || newTurnStats();
+          addTurnStats(live.stats, d.usage, ((d.message || {}).tool_calls || []).length);
+          if (live.bubble) {   // the footer follows the newest reply bubble while the turn runs
+            Array.prototype.forEach.call(logEl.querySelectorAll(".msg-stats.live"), function (n) { n.remove(); });
+            setStatsFooter(live.bubble, live.stats);
+            var lf = live.bubble.querySelector(":scope > .msg-stats"); if (lf) lf.classList.add("live");
+          }
+          live.bubble = null; live.think = null;
+        }
         break;
       case "done":
         a = getAgent(ev.agent);

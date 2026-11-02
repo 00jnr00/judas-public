@@ -39,3 +39,18 @@ change it.
 The idea of a harness that measures understanding before teaching and teaches one reasoning step at a time was
 inspired by [LearnHarness](https://github.com/amosblomqvist/learnharness). This implementation is independent: no
 code, prompts or data formats were taken from it (it is AGPL-3.0; Judas is MIT).
+
+## Visual tutor (optional)
+
+The Learn screen can show a separate visual tutor app (for example LearnHarness, which is AGPL and runs as its own
+process, so Judas only frames it) next to the tutor chat. The Learn strip then has a Tutor chat / Visual tutor switch.
+
+```toml
+[learn]
+visual_url = "http://localhost:8024"   # embedded in the Learn screen; its origin is added to frame-src
+visual_label = "Visual tutor"          # switch label
+visual_unit = "learnharness"           # optional systemd user unit, started on demand when you open the view
+```
+
+`GET /api/learn/visual` reports `{url, label, unit, up}`; `POST /api/learn/visual {"on": true|false}` starts or stops
+the unit. Judas never enables the unit at login.

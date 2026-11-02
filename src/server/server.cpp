@@ -496,16 +496,23 @@ struct Server::Impl {
 
     std::vector<std::string> bind_addrs;
 
-    // Pages may frame this server and the origins of the configured Tools tabs, nothing else.
+    static std::string url_origin(const std::string & u) {
+        size_t a = u.find("://");
+        if (a == std::string::npos) return "";
+        size_t e = u.find('/', a + 3);
+        return u.substr(0, e == std::string::npos ? std::string::npos : e);
+    }
+
+    // Pages may frame this server, the origins of the configured Tools tabs and the Learn visual tutor, nothing else.
     std::string frame_csp() const {
         std::string out = "frame-src 'self'";
         std::set<std::string> seen;
-        for (auto & t : cfg.tools.tabs) {
-            size_t a = t.url.find("://");
-            if (a == std::string::npos) continue;
-            size_t e = t.url.find('/', a + 3);
-            std::string origin = t.url.substr(0, e == std::string::npos ? std::string::npos : e);
-            if (seen.insert(origin).second) out += " " + origin;
+        std::vector<std::string> urls;
+        for (auto & t : cfg.tools.tabs) urls.push_back(t.url);
+        if (!cfg.learn.visual_url.empty()) urls.push_back(cfg.learn.visual_url);
+        for (auto & u : urls) {
+            std::string origin = url_origin(u);
+            if (!origin.empty() && seen.insert(origin).second) out += " " + origin;
         }
         return out;
     }
@@ -1505,6 +1512,35 @@ void Server::Impl::setup(httplib::Server & svr) {
                     {"cpus", c.cpus}, {"up", c.up}, {"live", c.live}, {"config", c.config_path},
                     {"enabled", swarm_is_on(cfg)}};
     };
+    // Learn visual tutor: GET reports whether the page answers; POST {on} starts or stops its unit (if one is set).
+    auto visual_json = [this] {
+        const auto & L = cfg.learn;
+        bool up = false;
+        std::string origin = url_origin(L.visual_url);
+        if (!origin.empty() && origin.rfind("http://", 0) == 0) {
+            httplib::Client c(origin);
+            c.set_connection_timeout(1, 0);
+            c.set_read_timeout(2, 0);
+            auto r = c.Get("/");
+            up = r && r->status > 0 && r->status < 500;
+        }
+        return json{{"url", L.visual_url}, {"label", L.visual_label}, {"unit", L.visual_unit}, {"up", up}};
+    };
+    svr.Get("/api/learn/visual", [visual_json](const httplib::Request &, httplib::Response & res) {
+        send_json(res, visual_json());
+    });
+    svr.Post("/api/learn/visual", [this, visual_json](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("on") || !b["on"].is_boolean())
+            return send_json(res, error_json("body needs boolean on", "invalid_request_error"), 400);
+        const std::string & unit = cfg.learn.visual_unit;
+        if (unit.empty() || !valid_unit_name(unit))
+            return send_json(res, error_json("[learn] visual_unit is not set; start the tutor yourself", "invalid_request_error"), 400);
+        std::string cmd = std::string("systemctl --user ") + (b["on"].get<bool>() ? "start " : "stop ") + unit + " >/dev/null 2>&1";
+        if (std::system(cmd.c_str()) != 0)
+            return send_json(res, error_json("systemctl could not switch " + unit, "internal_error"), 500);
+        send_json(res, visual_json());
+    });
     // On/off switch: persists [swarm] enabled, registers or removes swarm_map live, starts or stops the unit.
     auto power_json = [this] {
         return json{{"enabled", swarm_is_on(cfg)}, {"up", swarm_unit_active(cfg)}, {"unit", cfg.swarm.unit}};

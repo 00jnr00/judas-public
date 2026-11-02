@@ -123,6 +123,10 @@ public:
 
 // OpenAI chat-completions JSON <-> engine types (used by the /v1 server and tests).
 std::vector<ChatMessage> messages_from_oai(const json & messages);
+// Tool-call arguments (JSON text) with over-escaped LaTeX repaired: in any string value that holds math ($ or \( or
+// \[), a doubled backslash before a letter ("\\tau") becomes one ("\tau"). Models that write some parameters as
+// raw text and others as JSON copy the JSON-escaped form into raw ones. Non-JSON input is returned unchanged.
+std::string fix_tool_args_latex(const std::string & arguments);
 std::vector<ToolSpec> tools_from_oai(const json & tools);
 json message_to_oai(const ChatMessage & m);
 

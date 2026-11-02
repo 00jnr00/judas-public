@@ -75,6 +75,15 @@
             <span id="swarm-text">Swarm: checking...</span>
             <span id="swarm-bar" class="sw-bar" hidden><span id="swarm-fill" class="sw-fill"></span></span>
           </div>
+          <div id="learn-strip" class="swarm-strip learn-strip" hidden>
+            <div class="seg" role="tablist" aria-label="Learn view">
+              <button type="button" id="lv-chat" role="tab" aria-selected="true">Tutor chat</button>
+              <button type="button" id="lv-visual" role="tab" aria-selected="false">Visual tutor</button>
+            </div>
+            <span id="lv-dot" class="sw-dot" aria-hidden="true"></span>
+            <span id="lv-text" class="dim"></span>
+            <a id="lv-open" class="btn small ghost" target="_blank" rel="noopener" hidden>Open in new tab</a>
+          </div>
           <div id="cwd-bar" class="cwd-bar">
             <label for="cwd" id="cwd-label">Project folder</label>
             <input id="cwd" class="cwd" type="text" list="cwd-recent" placeholder="/home/you/project" spellcheck="false" autocomplete="off">
@@ -99,6 +108,9 @@
         <div class="work-body">
           <div class="conv">
             <div id="log" class="log"></div>
+            <div id="learn-visual" class="learn-visual" hidden>
+              <iframe id="lv-frame" title="Visual tutor" referrerpolicy="no-referrer"></iframe>
+            </div>
             <div id="companion-dock" class="companion-dock">
               <div id="companion" class="companion" hidden aria-hidden="true">
                 <div id="comp-bubble" class="comp-bubble" hidden></div>

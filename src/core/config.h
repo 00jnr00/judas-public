@@ -219,6 +219,11 @@ struct MemoryConfig {
 struct LearnConfig {
     std::vector<std::string> context_files;   // empty = no grounding files
     int max_context_tokens = 3000;            // cap on the digest in the lead's prompt (~4 bytes per token)
+    // Optional visual tutor (a separate web app, e.g. LearnHarness) shown inside the Learn screen. The web app
+    // embeds visual_url; visual_unit, when set, is the systemd user unit Judas starts on demand.
+    std::string visual_url;
+    std::string visual_label = "Visual tutor";
+    std::string visual_unit;
 };
 
 // Coach: propose-only review of a past session. A variant (prompt overlay, skills, tool notes) is written as

@@ -1034,11 +1034,16 @@ struct AgentManager::Impl {
                 if (msg.content.size() > 1500) msg.content = msg.content.substr(0, 1500) + "\n[...cut off]";
             }
             a->messages.push_back(msg);
-            if (!a->review) store.add_message(a->row.session, a->row.id, "assistant", message_to_oai(msg));
-            emit(event(*a, "message", {{"message", message_to_oai(msg)},
-                                        {"usage", {{"prompt", res.prompt_tokens}, {"cached", res.cached_tokens},
-                                                   {"completion", res.completion_tokens},
-                                                   {"prefill_s", res.prefill_s}, {"generate_s", res.generate_s}}}}));
+            // Per-call stats ride along in the stored body (judas_stats; messages_from_oai ignores unknown keys) so the
+            // web chat can show a turn footer after a reload, not only while the turn streams.
+            json usage = {{"prompt", res.prompt_tokens}, {"cached", res.cached_tokens}, {"completion", res.completion_tokens},
+                          {"prefill_s", res.prefill_s}, {"generate_s", res.generate_s}, {"queue_s", res.queue_s}};
+            if (!a->review) {
+                json body = message_to_oai(msg);
+                body["judas_stats"] = usage;
+                store.add_message(a->row.session, a->row.id, "assistant", body);
+            }
+            emit(event(*a, "message", {{"message", message_to_oai(msg)}, {"usage", usage}}));
             if (res.finish_reason == "cancelled") return {msg.content, "done", ""};
             if (last) {
                 finish_hooks(a, msg.content);

@@ -73,7 +73,7 @@ ChatMessage from_common(const common_chat_msg & c) {
     m.role = c.role.empty() ? "assistant" : c.role;
     m.content = c.content;
     m.reasoning = c.reasoning_content;
-    for (const auto & tc : c.tool_calls) m.tool_calls.push_back({tc.id, tc.name, tc.arguments});
+    for (const auto & tc : c.tool_calls) m.tool_calls.push_back({tc.id, tc.name, fix_tool_args_latex(tc.arguments)});
     return m;
 }
 
@@ -1573,6 +1573,50 @@ json message_to_oai(const ChatMessage & m) {
     }
     if (!m.tool_call_id.empty()) j["tool_call_id"] = m.tool_call_id;
     return j;
+}
+
+namespace {
+bool has_math(const std::string & s) {
+    return s.find('$') != std::string::npos || s.find("\\(") != std::string::npos || s.find("\\[") != std::string::npos;
+}
+std::string collapse_latex_backslashes(const std::string & s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 2 < s.size() && s[i + 1] == '\\' && std::isalpha((unsigned char) s[i + 2])) continue;
+        out += s[i];
+    }
+    return out;
+}
+bool fix_latex_in(json & v) {
+    bool changed = false;
+    if (v.is_string()) {
+        // A math value wrapped in literal quotes ("\"$x$\"") is a JSON string literal pasted into a raw parameter.
+        {
+            const std::string & q = v.get_ref<const std::string &>();
+            if (q.size() >= 2 && q.front() == '"' && q.back() == '"' && has_math(q)) {
+                json inner = json::parse(q, nullptr, false);
+                if (inner.is_string()) { v = inner; changed = true; }
+                else if (q.find('"', 1) == q.size() - 1) { v = q.substr(1, q.size() - 2); changed = true; }
+            }
+        }
+        const std::string & s = v.get_ref<const std::string &>();
+        if (has_math(s) && s.find("\\\\") != std::string::npos) {
+            std::string f = collapse_latex_backslashes(s);
+            if (f != s) { v = f; changed = true; }
+        }
+    } else if (v.is_array() || v.is_object()) {
+        for (auto & x : v) changed = fix_latex_in(x) || changed;
+    }
+    return changed;
+}
+}  // namespace
+
+std::string fix_tool_args_latex(const std::string & arguments) {
+    if (arguments.find("\\\\") == std::string::npos && arguments.find("\\\"") == std::string::npos) return arguments;
+    json j = json::parse(arguments, nullptr, false);
+    if (j.is_discarded()) return arguments;
+    return fix_latex_in(j) ? j.dump() : arguments;
 }
 
 }  // namespace judas
