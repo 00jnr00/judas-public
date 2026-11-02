@@ -8,6 +8,7 @@
 #include "attach/attach.h"
 #include "agent/policy.h"
 #include "channels/channels.h"
+#include "coach/coach.h"
 #include "context/compactor.h"
 #include "hooks/hooks.h"
 #include "learning/review.h"
@@ -47,7 +48,7 @@ const char * SWARM_PROMPT = R"(Swarm mode: bulk work is done by a swarm of small
 - Write the swarm instruction like a precise spec: say exactly what to extract or decide and the exact output format (for example one JSON object per item). Try it on 3 to 5 items first, check the replies, then run the rest.
 - Keep your own work to planning, spot-checking and merging the results. Full replies are in the JSONL file swarm_map names; read it in parts instead of pasting it into your context.
 - Small models are good at extraction, short summaries, classification and tagging. They are not good at coding, long reasoning or anything that needs the whole picture; do those yourself.
-- If swarm_map is missing or reports the swarm is down, tell the user: enable [swarm] in config.toml and run systemctl --user start judas-swarm.)";
+- If swarm_map is missing or reports the swarm is off or down, tell the user to turn the swarm on with the switch in the Swarm tab or in Settings, or with `judas swarm on`.)";
 
 const char * BASE_PROMPT = R"(You are Judas, a helpful assistant and agent running locally on the user's own machine.
 Nothing the user shares leaves this computer.
@@ -250,6 +251,27 @@ struct AgentManager::Impl {
     std::map<std::string, Role> roles;
     ToolRegistry tools;
     Skills skills;
+    // Per-session extras (coach probes): overlay text and an extra skill source. Own mutex; never held with mu.
+    struct Extras {
+        std::string overlay;
+        std::shared_ptr<Skills> skills;
+    };
+    mutable std::mutex extras_mu;
+    std::map<std::string, Extras> extras;
+    std::shared_ptr<Skills> session_skills(const std::string & sid) const {
+        std::lock_guard lk(extras_mu);
+        auto it = extras.find(sid);
+        return it == extras.end() ? nullptr : it->second.skills;
+    }
+    std::string session_overlay(const std::string & sid) const {
+        std::lock_guard lk(extras_mu);
+        auto it = extras.find(sid);
+        return it == extras.end() ? std::string() : it->second.overlay;
+    }
+    bool has_extras(const std::string & sid) const {
+        std::lock_guard lk(extras_mu);
+        return extras.count(sid) > 0;
+    }
     std::unique_ptr<SkillUsage> usage;   // null when skills.track_usage is off
     Hooks hooks;
     std::unique_ptr<mcp::Manager> mcp_;   // after `tools`: it removes its tools from the registry when it goes
@@ -355,10 +377,17 @@ struct AgentManager::Impl {
             auto sess = store.get_session(a.row.session);
             if (sess && sess->mode == "swarm") p += "\n\n" + std::string(SWARM_PROMPT);
         }
-        std::string sk = skills.index_block();
+        auto ps = session_skills(a.row.session);
+        std::string sk = ps ? ps->index_block() : skills.index_block();
         if (!sk.empty()) p += "\n\n" + sk;
         std::string mem = memory_prompt_block(cfg);
         if (!mem.empty()) p += "\n\n" + mem;
+        if (!a.review) {
+            std::string co = coach_overlay_block(cfg);   // adopted coach proposals; "" unless [coach] enabled
+            if (!co.empty()) p += "\n\n" + co;
+            std::string xo = session_overlay(a.row.session);   // this session only (coach probe variant)
+            if (!xo.empty()) p += "\n\n" + xo;
+        }
         if (is_learn_session(a)) {
             p += "\n\n" + std::string(learn_prompt());
             std::string dg = learn_context_digest(cfg);
@@ -374,8 +403,9 @@ struct AgentManager::Impl {
         t.name = "load_skill";
         t.description = "Read the full instructions of a named skill (see the skills list in your prompt).";
         t.parameters = {{"type", "object"}, {"properties", {{"name", {{"type", "string"}}}}}, {"required", {"name"}}};
-        t.run = [this](const json & args, ToolContext &) -> ToolResult {
-            auto s = skills.by_name(args.value("name", ""));
+        t.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            auto ps = session_skills(ctx.session);
+            auto s = ps ? ps->by_name(args.value("name", "")) : skills.by_name(args.value("name", ""));
             if (!s) return {false, "no such skill: " + args.value("name", "")};
             if (usage) usage->record_load(s->name, false);
             return {true, "# skill: " + s->name + "\n" + s->body};
@@ -384,10 +414,11 @@ struct AgentManager::Impl {
     }
 
     // Autoload: skill bodies whose triggers match the user's message, prepended as a system note for this turn.
-    std::string autoload_skills(const std::string & user_text) {
+    std::string autoload_skills(const std::string & user_text, const std::string & sid) {
         if (cfg.skills.autoload != "trigger") return "";
         std::string out;
-        for (const auto & s : skills.matching(user_text)) {
+        auto ps = session_skills(sid);
+        for (const auto & s : (ps ? ps->matching(user_text) : skills.matching(user_text))) {
             if (usage) usage->record_load(s.name, true);
             out += "# skill: " + s.name + "\n" + s.body + "\n\n";
         }
@@ -424,7 +455,13 @@ struct AgentManager::Impl {
         bool can_spawn = a.depth < cfg.agents.max_depth;
         int mcp_seen = 0;
         bool learn = is_learn_session(a);
+        bool sealed;   // coach probe sessions (they carry session extras) must not write global skills or memory
+        {
+            std::lock_guard lk(extras_mu);
+            sealed = extras.count(a.row.session) > 0;
+        }
         for (const Tool * t : tools.list()) {
+            if (sealed && (t->name == "skill_manage" || t->name == "memory_append")) continue;
             // Learn sessions get a read-only toolset; the learner tools exist only there
             if (learn ? !learn_tool_allowed(t->name) : (t->name == "learner_context" || t->name == "learn_progress")) continue;
             bool agent_tool = t->name.rfind("spawn_agent", 0) == 0 || t->name == "wait_agents" ||
@@ -528,6 +565,7 @@ struct AgentManager::Impl {
     // owns the per-session counters, the single-flight gate and the thread.
     void maybe_start_review(Agent * lead, const TurnOutcome & out) {
         if (!cfg.learning.review || lead->review || !lead->row.parent.empty()) return;
+        if (has_extras(lead->row.session)) return;   // coach probe: no background review
         std::string prompt;
         {
             std::lock_guard lk(mu);
@@ -599,7 +637,7 @@ struct AgentManager::Impl {
             }
             if (!a->review) {
                 skills.reload_if_changed();   // pick up curator/human edits to the skills dir
-                if (std::string sk = autoload_skills(input); !sk.empty())
+                if (std::string sk = autoload_skills(input, a->row.session); !sk.empty())
                     a->messages.push_back({"system", "Relevant skill(s) for this request:\n\n" + sk});
                 a->messages.push_back({"user", input});
                 store.add_message(a->row.session, a->row.id, "user", message_to_oai(a->messages.back()));
@@ -1043,7 +1081,7 @@ struct AgentManager::Impl {
                 ctx.journal = &journal;
                 ctx.session = a->row.session;
                 ctx.agent = a->row.id;
-                ctx.autonomous = a->review;
+                ctx.autonomous = a->review || has_extras(a->row.session);   // probe sessions: no user to consent
                 ctx.progress = [this, a](const json & d) { emit(event(*a, "swarm", d)); };
                 ctx.checkpoint = journal.begin(a->row.session, a->row.id, label.substr(0, 200));
                 if (!a->review) ctx.approve = [this, a](const std::string & what) {
@@ -1304,6 +1342,33 @@ AgentManager::AgentManager(const Config & cfg, Engine & engine, Store & store, J
     : impl_(std::make_unique<Impl>(cfg, engine, store, journal)) {}
 
 AgentManager::~AgentManager() = default;
+
+void AgentManager::set_swarm_tool(bool on) {
+    if (on) {
+        if (!impl_->tools.find("swarm_map")) register_swarm_tool(impl_->tools);
+    } else {
+        impl_->tools.remove("swarm_map");
+    }
+}
+
+void AgentManager::set_session_extras(const std::string & session_id, const SessionExtras & x) {
+    auto & I = *impl_;
+    Impl::Extras e;
+    e.overlay = x.overlay;
+    if (!x.skills_dir.empty()) {
+        SkillsConfig sc = I.cfg.skills;
+        sc.paths.push_back(x.skills_dir);   // last wins
+        e.skills = std::make_shared<Skills>(sc);
+    }
+    std::lock_guard lk(I.extras_mu);
+    I.extras[session_id] = std::move(e);
+}
+
+void AgentManager::clear_session_extras(const std::string & session_id) {
+    auto & I = *impl_;
+    std::lock_guard lk(I.extras_mu);
+    I.extras.erase(session_id);
+}
 
 std::string AgentManager::submit(const std::string & session_id, const std::string & user_message,
                                  const std::string & cwd) {

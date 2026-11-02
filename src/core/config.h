@@ -221,6 +221,17 @@ struct LearnConfig {
     int max_context_tokens = 3000;            // cap on the digest in the lead's prompt (~4 bytes per token)
 };
 
+// Coach: propose-only review of a past session. A variant (prompt overlay, skills, tool notes) is written as
+// plain files for the user to adopt by hand; adoption appends the overlay to the file below, which the agent
+// prompt includes while enabled. Variants can never change permissions, the sandbox or the safety floor.
+struct CoachConfig {
+    bool enabled = false;
+    std::string overlay;                  // adopted overlay file; "" = <data_dir>/coach/overlay.md
+    int overlay_max_chars = 1200;         // cap on one variant's overlay text
+    int tools_max_chars = 800;            // cap on one variant's tool notes (all together)
+    int max_skills = 3;                   // skills one variant may carry
+};
+
 // A notification channel (ntfy topic, or a user command that receives the message on stdin).
 struct Channel {
     std::string name;
@@ -299,6 +310,7 @@ struct SwarmConfig {
     int max_parallel = 8;                           // concurrent requests to it
     int max_item_chars = 24000;                     // longer files are split into chunks of at most this size
     std::string config = "~/.config/judas/swarm.toml";  // the swarm instance's own config (cores are written there)
+    std::string unit = "judas-swarm";               // systemd user unit the on/off switch starts and stops
 };
 // Tools tab (web): each entry is a sub-tab. `url` is embedded in an iframe, `skill` adds a "Plan with Judas"
 // side chat that loads that skill, `prompt_hint` is its placeholder.
@@ -334,6 +346,7 @@ struct Config {
     PromptConfig prompt;
     MemoryConfig memory;
     LearnConfig learn;
+    CoachConfig coach;
     ContextConfig context;
     HeartbeatConfig heartbeat;
     ChannelsConfig channels;
@@ -360,6 +373,8 @@ std::string dump_config(const Config & cfg);
 
 // "~/x" -> "$HOME/x"; leaves other paths alone.
 std::string expand_home(const std::string & path);
+// True for a plain systemd unit name: [A-Za-z0-9@._-]+ (it ends up in a systemctl command line).
+bool valid_unit_name(const std::string & s);
 // The user config file (JUDAS_CONFIG wins, else ~/.config/judas/config.toml).
 std::string user_config_path();
 // Set `model = "<name>"` in [engine] of a config file, keeping comments; atomic. False on I/O failure.

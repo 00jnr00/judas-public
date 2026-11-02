@@ -22,6 +22,8 @@
 #include <algorithm>
 #include "cpp-httplib/httplib.h"
 #include "engine/engine.h"
+#include "coach/coach.h"
+#include "coach/probe.h"
 #include "learning/curator.h"
 #include "models/models.h"
 #include "server/server.h"
@@ -65,6 +67,7 @@ usage:
   judas curator status | run [--dry-run]
                                       skill library curator: state, or run a pass (dry = report only)
   judas config show|validate|init     effective config, check it, or write ~/.config/judas/config.toml
+  judas swarm on|off|status                start or stop the swarm instance and set [swarm] enabled
   judas swarm cores [N] [--pin|--no-pin]   threads (and optional CPU pinning) of the swarm instance, applied live
   judas models [list] [--all] [--dir D]
                                       GGUF models on this machine (your dirs, LM Studio, Hugging Face cache,
@@ -78,6 +81,12 @@ usage:
   judas models pull REPO [FILE|QUANT] [--dir D] [--add] [--use] [--name X]
                                       download (resumable; HF_TOKEN for gated repos); no FILE picks the
                                       biggest quant that fits your GPU
+  judas coach SESSION|last            propose harness changes from a past session (needs the daemon and [coach] enabled)
+  judas coach list | show ID | adopt ID | reject ID
+  judas coach probe ID --task TEXT|@FILE --fixture DIR [--check CMD] [--k 1] [--timeout 1800] [--mode code]
+                                      run the task under the base harness and under the proposal in scratch copies
+                                      of DIR (needs the daemon); writes evidence.md next to the proposal
+                                      proposals are plain files in <data_dir>/coach; nothing applies until adopted
   judas prompt-size                   estimated prompt budget: tool schemas and skills index
   judas version
 )";
@@ -510,7 +519,7 @@ void print_vram(uint64_t vram) {
 
 const char * fit_color(const std::string & fit) {
     if (!*C_RESET) return "";
-    return fit == "fits" ? "\033[38;2;127;176;138m" : fit == "tight" ? "\033[38;2;208;168;92m" : fit == "too big" ? C_RED : C_DIM;
+    return fit == "fits" ? "\033[38;2;127;176;138m" : fit == "tight" || fit == "offload" || fit == "streams" ? "\033[38;2;208;168;92m" : fit == "too big" ? C_RED : C_DIM;
 }
 
 // "3" (from the list) or a path to a .gguf
@@ -563,7 +572,7 @@ int models_list(const Config & cfg, std::vector<std::string> & args) {
         if (m.parts > 1) label += " (" + std::to_string(m.parts) + " parts)";
         if (label.size() > 46) label = label.substr(0, 43) + "...";
         std::string ctx = m.ctx_train ? std::to_string(m.ctx_train / 1024) + "k" : "-";
-        std::string fit = m.projector ? "mmproj" : m.ok ? fit_verdict(m.bytes, vram) : "error";
+        std::string fit = m.projector ? "mmproj" : m.ok ? fit_verdict_for(cfg, m.config_name, m.bytes, vram) : "error";
         bool active = !m.config_name.empty() && m.config_name == cfg.engine.model;
         std::printf(" %3s  %s%-2s%s %-46s %9s  %-9s %7s  %s%-8s%s %s%s%s\n",
                     m.projector ? "" : std::to_string(++n).c_str(), active ? C_BRIGHT : C_SILVER,
@@ -820,12 +829,173 @@ int models_pull(const Config & cfg, std::vector<std::string> & args) {
     return models_add(cfg, rest, &m);
 }
 
+// judas coach probe ID --task TEXT|@FILE --fixture DIR [--check CMD] [--k N] [--timeout S] [--mode M]
+int cmd_coach_probe(const Config & cfg, const std::vector<std::string> & args) {
+    const char * usage = "usage: judas coach probe ID --task TEXT|@FILE --fixture DIR [--check CMD] [--k 1] [--timeout 1800] [--mode code]\n";
+    if (args.size() < 2) { std::fprintf(stderr, "%s", usage); return 2; }
+    json body = {{"proposal", args[1]}, {"mode", "code"}};
+    for (size_t i = 2; i < args.size(); i++) {
+        const std::string & a = args[i];
+        if (i + 1 >= args.size() || a.rfind("--", 0) != 0) { std::fprintf(stderr, "%s", usage); return 2; }
+        const std::string & val = args[++i];
+        if (a == "--task") {
+            std::string t = val;
+            if (!val.empty() && val[0] == '@') {
+                std::ifstream f(val.substr(1));
+                if (!f) { std::fprintf(stderr, "cannot read %s\n", val.c_str() + 1); return 1; }
+                t.assign(std::istreambuf_iterator<char>(f), {});
+            }
+            body["task"] = t;
+        } else if (a == "--fixture") {
+            body["fixture"] = fs::absolute(val).string();
+        } else if (a == "--check") {
+            body["check"] = val;
+        } else if (a == "--mode") {
+            body["mode"] = val;
+        } else if (a == "--k" || a == "--timeout") {
+            try { body[a.substr(2)] = std::stoi(val); } catch (...) { std::fprintf(stderr, "%s needs a number\n", a.c_str()); return 2; }
+        } else { std::fprintf(stderr, "%s", usage); return 2; }
+    }
+    if (!body.contains("task") || !body.contains("fixture")) { std::fprintf(stderr, "%s", usage); return 2; }
+    if (!cfg.coach.enabled) { std::fprintf(stderr, "coach is disabled; set [coach] enabled = true in config.toml\n"); return 1; }
+    if (!daemon_up(cfg)) { std::fprintf(stderr, "the daemon is not running; start judas serve first\n"); return 1; }
+    httplib::Client c("127.0.0.1", cfg.server.port);
+    c.set_read_timeout(30, 0);
+    auto r = c.Post("/api/coach/probe", body.dump(), "application/json");
+    if (!r || r->status != 202) {
+        std::fprintf(stderr, "%sprobe refused:%s %s\n", C_RED, C_RESET, r ? r->body.c_str() : "no response");
+        return 1;
+    }
+    std::string key = "probe:" + args[1];
+    std::fprintf(stderr, "%sprobing %s (sequential; this takes a while)...%s\n", C_DIM, args[1].c_str(), C_RESET);
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        auto g = c.Get("/api/coach");
+        if (!g || g->status != 200) { std::fprintf(stderr, "lost the daemon\n"); return 1; }
+        json j = json::parse(g->body, nullptr, false);
+        if (!j.is_object()) continue;
+        for (auto & job : j["jobs"]) {
+            if (job.value("session", "") != key || job.value("state", "") == "running") continue;
+            if (job.value("state", "") == "error") { std::fprintf(stderr, "%sprobe failed:%s %s\n", C_RED, C_RESET, job.value("error", "").c_str()); return 1; }
+            std::printf("%s\nreview: judas coach show %s\n", coach_probe_evidence_text(cfg, args[1]).c_str(), args[1].c_str());
+            return 0;
+        }
+    }
+}
+
+int cmd_coach(std::vector<std::string> args) {
+    Config cfg = load_or_die();
+    std::string sub = args.empty() ? "" : args[0];
+    if (sub.empty()) {
+        std::fprintf(stderr, "usage: judas coach SESSION|last | list | show ID | adopt ID | reject ID\n");
+        return 2;
+    }
+    if (sub == "list") {
+        auto vs = coach_list(cfg);
+        if (vs.empty()) std::printf("no coach proposals yet\n");
+        for (auto & v : vs)
+            std::printf("%-44s %-9s %d edit(s)  %s\n", v.id.c_str(), v.status.c_str(), (int) v.edits.size(), v.summary.substr(0, 80).c_str());
+        return 0;
+    }
+    if (sub == "show" || sub == "adopt" || sub == "reject") {
+        if (args.size() < 2) { std::fprintf(stderr, "judas coach %s: give a proposal id (see `judas coach list`)\n", sub.c_str()); return 2; }
+        const std::string & id = args[1];
+        if (sub == "show") {
+            CoachVariant v;
+            if (!coach_load(cfg, id, v)) { std::fprintf(stderr, "no such proposal: %s\n", id.c_str()); return 1; }
+            std::ifstream f(fs::path(v.dir) / "README.md");
+            std::printf("%s", std::string(std::istreambuf_iterator<char>(f), {}).c_str());
+            std::string ev = coach_probe_evidence_text(cfg, id);
+            if (!ev.empty()) std::printf("\n%s", ev.c_str());
+            std::printf("\nfiles: %s\n", v.dir.c_str());
+            return 0;
+        }
+        if (sub == "reject") {
+            std::string err;
+            if (!coach_reject(cfg, id, &err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+            std::printf("rejected %s\n", id.c_str());
+            return 0;
+        }
+        CoachAdoptResult r = coach_adopt(cfg, id);
+        if (!r.ok) { std::fprintf(stderr, "not adopted: %s\n", r.error.c_str()); return 1; }
+        for (auto & n : r.skills_added) std::printf("skill added: %s\n", n.c_str());
+        for (auto & n : r.skipped) std::printf("skipped %s\n", n.c_str());
+        if (r.overlay_appended) std::printf("overlay appended to %s\n", coach_overlay_path(cfg).c_str());
+        if (!cfg.coach.enabled) std::printf("note: [coach] enabled = false, so the overlay is not read until you enable it\n");
+        std::printf("adopted %s\n", id.c_str());
+        return 0;
+    }
+    if (sub == "probe") return cmd_coach_probe(cfg, args);
+    if (sub == "propose") args.erase(args.begin());
+    if (args.empty()) { std::fprintf(stderr, "judas coach: give a session id or `last`\n"); return 2; }
+    // The proposal needs the loaded model, so it goes through the daemon (it never loads one itself).
+    if (!cfg.coach.enabled) { std::fprintf(stderr, "coach is disabled; set [coach] enabled = true in config.toml\n"); return 1; }
+    if (!daemon_up(cfg)) { std::fprintf(stderr, "the daemon is not running; start judas serve first\n"); return 1; }
+    httplib::Client c("127.0.0.1", cfg.server.port);
+    c.set_read_timeout(30, 0);
+    auto r = c.Post("/api/coach", json({{"session", args[0]}}).dump(), "application/json");
+    if (!r || r->status != 202) {
+        std::fprintf(stderr, "%scoach refused:%s %s\n", C_RED, C_RESET, r ? r->body.c_str() : "no response");
+        return 1;
+    }
+    std::string sid = json::parse(r->body).value("session", args[0]);
+    std::fprintf(stderr, "%sreading %s (background priority)...%s\n", C_DIM, sid.c_str(), C_RESET);
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        auto g = c.Get("/api/coach");
+        if (!g || g->status != 200) { std::fprintf(stderr, "lost the daemon\n"); return 1; }
+        json j = json::parse(g->body, nullptr, false);
+        if (!j.is_object()) continue;
+        for (auto & job : j["jobs"]) {
+            if (job.value("session", "") != sid || job.value("state", "") == "running") continue;
+            if (job.value("state", "") == "error") { std::fprintf(stderr, "%scoach failed:%s %s\n", C_RED, C_RESET, job.value("error", "").c_str()); return 1; }
+            std::string id = job.value("variant", "");
+            std::printf("proposal %s written (status proposed)\nreview: judas coach show %s\n", id.c_str(), id.c_str());
+            return 0;
+        }
+    }
+}
+
 int cmd_swarm(std::vector<std::string> args) {
     Config cfg = load_or_die();
     std::string sub = args.empty() ? "cores" : args[0];
     if (!args.empty()) args.erase(args.begin());
+    if (sub == "on" || sub == "off") {
+        bool on = sub == "on";
+        // A running daemon owns the live tool registry, so ask it first; otherwise do the file and unit part here.
+        {
+            httplib::Client c("127.0.0.1", cfg.server.port);
+            c.set_connection_timeout(1);
+            c.set_read_timeout(15);
+            json body = {{"on", on}};
+            if (auto r = c.Post("/api/swarm/power", body.dump(), "application/json"); r && r->status == 200) {
+                json j = json::parse(r->body, nullptr, false);
+                std::printf("swarm %s (unit %s, %s)\n", on ? "on" : "off", cfg.swarm.unit.c_str(),
+                            j.is_object() && j.value("up", false) ? "active" : "inactive");
+                if (j.is_object() && j.contains("warning")) {
+                    std::fprintf(stderr, "judas swarm: %s\n", j["warning"].get<std::string>().c_str());
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        SwarmPower p = swarm_power(cfg, on);
+        if (!p.ok) {
+            std::fprintf(stderr, "judas swarm: %s\n", p.error.c_str());
+            return 1;
+        }
+        std::printf("swarm %s (config saved, unit %s %s; the daemon is not running, it applies at its next start)\n",
+                    on ? "on" : "off", cfg.swarm.unit.c_str(), on ? "started" : "stopped");
+        if (!p.error.empty()) std::fprintf(stderr, "judas swarm: %s\n", p.error.c_str());
+        return p.error.empty() ? 0 : 1;
+    }
+    if (sub == "status") {
+        std::printf("swarm: %s, unit %s %s\n", swarm_is_on(cfg) ? "enabled" : "disabled", cfg.swarm.unit.c_str(),
+                    swarm_unit_active(cfg) ? "active" : "inactive");
+        return 0;
+    }
     if (sub != "cores") {
-        std::fprintf(stderr, "usage: judas swarm cores [N] [--pin|--no-pin]\n");
+        std::fprintf(stderr, "usage: judas swarm on|off|status | cores [N] [--pin|--no-pin]\n");
         return 2;
     }
     int n = 0, pin = -1;
@@ -916,6 +1086,7 @@ int main(int argc, char ** argv) {
         if (cmd == "skills") return cmd_skills(args);
         if (cmd == "models") return cmd_models(args);
         if (cmd == "swarm") return cmd_swarm(args);
+        if (cmd == "coach") return cmd_coach(args);
         if (cmd == "prompt-size") {
             Config cfg = load_or_die();
             auto est = [](const std::string & s) { return (long) (s.size() / 4); };  // ~4 bytes/token

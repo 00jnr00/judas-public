@@ -32,6 +32,7 @@ const std::vector<Command> & commands() {
         {"auto-resume", "on|off", "auto-resume paused turns for this session", true},
         {"memory", "<query>", "search shared memory", true},
         {"learn", "[focus]", "save what this session taught as skills or memory", true},
+        {"coach", "[list|show|adopt|reject ID]", "propose harness changes from this session (you adopt by hand)"},
         {"quit", "", "leave the TUI (the daemon keeps running)"},
     };
     return c;

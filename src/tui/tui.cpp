@@ -765,6 +765,45 @@ struct App {
         if (!n) say("no matches in shared memory");
     }
 
+    // /coach: propose from this session, or list / show / adopt / reject proposals. Nothing applies until adopted.
+    void coach_cmd(const std::string & arg) {
+        std::string sub = arg, rest;
+        if (auto sp = arg.find(' '); sp != std::string::npos) { sub = arg.substr(0, sp); rest = arg.substr(sp + 1); }
+        if (sub == "list") {
+            auto r = api.get("/api/coach");
+            if (r.status != 200) { say("coach: " + err_text(r), 'e'); return; }
+            if (!r.body.value("enabled", false)) say("coach is disabled; set [coach] enabled = true in config.toml", 'w');
+            int n = 0;
+            for (auto & v : r.body["variants"]) {
+                say(v.value("id", "") + "  " + v.value("status", "") + "  " + std::to_string(v.value("edit_count", 0)) + " edit(s)", 'n');
+                n++;
+            }
+            for (auto & j : r.body["jobs"])
+                if (j.value("state", "") == "running") say("running: " + j.value("session", ""), 'd');
+            if (!n) say("no coach proposals yet");
+        } else if (sub == "show" || sub == "adopt" || sub == "reject") {
+            if (rest.empty()) { say("usage: /coach " + sub + " ID", 'w'); return; }
+            if (sub == "show") {
+                auto r = api.get("/api/coach/" + rest);
+                if (r.status != 200) { say("coach: " + err_text(r), 'e'); return; }
+                say(r.body.value("status", "") + ": " + r.body.value("summary", ""), 'n');
+                for (auto & e : r.body["edits"]) say("  " + e.value("kind", "") + " " + e.value("name", "") + ": " + e.value("rationale", ""));
+                for (auto & d : r.body["discarded"]) say("  discarded " + d.value("what", "") + ": " + d.value("reason", ""), 'w');
+                say("files: " + r.body.value("dir", ""), 'd');
+            } else {
+                auto r = api.post("/api/coach/" + rest + "/" + sub);
+                if (r.status != 200) { say("coach: " + err_text(r), 'e'); return; }
+                say(sub == "adopt" ? "adopted " + rest : "rejected " + rest);
+            }
+        } else {
+            std::string target = arg.empty() ? sid : arg;
+            if (target.empty()) { say("send a message first, or give a session id: /coach SESSION", 'w'); return; }
+            auto r = api.post("/api/coach", {{"session", target}});
+            if (r.status == 202) say("coach is reading " + target + " in the background; see /coach list");
+            else say("coach: " + err_text(r), 'e');
+        }
+    }
+
     void run_shell(const std::string & cmdline) {
         say("$ " + cmdline, 'w');
         std::string full = "cd " + sh_quote(cwd) + " && timeout 120 sh -c " + sh_quote(cmdline) + " </dev/null 2>&1";
@@ -846,6 +885,7 @@ struct App {
             if (p.arg.empty()) { say("usage: /memory <query>", 'w'); return; }
             memory_search(p.arg);
         } else if (n == "learn") send_text("/learn" + (p.arg.empty() ? "" : " " + p.arg), build_learn_prompt(p.arg));
+        else if (n == "coach") coach_cmd(p.arg);
         else if (n == "attach") do_attach(p.arg);
         else if (n == "screenshot") do_screenshot(p.arg);
         else if (n == "paste") do_paste_clipboard();

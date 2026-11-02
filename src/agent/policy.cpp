@@ -91,6 +91,15 @@ bool is_announcement(const std::string & sentence) {
                                      "i'm about to ",  "i am about to ", "i need to ",   "i have to "};
     for (const char * a : actions)
         if (starts_with(l, a)) return true;
+    // "I need lines 118-132 for module 3." / "I still need the helpers." name the next read without a verb; a
+    // request to the user ("I need you to ...", "I need your OK") is an answer, not work.
+    for (const char * a : {"i need ", "i still need ", "i still have to ", "i must ", "continuing with ", "moving on to "}) {
+        if (!starts_with(l, a)) continue;
+        std::string rest = l.substr(std::string(a).size());
+        for (const char * u : {"you", "your", "the user", "permission", "approval", "confirmation", "more information"})
+            if (starts_with(rest, u)) return false;
+        return true;
+    }
     return false;
 }
 

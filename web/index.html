@@ -36,6 +36,7 @@
       <button type="button" data-screen="agents"><i aria-hidden="true">&#9813;</i><span class="rl"><b>Agents</b></span></button>
       <button type="button" data-screen="tasks"><i aria-hidden="true">&#9719;</i><span class="rl"><b>Tasks</b></span></button>
       <button type="button" data-screen="memory"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Memory</b></span></button>
+      <button type="button" data-screen="coach"><i aria-hidden="true">&#9873;</i><span class="rl"><b>Coach</b></span></button>
       <button type="button" data-screen="snapshots"><i aria-hidden="true">&#8634;</i><span class="rl"><b>Snapshots</b></span></button>
       <button type="button" data-screen="resources"><i aria-hidden="true">&#9636;</i><span class="rl"><b>Resources</b></span></button>
       <button type="button" data-screen="heartbeat"><i aria-hidden="true">&#9829;</i><span class="rl"><b>Heartbeat</b></span></button>
@@ -70,6 +71,7 @@
           <p id="work-desc" class="desc"></p>
           <div id="swarm-strip" class="swarm-strip" hidden>
             <span id="swarm-dot" class="sw-dot" aria-hidden="true"></span>
+            <button type="button" id="swarm-switch" class="switch" role="switch" aria-checked="false" aria-label="Swarm on/off"><span class="trk"></span></button>
             <span id="swarm-text">Swarm: checking...</span>
             <span id="swarm-bar" class="sw-bar" hidden><span id="swarm-fill" class="sw-fill"></span></span>
           </div>
@@ -186,6 +188,10 @@
       <div class="page" id="mem"></div>
     </section>
 
+    <section id="screen-coach" class="screen">
+      <div class="page" id="coach"></div>
+    </section>
+
     <section id="screen-snapshots" class="screen">
       <div class="page-head-bar"><h2>Snapshots</h2><p class="desc" data-desc="snapshots"></p></div>
       <div class="snaps">
@@ -224,9 +230,11 @@
         <p class="dim">Judas loads one model at a time, shared by every agent. Switching saves the choice and restarts the daemon so the new model loads; running chats are interrupted.</p>
         <div id="model-switch" class="model-switch"></div>
         <div id="swarm-cores-wrap" hidden>
+          <h3>Swarm</h3>
+          <div class="cs-row"><button type="button" id="swarm-switch-set" class="switch" role="switch" aria-checked="false"><span class="trk"></span><span>Swarm on</span></button><span id="swarm-power-msg" class="dim small"></span></div>
           <h3>Swarm cores</h3>
-          <p class="dim">CPU threads for the swarm instance (small model, bulk jobs). Applied live, no restart; saved in its own config. Pinning keeps it on whole physical cores of one CCD first, away from the rest of the machine.</p>
-          <div id="swarm-cores" class="swarm-cores"></div>
+          <div id="swarm-cores-body"><p class="dim">CPU threads for the swarm instance (small model, bulk jobs). Applied live, no restart; saved in its own config. Pinning keeps it on whole physical cores of one CCD first, away from the rest of the machine.</p>
+          <div id="swarm-cores" class="swarm-cores"></div></div>
         </div>
         <h3>Daemon</h3>
         <dl class="kv" id="daemon-kv"></dl>

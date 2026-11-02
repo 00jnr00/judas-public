@@ -364,6 +364,15 @@ std::string fit_verdict(uint64_t model_bytes, uint64_t vram) {
     return "too big";
 }
 
+std::string fit_verdict_for(const Config & cfg, const std::string & config_name, uint64_t model_bytes, uint64_t vram) {
+    std::string v = fit_verdict(model_bytes, vram);
+    auto it = cfg.models.find(config_name);
+    if (config_name.empty() || it == cfg.models.end()) return v;
+    if (it->second.backend == "strata") return "streams";
+    if (v == "too big" && !it->second.cpu_moe.empty() && it->second.cpu_moe != "false") return "offload";
+    return v;
+}
+
 std::string gguf_display_name(const std::string & path_or_label) {
     std::string n = fs::path(path_or_label).filename().string();
     if (n.size() > 5 && lower(n.substr(n.size() - 5)) == ".gguf") n.resize(n.size() - 5);

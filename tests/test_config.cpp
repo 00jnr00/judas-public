@@ -583,6 +583,12 @@ static void test_swarm() {
     CHECK(c2.swarm.enabled && c2.swarm.max_parallel == 4 && c2.swarm.url == c.swarm.url);
     Config b = c; b.swarm.max_parallel = 0;
     CHECK(!validate_config(b).empty());
+    CHECK(d.swarm.unit == "judas-swarm");
+    setenv("JUDAS_CONFIG", f.c_str(), 1);
+    write(f, "[swarm]\nunit = \"my-swarm@1.service\"\n");
+    CHECK(load_config(root / "none").swarm.unit == "my-swarm@1.service");
+    write(f, "[swarm]\nunit = \"bad;unit\"\n");
+    CHECK(!load_error(root / "none").empty());
     write(f, "[swarm]\nbogus = 1\n");
     setenv("JUDAS_CONFIG", f.c_str(), 1);
     CHECK(!load_error(root / "none").empty());

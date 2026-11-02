@@ -204,11 +204,52 @@ static void test_cores() {
     fs::remove_all(cfgdir);
 }
 
+static void test_power() {
+    CHECK(valid_unit_name("judas-swarm") && valid_unit_name("a@b.service") && valid_unit_name("x_y.1"));
+    CHECK(!valid_unit_name("") && !valid_unit_name("a b") && !valid_unit_name("a;rm") && !valid_unit_name("$(x)"));
+    fs::path d = fs::temp_directory_path() / ("judas-swarm-power-" + std::to_string(::getpid()));
+    fs::create_directories(d);
+    std::string f = (d / "config.toml").string();
+    put(f, "# top\n[engine]\nmodel = \"m\"  # keep\n\n[swarm]\nenabled = false # note\nurl = \"http://x:1\"\n");
+    CHECK(swarm_write_enabled(f, true));
+    std::ifstream in(f);
+    std::string txt((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(txt.find("enabled = true") != std::string::npos && txt.find("enabled = false") == std::string::npos);
+    CHECK(txt.find("# top") != std::string::npos && txt.find("model = \"m\"  # keep") != std::string::npos);
+    CHECK(txt.find("url = \"http://x:1\"") != std::string::npos && txt.find("# note") != std::string::npos);
+    // a file with no [swarm] section gets one
+    put(f, "[engine]\nmodel = \"m\"\n");
+    CHECK(swarm_write_enabled(f, false));
+    std::ifstream in2(f);
+    std::string t2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    CHECK(t2.find("[swarm]") != std::string::npos && t2.find("enabled = false") != std::string::npos);
+    // runtime flag follows the switch; an invalid unit is refused before anything is touched
+    Config cfg;
+    cfg.swarm.enabled = false;
+    swarm_set_on(true);
+    CHECK(swarm_is_on(cfg));
+    swarm_set_on(false);
+    CHECK(!swarm_is_on(cfg));
+    cfg.swarm.unit = "bad unit;x";
+    SwarmPower p = swarm_power(cfg, true);
+    CHECK(!p.ok && !p.error.empty() && !p.enabled);
+    // swarm_map answers clearly while off
+    cfg.swarm.enabled = true;
+    ToolRegistry reg;
+    register_swarm_tool(reg);
+    ToolContext ctx;
+    ctx.cfg = &cfg;
+    ToolResult r = reg.call("swarm_map", {{"instruction", "x"}, {"items", json::array({"text:a"})}}, ctx);
+    CHECK(!r.ok && r.output.find("swarm is off") != std::string::npos);
+    fs::remove_all(d);
+}
+
 int main() {
     test_chunks();
     test_glob();
     test_run();
     test_tool();
     test_cores();
+    test_power();
     TEST_MAIN_END();
 }

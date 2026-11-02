@@ -207,6 +207,12 @@
     tasks: { label: "Tasks",
       desc: "Saved prompts that run on demand, once at a set time, or on a repeating schedule. Scheduled runs appear as new sessions automatically.",
       when: "Use it for things you repeat, like a nightly check, or for a job you want to start later." },
+    coach: { label: "Coach",
+      desc: "Reads a past session and proposes small changes to Judas's own guidance: a few prompt rules, skills, and tool notes, each with the transcript steps that justify it. Nothing changes until you adopt a proposal.",
+      when: "Use it after a session that went badly or slowly. Pick the session, read the proposal, adopt what makes sense. Turn it on with [coach] enabled = true in config.toml.",
+      more: [
+        "A proposal never touches permissions, the sandbox, or the safety floor; such edits are discarded and listed.",
+        "Adopting copies the skills into your skills folder and appends the rules to a coach overlay file that the agent prompt includes. To undo, delete the skill or the section in that file."] },
     memory: { label: "Memory",
       desc: "What Judas remembers: the shared memory file every assistant reads, the part of it that goes into every prompt, the facts Judas wrote itself, and the skills it has learned.",
       when: "Open it to check what Judas knows about you, spot a wrong fact it saved, and remove it. Only facts Judas wrote (tagged [judas]) can be removed here; edit the rest in the file itself.",
@@ -236,8 +242,8 @@
       desc: "Plain-language help for every tab. Start with the three modes, then the tools." }
   };
   var MODES = ["chat", "cowork", "code", "learn", "swarm"];
-  var SCREENS = ["chat", "cowork", "code", "learn", "swarm", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
-  var SCREEN_IDS = ["work", "agents", "tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
+  var SCREENS = ["chat", "cowork", "code", "learn", "swarm", "agents", "tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
+  var SCREEN_IDS = ["work", "agents", "tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
   var curScreen = "chat", curMode = "chat", sideHidden = false;
 
   function pageHead(name) {
@@ -280,6 +286,7 @@
     if (name === "heartbeat") openHeartbeat();
     if (name === "stats") loadStats();
     if (name === "memory") loadMemory();
+    if (name === "coach") loadCoach();
     if (name === "tools" && window.JudasTools) window.JudasTools.open();
   }
   $("#rail").addEventListener("click", function (e) {
@@ -519,21 +526,63 @@
   }
 
   /* ---------- swarm status strip (Swarm mode) ---------- */
-  var swarmUp = null, swarmTimer = null, swarmProg = null;
+  var swarmUp = null, swarmTimer = null, swarmProg = null, swarmStarting = false, swarmStartErr = "";
+  function syncSwarmSwitches() {
+    var on = !!(swarmUp && swarmUp.enabled);
+    ["swarm-switch", "swarm-switch-set"].forEach(function (id) {
+      var b = $("#" + id); if (!b) return;
+      b.setAttribute("aria-checked", on ? "true" : "false");
+      b.disabled = swarmStarting;
+    });
+    var sc = $("#swarm-cores-body"); if (sc) sc.hidden = !on;
+    var m = $("#swarm-power-msg");
+    if (m) m.textContent = swarmStarting || swarmStartErr ? (swarmStartErr || "starting...") : !swarmUp ? "" : !swarmUp.enabled ? "Swarm is off. Turn it on with the switch." : swarmUp.up ? "Swarm instance is up." : "Swarm instance is down.";
+  }
+  function setSwarmPower(on) {
+    if (swarmStarting) return;
+    swarmStarting = true; swarmStartErr = "";
+    swarmUp = swarmUp || {}; swarmUp.enabled = on; if (!on) swarmUp.up = false;
+    renderSwarmStrip();
+    postJSON("/api/swarm/power", { on: on }).then(function (r) {
+      if (!on) { swarmStarting = false; swarmUp.enabled = false; swarmUp.up = false; renderSwarmStrip(); renderSwarmCores(); return; }
+      var t0 = Date.now();
+      (function check() {
+        getJSON("/api/swarm/state").then(function (s) {
+          swarmUp = s;
+          if (s.up) { swarmStarting = false; renderSwarmStrip(); renderSwarmCores(); }
+          else if (Date.now() - t0 > 60000) { swarmStarting = false; swarmStartErr = "Swarm did not come up within 60 s. Check the " + (s.unit || "judas-swarm") + " unit."; renderSwarmStrip(); }
+          else { renderSwarmStrip(); setTimeout(check, 1500); }
+        }, function () { if (Date.now() - t0 > 60000) { swarmStarting = false; swarmStartErr = "Swarm status unavailable."; renderSwarmStrip(); } else setTimeout(check, 1500); });
+      })();
+    }, function (e) {
+      swarmStarting = false; swarmUp.enabled = !on;
+      var m = $("#swarm-power-msg"); if (m) m.textContent = "Could not switch: " + ((e && e.message) || e);
+      var t = $("#swarm-text"); if (t && curMode === "swarm") t.textContent = "Could not switch: " + ((e && e.message) || e);
+      syncSwarmSwitches();
+    });
+  }
+  function bindSwarmSwitches() {
+    ["swarm-switch", "swarm-switch-set"].forEach(function (id) {
+      var b = $("#" + id); if (!b) return;
+      b.onclick = function () { setSwarmPower(b.getAttribute("aria-checked") !== "true"); };
+    });
+  }
   function renderSwarmStrip() {
     var strip = $("#swarm-strip");
     if (!strip) return;
     var dot = $("#swarm-dot"), txt = $("#swarm-text"), bar = $("#swarm-bar"), fill = $("#swarm-fill");
     dot.className = "sw-dot " + (swarmUp === null ? "" : swarmUp.up ? "up" : "down");
     if (swarmUp === null) txt.textContent = "Swarm: checking...";
-    else if (!swarmUp.enabled) txt.textContent = "Swarm is off. Set enabled = true under [swarm] in config.toml, then restart Judas (docs/SWARM.md).";
-    else if (!swarmUp.up) txt.textContent = "Swarm instance is down. Start it: systemctl --user start judas-swarm";
+    else if (swarmStarting || swarmStartErr) txt.textContent = swarmStartErr || "starting...";
+    else if (!swarmUp.enabled) txt.textContent = "Swarm is off. Turn it on with the switch.";
+    else if (!swarmUp.up) txt.textContent = "Swarm instance is down. Turn it off and on again with the switch, or check the unit (" + (swarmUp.unit || "judas-swarm") + ").";
     else {
       var st = swarmUp.state || {};
       txt.textContent = "Swarm up: " + (st.model || "model") + ", " + (st.active || 0) + " running, " + (st.queued || 0) +
         " queued" + (st.gen_tok_s ? ", " + Math.round(st.gen_tok_s) + " tok/s" : "");
     }
-    if (swarmProg && swarmProg.total) {
+    syncSwarmSwitches();
+    if (swarmProg && swarmProg.total && !swarmStarting) {
       bar.hidden = false;
       fill.style.width = Math.round(100 * swarmProg.done / swarmProg.total) + "%";
       txt.textContent += " | job " + swarmProg.done + "/" + swarmProg.total;
@@ -544,7 +593,8 @@
   function pollSwarm() {
     clearTimeout(swarmTimer);
     if (curMode !== "swarm") return;
-    getJSON("/api/swarm/state").then(function (r) { swarmUp = r; renderSwarmStrip(); },
+    bindSwarmSwitches();
+    if (!swarmStarting) getJSON("/api/swarm/state").then(function (r) { if (!swarmStarting) { swarmUp = r; renderSwarmStrip(); } },
       function () { swarmUp = { enabled: true, up: false }; renderSwarmStrip(); });
     swarmTimer = setTimeout(pollSwarm, 4000);
   }
@@ -1663,6 +1713,117 @@
   };
 
 
+  /* ---------- coach (propose-only review of a past session; you adopt by hand) ---------- */
+  var coach = { d: null, err: "", sel: null, detail: null, busy: "", sessions: null, pick: "", timer: null };
+  function loadCoach() {
+    renderCoach();
+    var jobs = getJSON("/api/coach").then(function (r) { coach.d = r; coach.err = ""; }, function (e) { coach.err = e.message || "failed"; });
+    var sess = coach.sessions ? Promise.resolve() : getJSON("/api/sessions?limit=30").then(function (r) { coach.sessions = r.sessions || r; }, function () { coach.sessions = []; });
+    return Promise.all([jobs, sess]).then(function () {
+      var running = coach.d && (coach.d.jobs || []).some(function (j) { return j.state === "running"; });
+      clearTimeout(coach.timer);
+      if (running && $("#screen-coach").classList.contains("active")) coach.timer = setTimeout(loadCoach, 4000);
+      renderCoach();
+    });
+  }
+  function openCoach(id) {
+    coach.sel = id; coach.detail = null; renderCoach();
+    getJSON("/api/coach/" + encodeURIComponent(id)).then(function (r) { coach.detail = r; renderCoach(); },
+      function (e) { coach.err = e.message || "failed"; renderCoach(); });
+  }
+  function coachAct(id, what) {
+    if (what === "adopt" && !confirm("Adopt this proposal? Its skills are copied into your skills folder and its rules are appended to the coach overlay.")) return;
+    coach.busy = id; renderCoach();
+    postJSON("/api/coach/" + encodeURIComponent(id) + "/" + what, {}).then(function (r) {
+      coach.busy = "";
+      if (what === "adopt" && r.skipped && r.skipped.length) alert("Adopted. Skipped: " + r.skipped.join("; "));
+      loadCoach(); openCoach(id);
+    }, function (e) { coach.busy = ""; alert("Not done: " + e.message); loadCoach(); });
+  }
+  function renderCoach() {
+    var box = $("#coach");
+    if (!box) return;
+    box.textContent = "";
+    var head = el("div", "stats-head");
+    head.appendChild(pageHead("coach"));
+    var rf = el("button", "btn small", "Refresh"); rf.type = "button"; rf.onclick = function () { coach.sessions = null; loadCoach(); };
+    head.appendChild(rf);
+    box.appendChild(head);
+    if (coach.err) { box.appendChild(el("div", "field-err", "Could not load coach: " + coach.err)); return; }
+    var d = coach.d;
+    if (!d) { box.appendChild(el("p", "dim", "Loading...")); return; }
+    if (!d.enabled) box.appendChild(el("p", "field-err", "Coach is off. Set [coach] enabled = true in config.toml and restart Judas to propose or use adopted rules."));
+    box.appendChild(el("p", "dim small", "Adopted overlay file: " + d.overlay));
+
+    box.appendChild(el("h3", null, "Review a session"));
+    var row = el("div", "mem-row");
+    var sel = el("select"); sel.setAttribute("aria-label", "Session to review");
+    (coach.sessions || []).forEach(function (s) {
+      var o = el("option", null, (s.title || s.id) + "  (" + s.id + ")"); o.value = s.id; sel.appendChild(o);
+    });
+    if (coach.pick) sel.value = coach.pick;
+    sel.onchange = function () { coach.pick = sel.value; };
+    row.appendChild(sel);
+    var go = el("button", "btn small primary", "Propose changes"); go.type = "button";
+    go.disabled = !d.enabled || !(coach.sessions || []).length;
+    go.onclick = function () {
+      go.disabled = true;
+      postJSON("/api/coach", { session: sel.value || "last" }).then(function () { loadCoach(); },
+        function (e) { alert("Coach: " + e.message); go.disabled = false; });
+    };
+    row.appendChild(go);
+    box.appendChild(row);
+    (d.jobs || []).forEach(function (j) {
+      var pj = String(j.session).indexOf("probe:") === 0;
+      if (j.state === "running") box.appendChild(el("p", "dim", (pj ? "Probing " + j.session.slice(6) : "Reading " + j.session) + " in the background..."));
+      else if (j.state === "error") box.appendChild(el("p", "field-err", "Last run for " + j.session + " failed: " + j.error));
+    });
+
+    box.appendChild(el("h3", null, "Proposals"));
+    if (!(d.variants || []).length) box.appendChild(el("p", "dim", "No proposals yet."));
+    (d.variants || []).forEach(function (v) {
+      var c = el("details", "hb-fact");
+      if (coach.sel === v.id) c.open = true;
+      var sm = el("summary");
+      sm.appendChild(el("b", "fn", v.id));
+      var tags = el("span", "chips");
+      tags.appendChild(el("span", "tag" + (v.status === "adopted" ? " m-cowork" : v.status === "rejected" ? " paused" : ""), v.status));
+      tags.appendChild(el("span", "tag", v.edit_count + " edit" + (v.edit_count === 1 ? "" : "s")));
+      sm.appendChild(tags);
+      sm.appendChild(el("span", "fl", v.summary || ""));
+      c.appendChild(sm);
+      c.addEventListener("toggle", function () { if (c.open && coach.sel !== v.id) openCoach(v.id); });
+      if (coach.sel === v.id) {
+        var body = el("div", "fb");
+        var dt = coach.detail;
+        if (!dt) body.appendChild(el("p", "dim", "Loading..."));
+        else {
+          body.appendChild(el("p", null, dt.summary || "(no summary)"));
+          (dt.edits || []).forEach(function (e) {
+            var ec = el("div", "card");
+            ec.appendChild(el("b", null, e.kind + (e.name ? " " + e.name : "")));
+            ec.appendChild(el("p", "dim small", "Why: " + e.rationale));
+            ec.appendChild(el("pre", "fb", e.text));
+            body.appendChild(ec);
+          });
+          (dt.discarded || []).forEach(function (x) { body.appendChild(el("p", "dim small", "Discarded " + x.what + ": " + x.reason)); });
+          if (dt.evidence) body.appendChild(el("pre", "fb", dt.evidence));
+          body.appendChild(el("p", "dim small", dt.dir));
+          if (dt.status === "proposed") {
+            var ad = el("button", "btn small primary", coach.busy === v.id ? "Working..." : "Adopt"); ad.type = "button"; ad.disabled = !!coach.busy;
+            ad.onclick = function () { coachAct(v.id, "adopt"); };
+            var rj = el("button", "btn small danger", "Reject"); rj.type = "button"; rj.disabled = !!coach.busy;
+            rj.onclick = function () { coachAct(v.id, "reject"); };
+            var bar = el("div", "chips"); bar.appendChild(ad); bar.appendChild(rj);
+            body.appendChild(bar);
+          }
+        }
+        c.appendChild(body);
+      }
+      box.appendChild(c);
+    });
+  }
+
   /* ---------- memory (shared memory file, prompt block, Judas-written facts, skills) ---------- */
   var mem = { m: null, sk: null, err: "", q: "", busy: "" };
   function loadMemory() {
@@ -2033,7 +2194,7 @@
     box.appendChild(el("h3", null, "Tools"));
     box.appendChild(guideCard("agents", true));
     var g2 = el("div", "ggrid");
-    ["tasks", "memory", "snapshots", "resources", "heartbeat", "stats", "tools", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
+    ["tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
     box.appendChild(g2);
   }
 
@@ -2482,8 +2643,11 @@
   }
   function renderSwarmCores() {
     var wrap = $("#swarm-cores-wrap"), box = $("#swarm-cores"); if (!wrap || !box) return;
+    bindSwarmSwitches();
+    getJSON("/api/swarm/state").then(function (s) { if (!swarmStarting) swarmUp = s; syncSwarmSwitches(); }, function () {});
     getJSON("/api/swarm/cores").then(function (c) {
-      wrap.hidden = !c.enabled;
+      wrap.hidden = false;
+      var body = $("#swarm-cores-body"); if (body) body.hidden = !c.enabled;
       if (!c.enabled) return;
       box.textContent = "";
       var max = c.nproc || 1, val = c.threads || Math.min(max, 8);

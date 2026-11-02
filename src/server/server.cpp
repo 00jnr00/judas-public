@@ -26,6 +26,8 @@
 #include "agent/autoresume.h"
 #include "attach/attach.h"
 #include "channels/channels.h"
+#include "coach/coach.h"
+#include "coach/probe.h"
 #include "core/cpu_topology.h"
 #include "core/json.h"
 #include "core/skin.h"
@@ -207,6 +209,12 @@ struct Server::Impl {
     std::thread scheduler;
     std::thread heartbeat_thread;
     std::thread resume_thread;
+    // Coach proposals run on their own threads (one per session at a time); joined at shutdown.
+    struct CoachJob { std::string state = "running", error, variant; long long started_ms = 0; std::string verdict; };
+    std::mutex coach_mu;
+    std::map<std::string, CoachJob> coach_jobs;       // session id -> latest job
+    std::vector<std::thread> coach_threads;
+    std::atomic<bool> coach_cancel{false};
     // Auto-resume bookkeeping per session (in memory; a restart forgets it, the per-day count included).
     struct ResumeTrack {
         std::string day;
@@ -474,8 +482,10 @@ struct Server::Impl {
 
     ~Impl() {
         stopping = true;
+        coach_cancel = true;
         hub.wake();
         agents.remove_listener(listener_handle);
+        for (auto & t : coach_threads) if (t.joinable()) t.join();
 #ifdef JUDAS_MACH12
         if (planner) planner->stop_background();
 #endif
@@ -1115,6 +1125,112 @@ void Server::Impl::setup(httplib::Server & svr) {
         std::string sid = agents.submit(id, build_learn_prompt(request), cwd);
         send_json(res, {{"session", sid}});
     });
+    // Coach (propose-only): POST /api/coach {session} starts a proposal in the background; GET /api/coach lists
+    // proposals and jobs; GET /api/coach/<id>; POST /api/coach/<id>/adopt|reject. Nothing is re-executed.
+    svr.Get("/api/coach", [this](const httplib::Request &, httplib::Response & res) {
+        json vs = json::array(), jobs = json::array();
+        for (auto & v : coach_list(cfg)) vs.push_back(coach_variant_json(v, false));
+        {
+            std::lock_guard lk(coach_mu);
+            for (auto & [sid, j] : coach_jobs)
+                jobs.push_back({{"session", sid}, {"state", j.state}, {"error", j.error}, {"variant", j.variant},
+                                {"verdict", j.verdict}, {"started_ms", j.started_ms}});
+        }
+        send_json(res, {{"enabled", cfg.coach.enabled}, {"overlay", coach_overlay_path(cfg)}, {"variants", vs}, {"jobs", jobs}});
+    });
+    svr.Post("/api/coach", [this](const httplib::Request & req, httplib::Response & res) {
+        if (!cfg.coach.enabled)
+            return send_json(res, error_json("coach is disabled; set [coach] enabled = true in config.toml", "invalid_request_error"), 403);
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || (b.contains("session") && !b["session"].is_string()))
+            return send_json(res, error_json("session must be a string", "invalid_request_error"), 400);
+        std::string sid = b.value("session", "last");
+        if (sid.empty() || sid == "last") {
+            auto l = store.list_sessions(1);
+            if (l.empty()) return send_json(res, error_json("no sessions yet", "not_found"), 404);
+            sid = l[0].id;
+        }
+        if (!store.get_session(sid)) return send_json(res, error_json("no such session", "not_found"), 404);
+        std::lock_guard lk(coach_mu);
+        auto it = coach_jobs.find(sid);
+        if (it != coach_jobs.end() && it->second.state == "running")
+            return send_json(res, error_json("a proposal for this session is already running", "conflict"), 409);
+        coach_jobs[sid] = CoachJob{"running", "", "", now_ms()};
+        coach_threads.emplace_back([this, sid] {
+            CoachRunResult r = coach_propose(cfg, engine, store, sid, &coach_cancel);
+            std::lock_guard lk2(coach_mu);
+            auto & j = coach_jobs[sid];
+            j.state = r.ok ? "done" : "error";
+            j.error = r.error;
+            j.variant = r.variant.id;
+        });
+        send_json(res, {{"session", sid}, {"state", "running"}}, 202);
+    });
+    // Probe: POST /api/coach/probe {proposal, task, fixture, check?, k?, timeout?, mode?} runs the task under the base
+    // harness and under the proposal, in scratch copies of fixture. Background job keyed "probe:<id>" in GET /api/coach.
+    svr.Post("/api/coach/probe", [this](const httplib::Request & req, httplib::Response & res) {
+        if (!cfg.coach.enabled)
+            return send_json(res, error_json("coach is disabled; set [coach] enabled = true in config.toml", "invalid_request_error"), 403);
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        auto bad = [&](const std::string & m) { return send_json(res, error_json(m, "invalid_request_error"), 400); };
+        if (!b.is_object()) return bad("body must be a JSON object");
+        for (const char * k : {"proposal", "task", "fixture", "check", "mode"})
+            if (b.contains(k) && !b[k].is_string()) return bad(std::string(k) + " must be a string");
+        for (const char * k : {"k", "timeout"})
+            if (b.contains(k) && !b[k].is_number_integer()) return bad(std::string(k) + " must be an integer");
+        ProbeOptions po;
+        std::string id = b.value("proposal", "");
+        po.task = b.value("task", "");
+        po.fixture = b.value("fixture", "");
+        po.check = b.value("check", "");
+        po.mode = b.value("mode", "code");
+        po.k = b.value("k", 1);
+        po.timeout_s = b.value("timeout", 1800);
+        if (po.mode.empty()) po.mode = "code";
+        CoachVariant v;
+        if (!coach_load(cfg, id, v)) return send_json(res, error_json("no such proposal", "not_found"), 404);
+        if (po.task.empty()) return bad("task is required");
+        if (po.k < 1 || po.k > 10) return bad("k must be between 1 and 10");
+        if (po.timeout_s < 10) return bad("timeout must be at least 10 seconds");
+        std::error_code ec;
+        if (po.fixture.empty() || !std::filesystem::is_directory(po.fixture, ec)) return bad("fixture must be an existing directory");
+        po.fixture = std::filesystem::absolute(po.fixture).string();
+        std::string key = "probe:" + id;
+        std::lock_guard lk(coach_mu);
+        auto it = coach_jobs.find(key);
+        if (it != coach_jobs.end() && it->second.state == "running")
+            return send_json(res, error_json("a probe for this proposal is already running", "conflict"), 409);
+        coach_jobs[key] = CoachJob{"running", "", id, now_ms()};
+        coach_threads.emplace_back([this, key, id, po] {
+            ProbeResult r = coach_probe(cfg, agents, store, id, po, &coach_cancel);
+            std::lock_guard lk2(coach_mu);
+            auto & j = coach_jobs[key];
+            j.state = r.ok ? "done" : "error";
+            j.error = r.error;
+            j.variant = id;
+            j.verdict = r.verdict;
+        });
+        send_json(res, {{"session", key}, {"state", "running"}}, 202);
+    });
+    svr.Get(R"(/api/coach/([^/]+))", [this](const httplib::Request & req, httplib::Response & res) {
+        CoachVariant v;
+        if (!coach_load(cfg, req.matches[1], v)) return send_json(res, error_json("no such proposal", "not_found"), 404);
+        json j = coach_variant_json(v, true);
+        std::ifstream f(std::filesystem::path(v.dir) / "README.md");
+        j["readme"] = std::string(std::istreambuf_iterator<char>(f), {});
+        j["evidence"] = coach_probe_evidence_text(cfg, v.id);
+        send_json(res, j);
+    });
+    svr.Post(R"(/api/coach/([^/]+)/adopt)", [this](const httplib::Request & req, httplib::Response & res) {
+        CoachAdoptResult r = coach_adopt(cfg, req.matches[1]);
+        if (!r.ok) return send_json(res, error_json(r.error, "invalid_request_error"), 400);
+        send_json(res, {{"ok", true}, {"skills_added", r.skills_added}, {"skipped", r.skipped}, {"overlay_appended", r.overlay_appended}});
+    });
+    svr.Post(R"(/api/coach/([^/]+)/reject)", [this](const httplib::Request & req, httplib::Response & res) {
+        std::string err;
+        if (!coach_reject(cfg, req.matches[1], &err)) return send_json(res, error_json(err, "invalid_request_error"), 400);
+        send_json(res, {{"ok", true}});
+    });
     svr.Get(R"(/api/sessions/([^/]+)/events)",
             [this](const httplib::Request & req, httplib::Response & res) { events(req, res); });
     svr.Get("/api/events", [this](const httplib::Request & req, httplib::Response & res) { global_events(req, res); });
@@ -1284,7 +1400,7 @@ void Server::Impl::setup(httplib::Server & svr) {
         for (auto & m : scan_models(cfg)) {
             if (m.projector || (m.helper && m.config_name.empty())) continue;
             json j = {{"name", m.config_name}, {"path", m.path}, {"label", gguf_display_name(m.label)}, {"source", m.source},
-                      {"bytes", m.bytes}, {"size", human_bytes(m.bytes)}, {"fit", cpu ? "cpu" : fit_verdict(m.bytes, vram)},
+                      {"bytes", m.bytes}, {"size", human_bytes(m.bytes)}, {"fit", cpu ? "cpu" : fit_verdict_for(cfg, m.config_name, m.bytes, vram)},
                       {"arch", m.arch}, {"quant", m.quant}, {"usable", m.ok}, {"error", m.error},
                       {"configured", !m.config_name.empty()}, {"active", m.config_name == cfg.engine.model}};
             if (auto it = cfg.models.find(m.config_name); it != cfg.models.end())
@@ -1365,8 +1481,9 @@ void Server::Impl::setup(httplib::Server & svr) {
     };
     // Swarm instance state, proxied so the web app needs no cross-origin access to :8083.
     svr.Get("/api/swarm/state", [this](const httplib::Request &, httplib::Response & res) {
-        json out = {{"enabled", cfg.swarm.enabled}, {"url", cfg.swarm.url}, {"up", false}};
-        if (cfg.swarm.enabled) {
+        bool on = swarm_is_on(cfg);
+        json out = {{"enabled", on}, {"url", cfg.swarm.url}, {"up", false}, {"unit", cfg.swarm.unit}};
+        if (on) {
             try {
                 httplib::Client cli(cfg.swarm.url);
                 cli.set_connection_timeout(1);
@@ -1386,8 +1503,27 @@ void Server::Impl::setup(httplib::Server & svr) {
     auto cores_json = [this](const SwarmCores & c) {
         return json{{"ok", c.ok}, {"error", c.error}, {"threads", c.threads}, {"nproc", c.nproc}, {"pin", c.pin},
                     {"cpus", c.cpus}, {"up", c.up}, {"live", c.live}, {"config", c.config_path},
-                    {"enabled", cfg.swarm.enabled}};
+                    {"enabled", swarm_is_on(cfg)}};
     };
+    // On/off switch: persists [swarm] enabled, registers or removes swarm_map live, starts or stops the unit.
+    auto power_json = [this] {
+        return json{{"enabled", swarm_is_on(cfg)}, {"up", swarm_unit_active(cfg)}, {"unit", cfg.swarm.unit}};
+    };
+    svr.Get("/api/swarm/power", [power_json](const httplib::Request &, httplib::Response & res) {
+        send_json(res, power_json());
+    });
+    svr.Post("/api/swarm/power", [this, power_json](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("on") || !b["on"].is_boolean())
+            return send_json(res, error_json("body needs boolean on", "invalid_request_error"), 400);
+        bool on = b["on"].get<bool>();
+        SwarmPower p = swarm_power(cfg, on);
+        if (!p.ok) return send_json(res, error_json(p.error, "internal_error"), 500);
+        agents.set_swarm_tool(on);
+        json out = power_json();
+        if (!p.error.empty()) out["warning"] = p.error;
+        send_json(res, out);
+    });
     svr.Get("/api/swarm/cores", [this, cores_json](const httplib::Request &, httplib::Response & res) {
         send_json(res, cores_json(swarm_cores_get(cfg)));
     });

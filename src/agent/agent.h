@@ -72,6 +72,20 @@ public:
 
     std::vector<AgentRow> agents(const std::string & session) const;
 
+    // Per-session additions, used by coach probes. overlay is appended to the system prompt of every agent in
+    // the session; skills_dir (optional) is an extra skill source for that session only (it wins over a skill of
+    // the same name). Setting extras also turns off the hidden background review for the session, so a probe
+    // never writes skills or memory. Permissions and the safety floor are not affected. Call before submit.
+    struct SessionExtras {
+        std::string overlay;
+        std::string skills_dir;
+    };
+    void set_session_extras(const std::string & session_id, const SessionExtras & x);
+    void clear_session_extras(const std::string & session_id);
+
+    // Register or remove the swarm_map tool live (the Swarm on/off switch).
+    void set_swarm_tool(bool on);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

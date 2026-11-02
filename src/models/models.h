@@ -49,6 +49,9 @@ uint64_t gpu_vram_free();
 
 // "fits" | "tight" | "too big" (for offloading the whole model) given the file size and VRAM.
 std::string fit_verdict(uint64_t model_bytes, uint64_t vram);
+// Same, but aware of how a configured model loads: "streams" for the Strata backend (experts streamed from RAM),
+// "offload" when a too-big MoE has cpu_moe on. Unconfigured names fall back to fit_verdict.
+std::string fit_verdict_for(const Config & cfg, const std::string & config_name, uint64_t model_bytes, uint64_t vram);
 
 // A config-safe name from a file name: "Qwen3-30B-A3B-Q4_K_M.gguf" -> "qwen3-30b-a3b".
 std::string suggest_model_name(const std::string & file_name);

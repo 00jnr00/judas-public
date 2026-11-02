@@ -20,6 +20,13 @@ namespace judas {
 
 namespace fs = std::filesystem;
 
+bool valid_unit_name(const std::string & s) {
+    if (s.empty() || s.size() > 128) return false;
+    for (char ch : s)
+        if (!(std::isalnum((unsigned char) ch) || ch == '-' || ch == '_' || ch == '.' || ch == '@')) return false;
+    return true;
+}
+
 std::string expand_home(const std::string & path) {
     if (path.empty() || path[0] != '~') return path;
     if (path.size() > 1 && path[1] != '/') return path;  // "~user" is left alone
@@ -215,9 +222,8 @@ void apply_model(const Reader & r, ModelConfig & m, const std::string & prefix, 
         else if (key == "unit") {
             m.unit = get_str(r, full, v);
             // it ends up in a systemctl command line: plain unit names only
-            for (char ch : m.unit)
-                if (!(std::isalnum((unsigned char) ch) || ch == '-' || ch == '_' || ch == '.' || ch == '@'))
-                    fail_at(r, full + ": not a systemd unit name: " + m.unit, &v);
+            if (!m.unit.empty() && !valid_unit_name(m.unit))
+                fail_at(r, full + ": not a systemd unit name: " + m.unit, &v);
         }
         else if (key == "remote_model") m.remote_model = get_str(r, full, v);
         else if (key == "mmproj") m.mmproj = get_str(r, full, v);
@@ -363,6 +369,16 @@ void apply_file(Config & c, const std::string & file) {
                 else if (l == "max_context_tokens") c.learn.max_context_tokens = get_int(r, full, lv);
                 else unknown_key(r, full, lv);
             }
+        } else if (key == "coach") {
+            for (auto && [ck, cv] : as_table(r, key, v)) {
+                std::string c2(ck.str()), full = key + "." + c2;
+                if (c2 == "enabled") c.coach.enabled = get_bool(r, full, cv);
+                else if (c2 == "overlay") c.coach.overlay = get_str(r, full, cv);
+                else if (c2 == "overlay_max_chars") c.coach.overlay_max_chars = get_int(r, full, cv);
+                else if (c2 == "tools_max_chars") c.coach.tools_max_chars = get_int(r, full, cv);
+                else if (c2 == "max_skills") c.coach.max_skills = get_int(r, full, cv);
+                else unknown_key(r, full, cv);
+            }
         } else if (key == "learning") {
             for (auto && [lk, lv] : as_table(r, key, v)) {
                 std::string l(lk.str()), full = key + "." + l;
@@ -416,6 +432,11 @@ void apply_file(Config & c, const std::string & file) {
                 else if (sw == "max_parallel") c.swarm.max_parallel = get_int(r, full, sv);
                 else if (sw == "max_item_chars") c.swarm.max_item_chars = get_int(r, full, sv);
                 else if (sw == "config") c.swarm.config = get_str(r, full, sv);
+                else if (sw == "unit") {
+                    c.swarm.unit = get_str(r, full, sv);
+                    if (!valid_unit_name(c.swarm.unit))
+                        fail_at(r, full + ": not a systemd unit name: " + c.swarm.unit, &sv);
+                }
                 else unknown_key(r, full, sv);
             }
         } else if (key == "hooks") {
@@ -826,6 +847,8 @@ std::vector<std::string> validate_config(const Config & cfg) {
     }
     if (cfg.learn.max_context_tokens < 0)
         p.push_back("learn.max_context_tokens must be 0 or more, got " + std::to_string(cfg.learn.max_context_tokens));
+    if (cfg.coach.overlay_max_chars < 0 || cfg.coach.tools_max_chars < 0 || cfg.coach.max_skills < 0)
+        p.push_back("coach.overlay_max_chars, tools_max_chars and max_skills must be 0 or more");
     const auto & ts = cfg.prompt.tool_schema;
     if (ts != "full" && ts != "lazy")
         p.push_back("prompt.tool_schema must be full or lazy, got '" + ts + "'");
@@ -1013,6 +1036,12 @@ std::string dump_config(const Config & c) {
       << "[learn]\n"
       << "context_files = " << str_array(c.learn.context_files) << "\n"
       << "max_context_tokens = " << c.learn.max_context_tokens << "\n\n"
+      << "[coach]\n"
+      << "enabled = " << (c.coach.enabled ? "true" : "false") << "\n"
+      << "overlay = " << q(c.coach.overlay) << "\n"
+      << "overlay_max_chars = " << c.coach.overlay_max_chars << "\n"
+      << "tools_max_chars = " << c.coach.tools_max_chars << "\n"
+      << "max_skills = " << c.coach.max_skills << "\n\n"
       << "[learning]\n"
       << "review = " << (c.learning.review ? "true" : "false") << "\n"
       << "review_tool_steps = " << c.learning.review_tool_steps << "\n"
@@ -1095,7 +1124,8 @@ std::string dump_config(const Config & c) {
       << "url = " << q(c.swarm.url) << "\n"
       << "max_parallel = " << c.swarm.max_parallel << "\n"
       << "max_item_chars = " << c.swarm.max_item_chars << "\n"
-      << "config = " << q(c.swarm.config) << "\n";
+      << "config = " << q(c.swarm.config) << "\n"
+      << "unit = " << q(c.swarm.unit) << "\n";
     o << "\n[mach12]\n"
       << "enabled = " << (c.mach12.enabled ? "true" : "false") << "\n"
       << "data_dir = " << q(c.mach12.data_dir) << "\n";
@@ -1277,6 +1307,18 @@ reject_dashes = false      # memory_append refuses facts containing em or en das
 context_files = []
 max_context_tokens = 3000
 
+# ---- coach -----------------------------------------------------------------
+# Propose-only review of a past session (`judas coach <session>`, /coach, Coach tab). A proposal is plain files under
+# <data_dir>/coach/; nothing changes until you adopt it. Adopting copies skills into the skills dir and appends the
+# overlay to the overlay file below, which the agent prompt includes while enabled. A proposal can never touch
+# permissions, the sandbox or the safety floor.
+[coach]
+enabled = false
+overlay = ""               # "" = <data_dir>/coach/overlay.md
+overlay_max_chars = 1200   # cap on one proposal's prompt overlay
+tools_max_chars = 800      # cap on one proposal's tool notes
+max_skills = 3
+
 # ---- hooks -----------------------------------------------------------------
 # events: pre-tool | post-tool | pre-edit | post-edit | turn-end | task-done
 [hooks]
@@ -1360,6 +1402,7 @@ enabled = false
 # max_parallel = 8
 # max_item_chars = 24000
 # config = "~/.config/judas/swarm.toml"   # the swarm instance's own config; `judas swarm cores N` writes threads here
+# unit = "judas-swarm"   # systemd user unit that `judas swarm on|off` and the Swarm switch start and stop
 
 # ---- mcp -------------------------------------------------------------------
 # Tools from MCP servers (stdio), registered as "<prefix><tool>". Third-party servers are untrusted: when

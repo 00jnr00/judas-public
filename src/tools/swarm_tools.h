@@ -53,4 +53,22 @@ SwarmCores swarm_cores_get(const Config & cfg);
 // pin: -1 keep the configured value, 0 off, 1 on. n is clamped by validation to 1..nproc (an error otherwise).
 SwarmCores swarm_cores_set(const Config & cfg, int n, int pin);
 
+// On/off switch. The effective state is a runtime flag (set by the switch) that starts from cfg.swarm.enabled.
+// While off, swarm_map is unregistered and, if a session still holds it, answers with a clear error.
+bool swarm_is_on(const Config & cfg);
+void swarm_set_on(bool on);
+// Write `enabled = true|false` under [swarm] in a config file, keeping the rest of it. False on I/O failure.
+bool swarm_write_enabled(const std::string & config_path, bool on);
+struct SwarmPower {
+    bool ok = false;
+    std::string error;
+    bool enabled = false;
+};
+// Turn the swarm on or off: validates [swarm].unit, persists the flag to the user config, updates the runtime
+// flag, then runs `systemctl --user start|stop <unit>` (never enable/disable). On a failed start the flag stays on
+// (the unit may start late) and `error` says so; ok=false only when the config could not be written.
+SwarmPower swarm_power(const Config & cfg, bool on);
+// Is the swarm unit active? (systemctl --user is-active). False when systemctl is unavailable.
+bool swarm_unit_active(const Config & cfg);
+
 }  // namespace judas

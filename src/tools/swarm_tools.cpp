@@ -205,6 +205,7 @@ std::string stamp() {
 
 ToolResult t_swarm_map(const json & a, ToolContext & ctx) {
     const Config & cfg = *ctx.cfg;
+    if (!swarm_is_on(cfg)) return {false, "swarm is off; turn it on in Settings or the Swarm tab (or run `judas swarm on`)"};
     std::string instruction = a.value("instruction", std::string());
     if (instruction.empty()) return {false, "instruction is required"};
     if (!a.contains("items") || !a["items"].is_array() || a["items"].empty())
@@ -430,6 +431,50 @@ SwarmCores swarm_cores_set(const Config & cfg, int n, int pin) {
         }
     } catch (...) {}
     return out;
+}
+
+// ---- power ----------------------------------------------------------------------------------------------------
+
+namespace {
+std::atomic<int> g_swarm_override{-1};  // -1: follow the config, 0 off, 1 on
+}
+
+bool swarm_is_on(const Config & cfg) {
+    int o = g_swarm_override.load();
+    return o < 0 ? cfg.swarm.enabled : o != 0;
+}
+
+void swarm_set_on(bool on) { g_swarm_override = on ? 1 : 0; }
+
+bool swarm_write_enabled(const std::string & config_path, bool on) {
+    return set_toml_value_in_file(config_path, "swarm", "enabled", on ? "true" : "false");
+}
+
+SwarmPower swarm_power(const Config & cfg, bool on) {
+    SwarmPower out;
+    out.enabled = swarm_is_on(cfg);
+    if (!valid_unit_name(cfg.swarm.unit)) {
+        out.error = "[swarm].unit is not a valid systemd unit name: " + cfg.swarm.unit;
+        return out;
+    }
+    std::string path = user_config_path();
+    if (!swarm_write_enabled(path, on)) {
+        out.error = "could not write " + path;
+        return out;
+    }
+    swarm_set_on(on);
+    out.enabled = on;
+    out.ok = true;
+    std::string cmd = std::string("systemctl --user ") + (on ? "start " : "stop ") + cfg.swarm.unit + " >/dev/null 2>&1";
+    if (std::system(cmd.c_str()) != 0 && on)
+        out.error = "could not start " + cfg.swarm.unit + "; check `systemctl --user status " + cfg.swarm.unit + "`";
+    return out;
+}
+
+bool swarm_unit_active(const Config & cfg) {
+    if (!valid_unit_name(cfg.swarm.unit)) return false;
+    std::string cmd = "systemctl --user is-active --quiet " + cfg.swarm.unit + " >/dev/null 2>&1";
+    return std::system(cmd.c_str()) == 0;
 }
 
 }  // namespace judas

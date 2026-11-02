@@ -31,16 +31,24 @@ Patterns that work:
 
 ## Enable it
 
-1. `install.sh` copies `contrib/swarm.toml` to `~/.config/judas/swarm.toml` (only if absent) and the unit to `~/.config/systemd/user/judas-swarm.service` (only if absent). Neither is enabled. Check the model path in `swarm.toml`.
-2. Add to `~/.config/judas/config.toml`:
+1. `install.sh` copies `contrib/swarm.toml` to `~/.config/judas/swarm.toml` (only if absent) and the unit to `~/.config/systemd/user/judas-swarm.service` (only if absent). Neither is enabled at login. Check the model path in `swarm.toml`.
+2. Turn the swarm on with the switch: in the Swarm tab (next to the status dot) or at the top of the Swarm section in Settings, or from a terminal with `judas swarm on`. `judas swarm off` turns it off and `judas swarm status` shows the state.
 
-   ```toml
-   [swarm]
-   enabled = true
-   # url = "http://127.0.0.1:8083"   # max_parallel = 8   # max_item_chars = 24000
-   ```
+The switch does four things, live and without restarting the main `judas`: sets `[swarm] enabled` in `config.toml` (the rest of the file is kept), registers the `swarm_map` tool, runs `systemctl --user start <unit>`, and waits until the instance answers (up to 60 s, then shows an error). Off does the reverse: stops the unit, sets `enabled = false` and removes the tool (a session that still holds it gets "swarm is off"). It only starts and stops the unit; it never runs `enable` or `disable`, so start-at-login is unchanged. The unit name is `[swarm].unit` (default `judas-swarm`, letters, digits and `@ . _ -` only).
 
-3. `systemctl --user start judas-swarm`, restart the main `judas`, open the web app and pick the Swarm tab (folder required). The strip above the chat shows whether the swarm is up and the job progress.
+API: `GET /api/swarm/power` returns `{"enabled", "up", "unit"}`; `POST /api/swarm/power` with `{"on": true}` or `{"on": false}` switches it.
+
+You can still set it by hand:
+
+```toml
+[swarm]
+enabled = true
+# url = "http://127.0.0.1:8083"   # max_parallel = 8   # max_item_chars = 24000   # unit = "judas-swarm"
+```
+
+then `systemctl --user start judas-swarm` and restart the main `judas`.
+
+Open the Swarm tab (folder required). The strip above the chat shows whether the swarm is up and the job progress.
 
 Small models are good at extraction, short summaries, classification and tagging; they are not for coding or long reasoning. The swarm instance has no auth, like the main one; keep it on localhost.
 
@@ -52,7 +60,7 @@ The swarm instance is the same engine as the GPU one: `max_agents` sequences (up
 
 The swarm gets a core budget so it does not fight the GPU engine's CPU threads or your desktop.
 
-- Web: Settings, "Swarm cores" (shown when `[swarm].enabled`). A slider from 1 to the number of logical CPUs and a "Pin to those cores" box.
+- Web: Settings, "Swarm cores" (the slider is shown while the swarm is on). A slider from 1 to the number of logical CPUs and a "Pin to those cores" box.
 - CLI: `judas swarm cores` shows the setting, `judas swarm cores 8 [--pin|--no-pin]` changes it.
 - API: `GET/POST /api/swarm/cores` on the main server (`{"threads": N, "pin": true}`), which proxies to the swarm instance's own `GET/POST /api/cores`.
 

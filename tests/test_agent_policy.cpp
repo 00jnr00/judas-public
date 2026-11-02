@@ -51,6 +51,9 @@ static void test_announce() {
              "I need to read the header before editing.",
              "Let us run the tests.",
              "I\u2019ll fix the parser.",
+             "Module 2 captured. I need lines 118-132 for module 3's first functions.",
+             "I still need the helper signatures.",
+             "Moving on to module 4.",
          })
         CHECK(classify_reply(s, false, "stop") == ReplyKind::Announce);
 
@@ -71,6 +74,8 @@ static void test_announce() {
              "No further action is needed.",
              "Let me run the tests?",
              "I will not change the public API.",
+             "I need you to confirm the target branch.",
+             "I need your approval before deleting the cache.",
              "Let me tell you what changed. The parser is simpler now.",
              "The parser now handles empty input. I'll note that the fix touches only policy.cpp. The rest of "
              "the pipeline is unchanged.",

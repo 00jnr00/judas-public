@@ -193,6 +193,7 @@ To keep web pages you visit from driving the API, Judas sends no wildcard CORS h
 - [docs/LEARN.md](docs/LEARN.md): Learn mode, `[learn] context_files`, progress records
 - [docs/SKILLS.md](docs/SKILLS.md): writing skills and how they load
 - [docs/LEARNING.md](docs/LEARNING.md): background review, curator, `/learn`
+- [docs/COACH.md](docs/COACH.md): coach mode, propose-only review of a past session (`judas coach`, `/coach`, Coach tab)
 - [docs/MCP.md](docs/MCP.md): connecting MCP servers (sandboxed, fail closed)
 - [docs/SWARM.md](docs/SWARM.md): Swarm mode, bulk jobs on small CPU models via `swarm_map`
 - [docs/TOOLS-TABS.md](docs/TOOLS-TABS.md): the Tools tab (embedded pages with a skill-driven side chat) and the optional built-in planner
