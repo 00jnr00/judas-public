@@ -54,6 +54,35 @@ TeamMap parse_team_map(const std::string & text, const std::string & default_nam
 // The canonical text of one team (what the harness writes back and the UI shows).
 std::string team_map_text(const TeamSpec & s);
 
+// ---- Saved maps (docs/SWARM-TEAMS.md "Saving a team"): a map file with a comment header in the user teams dir ----
+struct TeamSaveInfo {
+    std::string date;          // YYYY-MM-DD
+    std::string session;       // session id
+    std::string note;          // the outcome, one line
+    int agents = 0;            // member copies that ran
+    long long tokens = 0;      // prompt + completion over the run
+    double wall_s = 0;         // first start to last update
+    int failed = 0;            // copies that ended failed or killed
+};
+// Saved names are [a-z0-9-], 1..40.
+bool team_save_name_ok(const std::string & name);
+// The file text: a comment header (title line, saved date and session, outcome, stats) then team_map_text.
+// parse_team_map ignores the header, so parse(text) gives the team back.
+std::string team_save_text(const TeamSpec & s, const TeamSaveInfo & info);
+// Write dir/<name>.map. "" on success, else the reason. Refuses a bad name or an existing file unless `overwrite`;
+// the previous file is kept as <name>.map.bak. Creates dir when missing.
+std::string team_save_file(const std::string & dir, const std::string & name, const std::string & text, bool overwrite);
+struct SavedMap {
+    std::string name;          // file stem
+    std::string title;         // first comment line
+    std::string date;          // from "# saved: DATE"
+    std::string outcome;       // from "# outcome: ..."
+};
+// Every dir/*.map, sorted by name (a .toml spec is listed with an empty title).
+std::vector<SavedMap> team_saved_list(const std::string & dir);
+// The user teams dir: env JUDAS_TEAMS_DIR when set (tests), else `configured`; ~ expanded.
+std::string team_dir_resolve(const std::string & configured);
+
 // The team lead's member id, or "".
 std::string team_lead_of(const TeamSpec & s);
 // Copies of one member: {"id"} when count == 1, else {"id.1", ..., "id.N"}.

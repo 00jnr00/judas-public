@@ -132,13 +132,36 @@ std::string cap_text(const std::string & s, size_t max) {
 
 // Approval policy: "suggest" asks for writes and shell, "auto-edit" asks for shell only, "full-auto" never.
 // Returns "" if allowed, else the failure message.
-std::string need_approval(ToolContext & ctx, bool is_write, bool is_shell, const std::string & what) {
+// detail (a diff, the full command) is shown to the user with the question but kept out of error messages.
+std::string need_approval(ToolContext & ctx, bool is_write, bool is_shell, const std::string & what,
+                          const std::string & detail = "") {
     const std::string & mode = cfg_of(ctx).permissions.mode;
     bool ask = (mode == "full-auto") ? false : (mode == "suggest" ? (is_write || is_shell) : is_shell);
     if (!ask) return "";
     if (!ctx.approve) return "not approved: " + what + " needs approval (permission mode " + mode + ") and no approver is available";
-    if (!ctx.approve(what)) return "not approved: " + what + " was declined";
+    if (!ctx.approve(detail.empty() ? what : what + "\n" + detail)) return "not approved: " + what + " was declined";
     return "";
+}
+
+// A unified-diff-like body for the approval prompt: "-" old lines, "+" new lines, capped.
+std::string diff_body(const std::string & oldS, const std::string & newS, size_t max_chars = 6000) {
+    std::string out;
+    auto add = [&](const std::string & text, char mark) {
+        if (text.empty()) return;
+        size_t s = 0;
+        while (s <= text.size()) {
+            size_t e = text.find('\n', s);
+            std::string line = text.substr(s, e == std::string::npos ? std::string::npos : e - s);
+            if (!(e == std::string::npos && line.empty())) out += std::string(1, mark) + line + "\n";
+            if (e == std::string::npos) break;
+            s = e + 1;
+        }
+    };
+    add(oldS, '-');
+    add(newS, '+');
+    if (out.size() > max_chars) out = out.substr(0, max_chars) + "\n[... diff truncated ...]\n";
+    if (!out.empty() && out.back() == '\n') out.pop_back();
+    return out;
 }
 
 std::string read_whole(const fs::path & p) {
@@ -323,12 +346,13 @@ ToolResult t_read_file(const json & a, ToolContext & ctx) {
 }
 
 // Shared prelude of writing tools: policy, approval, journal.
-std::string prepare_write(ToolContext & ctx, const std::string & tool, const std::string & path, fs::path & out) {
+std::string prepare_write(ToolContext & ctx, const std::string & tool, const std::string & path, fs::path & out,
+                          const std::string & detail = "") {
     std::string resolved;
     std::string why = check_write_path(ctx, path, resolved);
     if (!why.empty()) return "refused: " + why;
     out = resolved;
-    std::string ap = need_approval(ctx, true, false, tool + " " + resolved);
+    std::string ap = need_approval(ctx, true, false, tool + " " + resolved, detail);
     if (!ap.empty()) return ap;
     if (ctx.journal) ctx.journal->record(ctx.checkpoint, out);
     return "";
@@ -343,9 +367,9 @@ void write_whole(const fs::path & p, const std::string & content) {
 
 ToolResult t_write_file(const json & a, ToolContext & ctx) {
     fs::path p;
-    std::string e = prepare_write(ctx, "write_file", a.at("path").get<std::string>(), p);
-    if (!e.empty()) return fail(e);
     std::string content = a.at("content").get<std::string>();
+    std::string e = prepare_write(ctx, "write_file", a.at("path").get<std::string>(), p, diff_body("", content));
+    if (!e.empty()) return fail(e);
     std::error_code ec;
     if (fs::is_directory(p, ec)) return fail(p.string() + " is a directory");
     if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
@@ -379,7 +403,7 @@ ToolResult t_edit_file(const json & a, ToolContext & ctx) {
     for (size_t pos = data.find(oldS); pos != std::string::npos; pos = data.find(oldS, pos + oldS.size())) count++;
     if (count == 0) return fail("old_string not found in " + p.string() + " (it must match exactly, including whitespace)");
     if (count > 1 && !all) return fail("old_string occurs " + std::to_string(count) + " times in " + p.string() + "; add surrounding context to make it unique, or set replace_all");
-    std::string ap = need_approval(ctx, true, false, "edit_file " + p.string());
+    std::string ap = need_approval(ctx, true, false, "edit_file " + p.string(), diff_body(oldS, newS));
     if (!ap.empty()) return fail(ap);
     if (ctx.journal) ctx.journal->record(ctx.checkpoint, p);
     std::string out;

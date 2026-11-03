@@ -125,3 +125,30 @@ assets/screenshot.png, so it is modified from the original:
   blocked and failed sorted to the top and highlighted: `tmRenderSide`, `.tms-*` in web/app.css.
 - Large panes with a bright accent border on the focused pane and a dim border on the others: `.tpane`, `.tpane.focused`.
 - The status line under each pane (folder > model > context bar and percent > tok/s > tokens): `tmPaneStatus`, `.tp-status`.
+
+## Bundled web fonts (web/fonts/)
+
+Sixteen font families ship inside the web app (Latin subset, woff2) so the UI works offline and on phones without a CDN.
+All are licensed under the SIL Open Font License 1.1; each full license text is in `LICENSES/fonts/`. The woff2 files
+come from the Fontsource npm packages (https://fontsource.org, which repackages the upstream releases) at the exact
+versions below, fetched from https://cdn.jsdelivr.net/npm/. The OFL permits bundling and redistribution with software;
+the fonts are not sold on their own and keep their names.
+
+| Family | Copyright holder | License | Upstream | Package and version | License file | Files |
+|---|---|---|---|---|---|---|
+| Inter | The Inter Project Authors | OFL-1.1 | https://github.com/rsms/inter | @fontsource-variable/inter 5.3.0 | LICENSES/fonts/Inter.txt | web/fonts/inter*.woff2 |
+| IBM Plex Sans | IBM Corp. | OFL-1.1 | https://github.com/IBM/plex | @fontsource/ibm-plex-sans 5.3.0 | LICENSES/fonts/IBM-Plex-Sans.txt | web/fonts/ibm-plex-sans-*.woff2 |
+| Atkinson Hyperlegible | Braille Institute of America | OFL-1.1 | https://github.com/googlefonts/atkinson-hyperlegible | @fontsource/atkinson-hyperlegible 5.3.0 | LICENSES/fonts/Atkinson-Hyperlegible.txt | web/fonts/atkinson-hyperlegible-*.woff2 |
+| Lexend | The Lexend Project Authors | OFL-1.1 | https://github.com/googlefonts/lexend | @fontsource-variable/lexend 5.3.0 | LICENSES/fonts/Lexend.txt | web/fonts/lexend.woff2 |
+| Source Sans 3 | Adobe | OFL-1.1 | https://github.com/adobe-fonts/source-sans | @fontsource-variable/source-sans-3 5.3.1 | LICENSES/fonts/Source-Sans-3.txt | web/fonts/source-sans-3*.woff2 |
+| Nunito Sans | The Nunito Sans Project Authors | OFL-1.1 | https://github.com/googlefonts/nunito | @fontsource-variable/nunito-sans 5.3.0 | LICENSES/fonts/Nunito-Sans.txt | web/fonts/nunito-sans*.woff2 |
+| Space Grotesk | The Space Grotesk Project Authors | OFL-1.1 | https://github.com/floriankarsten/space-grotesk | @fontsource-variable/space-grotesk 5.3.0 | LICENSES/fonts/Space-Grotesk.txt | web/fonts/space-grotesk.woff2 |
+| Literata | The Literata Project Authors | OFL-1.1 | https://github.com/googlefonts/literata | @fontsource-variable/literata 5.3.0 | LICENSES/fonts/Literata.txt | web/fonts/literata*.woff2 |
+| Source Serif 4 | Adobe | OFL-1.1 | https://github.com/adobe-fonts/source-serif | @fontsource-variable/source-serif-4 5.3.1 | LICENSES/fonts/Source-Serif-4.txt | web/fonts/source-serif-4*.woff2 |
+| Lora | The Lora Project Authors | OFL-1.1 | https://github.com/cyrealtype/Lora-Cyrillic | @fontsource-variable/lora 5.3.0 | LICENSES/fonts/Lora.txt | web/fonts/lora*.woff2 |
+| JetBrains Mono | JetBrains | OFL-1.1 | https://github.com/JetBrains/JetBrainsMono | @fontsource-variable/jetbrains-mono 5.3.0 | LICENSES/fonts/JetBrains-Mono.txt | web/fonts/jetbrains-mono*.woff2 |
+| IBM Plex Mono | IBM Corp. | OFL-1.1 | https://github.com/IBM/plex | @fontsource/ibm-plex-mono 5.3.0 | LICENSES/fonts/IBM-Plex-Mono.txt | web/fonts/ibm-plex-mono-*.woff2 |
+| Fira Code | The Fira Code Project Authors | OFL-1.1 | https://github.com/tonsky/FiraCode | @fontsource-variable/fira-code 5.3.0 | LICENSES/fonts/Fira-Code.txt | web/fonts/fira-code.woff2 |
+| Source Code Pro | Adobe | OFL-1.1 | https://github.com/adobe-fonts/source-code-pro | @fontsource-variable/source-code-pro 5.3.1 | LICENSES/fonts/Source-Code-Pro.txt | web/fonts/source-code-pro*.woff2 |
+| Commit Mono | The Commit Mono Project Authors | OFL-1.1 | https://github.com/eigilnikolajsen/commit-mono | @fontsource/commit-mono 5.3.0 | LICENSES/fonts/Commit-Mono.txt | web/fonts/commit-mono-*.woff2 |
+| Space Mono | Colophon Foundry | OFL-1.1 | https://github.com/googlefonts/spacemono | @fontsource/space-mono 5.3.0 | LICENSES/fonts/Space-Mono.txt | web/fonts/space-mono-*.woff2 |

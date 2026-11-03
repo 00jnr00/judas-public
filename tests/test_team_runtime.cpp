@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "agent/agent.h"
+#include "agent/teams.h"
 #include "test.h"
 
 namespace fs = std::filesystem;
@@ -145,6 +146,7 @@ int main() {
     cfg.permissions.mode = "full-auto";
     cfg.permissions.allow_paths = {base.string()};
     cfg.teams.house_rules = {"Config rule C."};
+    cfg.teams.dir = (base / "teams").string();   // saved maps never touch the real ~/.config/judas/teams
 
     ScriptEngine engine;
     Store store((base / "sessions.db").string());
@@ -220,7 +222,12 @@ int main() {
     CHECK(v["teams"][0]["warnings"].size() == 1);
     CHECK(v["lead"].contains("ctx_pct") && v["lead"]["model_name"] == "fake");
     int cpu = 0, done = 0;
+    CHECK(v["lead"]["engine"] == "gpu");
+    CHECK(v["lead"]["cpu_fallback"] == false);
     for (auto & a : v["agents"]) {
+        CHECK(a.contains("engine"));
+        CHECK(a["cpu_fallback"] == false);
+        if (a["model"] == "cpu") CHECK(a["engine"] == "cpu");
         cpu += a["model"] == "cpu";
         done += a["activity"] == "done";
         if (a["copy"] == "cp") CHECK(a["last_output"] == "cpu triage done");
@@ -253,6 +260,28 @@ int main() {
         CHECK(msgs >= 1);
         CHECK(reports == 4);
         CHECK(from_lead == 1);
+    }
+
+    // saving the finished team: file with header, no overwrite, .bak on overwrite, listed, loads back as the team
+    {
+        std::string path;
+        CHECK(!agents.team_save(sw.id, "", "Bad Name", "", false, path).empty());
+        CHECK(!agents.team_save(sw.id, "ghost", "ok", "", false, path).empty());
+        CHECK(agents.team_save(sw.id, "", "demo-map", "worked well", false, path).empty());
+        CHECK(path == (base / "teams" / "demo-map.map").string());
+        std::ifstream f(path);
+        std::string text((std::istreambuf_iterator<char>(f)), {});
+        CHECK(text.find("# outcome: worked well\n") != std::string::npos);
+        CHECK(text.find("# stats: 4 agents,") != std::string::npos);
+        CHECK(text.find("\nteam t\n") != std::string::npos);
+        TeamMap back = parse_team_map(text);
+        CHECK(back.warnings.empty() && back.teams.size() == 1);
+        CHECK(!agents.team_save(sw.id, "t", "demo-map", "again", false, path).empty());
+        CHECK(agents.team_save(sw.id, "t", "demo-map", "again", true, path).empty());
+        CHECK(fs::exists(base / "teams" / "demo-map.map.bak"));
+        json l = agents.team_saved();
+        REQUIRE(l.size() == 1);
+        CHECK(l[0]["name"] == "demo-map" && l[0]["outcome"] == "again" && !l[0]["date"].get<std::string>().empty());
     }
 
     // a chat session never sees the team tools

@@ -299,8 +299,6 @@ void Stream::tool_result(const std::string & agent, const std::string & id, cons
     hit->log.output = output;
     hit->done = true;
     commit_done_tools();
-    if (!ok && output.rfind("not approved:", 0) == 0)
-        note("  needs approval; the daemon's permission mode blocks this (see docs/TUI.md, Permissions)", 'w');
 }
 
 void Stream::end_turn(const std::string & status, const std::string & reason) {

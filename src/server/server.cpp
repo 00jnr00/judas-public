@@ -517,7 +517,7 @@ struct Server::Impl {
 
     // Pages may frame this server, the origins of the configured Tools tabs and the Learn visual tutor, nothing else.
     std::string frame_csp() const {
-        std::string out = "frame-src 'self'";
+        std::string out = "font-src 'self'; frame-src 'self'";   // fonts are bundled (web/fonts), never a CDN
         std::set<std::string> seen;
         std::vector<std::string> urls;
         for (auto & t : cfg.tools.tabs) urls.push_back(t.url);
@@ -541,6 +541,11 @@ struct Server::Impl {
     void stream_ring(httplib::Response & res, const std::string & key, uint64_t after, bool close_on_lead_done,
                      std::string synthetic);
     json turn_json(const std::string & sid);
+    json queued_json(const std::string & sid) {
+        json a = json::array();
+        for (auto & q : agents.queued(sid)) a.push_back({{"id", q.id}, {"text", q.text}});
+        return a;
+    }
     void setup(httplib::Server & svr);
     std::string host_only(const std::string & h);
     bool host_allowed(const std::string & host);
@@ -688,6 +693,13 @@ void Server::Impl::on_agent_event(const AgentEvent & e) {
                  dump_json({{"type", "agent.status"}, {"session", e.session}, {"agent", e.agent},
                             {"parent", e.parent}, {"role", e.role}, {"status", st}}));
     }
+    if (e.type == "approval_request" || e.type == "approval_resolved") {
+        json g = e.data;
+        g["type"] = e.type == "approval_request" ? "approval.requested" : "approval.resolved";
+        g["session"] = e.session;
+        g["agent"] = e.agent;
+        hub.push("*", g["type"].get<std::string>(), dump_json(g));
+    }
     if (lead && e.type == "spawned") {
         hub.push("*", "turn.started", dump_json({{"type", "turn.started"}, {"session", e.session}}));
         announce_session("session.updated", e.session);
@@ -711,7 +723,7 @@ json Server::Impl::turn_json(const std::string & sid) {
     auto ti = agents.turn_info(sid);
     return {{"running", in_progress}, {"event_floor", floor}, {"msg_floor", mf}, {"events_head", hub.head(sid)},
             {"status", ti.status}, {"reason", ti.reason}, {"open_items", ti.open_items},
-            {"auto_resume_default", cfg.agents.auto_resume}};
+            {"queued", queued_json(sid)}, {"auto_resume_default", cfg.agents.auto_resume}};
 }
 
 // Streams ring `key` as SSE from event id `after` on. Each frame carries `id:` so EventSource resends it as
@@ -951,6 +963,7 @@ void Server::Impl::setup(httplib::Server & svr) {
             sj["turn_status"] = ti.status;   // idle | running | paused | done | error | killed
             sj["turn_reason"] = ti.reason;
             sj["open_items"] = ti.open_items;
+            sj["queued"] = queued_json(s.id);
             a.push_back(sj);
         }
         send_json(res, {{"sessions", a}, {"more", more}, {"auto_resume_default", cfg.agents.auto_resume}});
@@ -1007,7 +1020,9 @@ void Server::Impl::setup(httplib::Server & svr) {
         for (auto & m : store.messages_page(s->id, before, limit, &more, &total))
             ms.push_back({{"id", m.id}, {"agent", m.agent}, {"role", m.role}, {"body", m.body},
                           {"created_ms", m.created_ms}});
-        send_json(res, {{"session", session_json(*s)}, {"agents", ag}, {"messages", ms},
+        json sess = session_json(*s);
+        sess["queued"] = queued_json(s->id);
+        send_json(res, {{"session", sess}, {"agents", ag}, {"messages", ms},
                         {"more_before", more}, {"total", total}, {"turn", turn_json(s->id)}});
     });
     svr.Post(R"(/api/sessions/([^/]+)/messages)", [this](const httplib::Request & req, httplib::Response & res) {
@@ -1052,8 +1067,27 @@ void Server::Impl::setup(httplib::Server & svr) {
         } else {
             return send_json(res, error_json("no such session", "not_found"), 404);
         }
-        std::string sid = agents.submit(id, content, cwd);
-        send_json(res, {{"session", sid}});
+        // a busy lead queues the message (FIFO, cap 10, drained one turn per message when the turn ends)
+        auto sr = agents.submit_queued(id, typed, content.substr(typed.size()), cwd);
+        if (!sr.error.empty()) return send_json(res, error_json(sr.error, "conflict"), 409);
+        if (!sr.queued) return send_json(res, {{"session", sr.session}});
+        send_json(res, {{"session", sr.session}, {"queued", true}, {"id", sr.id}, {"queue", queued_json(sr.session)}});
+    });
+    svr.Delete(R"(/api/sessions/([^/]+)/queue/([^/]+))", [this](const httplib::Request & req, httplib::Response & res) {
+        if (!agents.queue_remove(req.matches[1], req.matches[2]))
+            return send_json(res, error_json("no such queued message (it may have started already)", "not_found"), 404);
+        send_json(res, {{"ok", true}, {"queue", queued_json(req.matches[1])}});
+    });
+    svr.Patch(R"(/api/sessions/([^/]+)/queue/([^/]+))", [this](const httplib::Request & req, httplib::Response & res) {
+        json b = json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("text") || !b["text"].is_string() || b["text"].get<std::string>().empty())
+            return send_json(res, error_json("body needs text", "invalid_request_error"), 400);
+        if (!agents.queue_edit(req.matches[1], req.matches[2], b["text"]))
+            return send_json(res, error_json("no such queued message (it may have started already)", "not_found"), 404);
+        send_json(res, {{"ok", true}, {"queue", queued_json(req.matches[1])}});
+    });
+    svr.Get(R"(/api/sessions/([^/]+)/queue)", [this](const httplib::Request & req, httplib::Response & res) {
+        send_json(res, {{"queue", queued_json(req.matches[1])}});
     });
     // Attachments. Upload: raw body with ?name=, or multipart/form-data with field `file`.
     svr.Post("/api/attachments", [this](const httplib::Request & req, httplib::Response & res) {
@@ -1257,6 +1291,17 @@ void Server::Impl::setup(httplib::Server & svr) {
         if (!store.get_session(req.matches[1])) return send_json(res, error_json("no such session", "not_found"), 404);
         send_json(res, agents.team_view(req.matches[1]));
     });
+    svr.Get("/api/teams/saved", [this](const httplib::Request &, httplib::Response & res) { send_json(res, agents.team_saved()); });
+    svr.Post(R"(/api/sessions/([^/]+)/teams/([^/]+)/save)", [this](const httplib::Request & req, httplib::Response & res) {
+        if (!store.get_session(req.matches[1])) return send_json(res, error_json("no such session", "not_found"), 404);
+        json b = json::parse(req.body.empty() ? "{}" : req.body, nullptr, false);
+        if (!b.is_object()) return send_json(res, error_json("invalid JSON body", "invalid_request_error"), 400);
+        std::string path;
+        std::string err = agents.team_save(req.matches[1], req.matches[2], b.value("name", std::string()),
+                                           b.value("note", std::string()), b.value("overwrite", false), path);
+        if (!err.empty()) return send_json(res, error_json(err, "invalid_request_error"), err.find("already exists") != std::string::npos ? 409 : 400);
+        send_json(res, {{"ok", true}, {"path", path}});
+    });
     svr.Post(R"(/api/sessions/([^/]+)/agents/([^/]+)/(cancel|pause|resume))",
              [this](const httplib::Request & req, httplib::Response & res) {
                  std::string sid = req.matches[1], aid = req.matches[2], op = req.matches[3];
@@ -1266,6 +1311,36 @@ void Server::Impl::setup(httplib::Server & svr) {
                  if (!ok) return send_json(res, error_json("no such agent here, or it cannot " + op + " now", "conflict"), 409);
                  send_json(res, {{"ok", true}});
              });
+    // Pending approvals (docs/API.md, "Approvals"): list them, answer one. One answer resolves it for every client.
+    svr.Get(R"(/api/sessions/([^/]+)/approvals)", [this](const httplib::Request & req, httplib::Response & res) {
+        std::string sid = req.matches[1];
+        if (!store.get_session(sid)) return send_json(res, error_json("no such session", "not_found"), 404);
+        json list = json::array();
+        for (auto & a : agents.approvals(sid))
+            list.push_back({{"id", a.id}, {"agent", a.agent}, {"role", a.role}, {"tool", a.tool}, {"what", a.what},
+                            {"strict", a.strict}, {"created_ms", a.created_ms}});
+        send_json(res, {{"approvals", list}});
+    });
+    svr.Post(R"(/api/sessions/([^/]+)/approvals/([^/]+))", [this](const httplib::Request & req, httplib::Response & res) {
+        std::string sid = req.matches[1], aid = req.matches[2];
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (...) {
+            return send_json(res, error_json("body must be JSON: {\"approve\": true|false}", "invalid_request_error"), 400);
+        }
+        if (!body.is_object() || !body.contains("approve") || !body["approve"].is_boolean())
+            return send_json(res, error_json("body must be {\"approve\": true|false}", "invalid_request_error"), 400);
+        bool yes = body["approve"].get<bool>();
+        switch (agents.answer_approval(sid, aid, yes)) {
+            case AgentManager::ApprovalResult::Unknown:
+                return send_json(res, error_json("no such approval", "not_found"), 404);
+            case AgentManager::ApprovalResult::AlreadyResolved:
+                return send_json(res, error_json("that approval was already resolved", "conflict"), 409);
+            default: break;
+        }
+        send_json(res, {{"ok", true}, {"id", aid}, {"approved", yes}});
+    });
     svr.Post(R"(/api/sessions/([^/]+)/cancel)", [this](const httplib::Request & req, httplib::Response & res) {
         agents.cancel(req.matches[1]);
         send_json(res, {{"ok", true}});
@@ -1840,18 +1915,21 @@ void Server::Impl::setup(httplib::Server & svr) {
     svr.Post(R"(/mach12(/.*))", mach12_route);
 #endif
 
+    svr.Get(R"(/m)", [](const httplib::Request &, httplib::Response & res) { res.set_redirect("/m/"); });
+
     // Static files from the embedded table; "/" serves index.html. Registered last so /api and /v1 win.
     svr.Get(R"((/.*))", [this](const httplib::Request & req, httplib::Response & res) {
         std::string path = req.matches[1];
         if (path == "/") path = "/index.html";
+        if (path == "/m/") path = "/m/index.html";   // phone UI
         size_t n = 0;
         const Asset * t = assets_table(n);
         for (size_t i = 0; i < n; i++)
             if (path == t[i].path) {
                 res.set_content(reinterpret_cast<const char *>(t[i].data), t[i].size, t[i].mime);
                 // no-cache: a stale app.js after an upgrade broke sends; assets are tiny and local
-                res.set_header("Cache-Control", "no-cache");
-                if (path == "/index.html") res.set_header("Content-Security-Policy", frame_csp());
+                res.set_header("Cache-Control", path.rfind("/fonts/", 0) == 0 ? "public, max-age=604800" : "no-cache");
+                if (path == "/index.html" || path == "/m/index.html") res.set_header("Content-Security-Policy", frame_csp());
                 return;
             }
         // SPA fallback: unknown non-asset path returns index.html if we have one, else 404.

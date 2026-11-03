@@ -21,6 +21,16 @@
  },
  "sessions": [
   {
+   "id": "ch-demo",
+   "title": "Port the parser to the new token API",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "chat",
+   "created_ms": 1793600001000,
+   "updated_ms": 1793600001000,
+   "running": true
+  },
+  {
    "id": "sw-demo",
    "title": "Compare batching papers and triage the inbox",
    "cwd": "/home/you/work",
@@ -29,6 +39,96 @@
    "created_ms": 1793600000000,
    "updated_ms": 1793600000000,
    "running": true
+  },
+  {
+   "id": "sw-empty",
+   "title": "Fresh swarm job",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "swarm",
+   "created_ms": 1793600002000,
+   "updated_ms": 1793600002000,
+   "running": false
+  },
+  {
+   "id": "ch-1",
+   "title": "Explain KV cache quantization",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "chat",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599999000,
+   "running": false
+  },
+  {
+   "id": "ch-2",
+   "title": "Draft the release notes",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "chat",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599998000,
+   "running": false
+  },
+  {
+   "id": "cw-1",
+   "title": "Weekly inbox sweep",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "cowork",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599997000,
+   "running": false
+  },
+  {
+   "id": "co-1",
+   "title": "Fix the tokenizer test",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "code",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599996000,
+   "running": false
+  },
+  {
+   "id": "co-2",
+   "title": "Refactor the config loader",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "code",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599995000,
+   "running": false
+  },
+  {
+   "id": "le-1",
+   "title": "Learn: attention heads",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "learn",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599994000,
+   "running": false
+  },
+  {
+   "id": "api-1",
+   "title": "Started over the API",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599993000,
+   "running": false
+  },
+  {
+   "id": "api-2",
+   "title": "Odd mode",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "bogus",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793599992000,
+   "running": false
   }
  ],
  "session": {
@@ -201,7 +301,10 @@
    "model": "gpu",
    "tok_s": 0,
    "ctx_pct": 31,
-   "last_output": ""
+   "last_output": "",
+   "model_name": "Forge",
+   "engine": "gpu",
+   "cpu_fallback": false
   },
   "agents": [
    {
@@ -224,7 +327,10 @@
     "model": "gpu",
     "tok_s": 0.0,
     "ctx_pct": 48,
-    "last_output": "Merging the first two reports into REPORT.md"
+    "last_output": "Merging the first two reports into REPORT.md",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": false
    },
    {
     "id": "ag-r1",
@@ -246,7 +352,10 @@
     "model": "gpu",
     "tok_s": 96.4,
     "ctx_pct": 72,
-    "last_output": "Prefix sharing is not used; every request prefills its own prompt."
+    "last_output": "Prefix sharing is not used; every request prefills its own prompt.",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": false
    },
    {
     "id": "ag-r2",
@@ -268,7 +377,10 @@
     "model": "gpu",
     "tok_s": 0,
     "ctx_pct": 24,
-    "last_output": "Paper B is a preprint, fetching the HTML version."
+    "last_output": "Paper B is a preprint, fetching the HTML version.",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": false
    },
    {
     "id": "ag-r3",
@@ -287,10 +399,13 @@
     "activity": "failed",
     "tool": "",
     "depth": 2,
-    "model": "gpu",
+    "model": "cpu",
     "tok_s": 0.0,
     "ctx_pct": 93,
-    "last_output": "I cannot read this file."
+    "last_output": "I cannot read this file.",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": true
    },
    {
     "id": "ag-tr",
@@ -312,7 +427,10 @@
     "model": "cpu",
     "tok_s": 0,
     "ctx_pct": 66,
-    "last_output": "Two files need a decision: tax-2023.pdf and lease-draft.docx."
+    "last_output": "Two files need a decision: tax-2023.pdf and lease-draft.docx.",
+    "model_name": "LFM2.5-2.6B",
+    "engine": "cpu",
+    "cpu_fallback": false
    },
    {
     "id": "ag-ru1",
@@ -334,7 +452,10 @@
     "model": "gpu",
     "tok_s": 0.0,
     "ctx_pct": 85,
-    "last_output": "Throughput script finished: 1388 tok/s at batch 32."
+    "last_output": "Throughput script finished: 1388 tok/s at batch 32.",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": false
    },
    {
     "id": "ag-ru2",
@@ -356,7 +477,10 @@
     "model": "gpu",
     "tok_s": 0.0,
     "ctx_pct": null,
-    "last_output": ""
+    "last_output": "",
+    "model_name": "Forge",
+    "engine": "gpu",
+    "cpu_fallback": false
    }
   ],
   "teams": [
@@ -1268,5 +1392,283 @@
     "activity": "prefilling"
    }
   }
- ]
+ ],
+ "extra": {
+  "ch-demo": {
+   "session": {
+    "session": {
+     "id": "ch-demo",
+     "title": "Port the parser to the new token API",
+     "cwd": "/home/you/work",
+     "model": "Forge",
+     "mode": "chat",
+     "created_ms": 1793600001000,
+     "updated_ms": 1793600001000,
+     "running": true
+    },
+    "agents": [
+     {
+      "id": "c-lead",
+      "session": "ch-demo",
+      "parent": "",
+      "role": "lead",
+      "task": "",
+      "status": "running",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 5200,
+      "completion_tokens": 310
+     },
+     {
+      "id": "c-w1",
+      "session": "ch-demo",
+      "parent": "c-lead",
+      "role": "worker",
+      "task": "Port the parser to the new token API",
+      "status": "running",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 8800,
+      "completion_tokens": 420
+     },
+     {
+      "id": "c-w2",
+      "session": "ch-demo",
+      "parent": "c-lead",
+      "role": "worker",
+      "task": "Write tests for the lexer",
+      "status": "running",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 3100,
+      "completion_tokens": 150
+     },
+     {
+      "id": "c-h1",
+      "session": "ch-demo",
+      "parent": "c-w1",
+      "role": "worker",
+      "task": "grep callers of next_token",
+      "status": "done",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 900,
+      "completion_tokens": 40
+     }
+    ],
+    "messages": [
+     {
+      "id": 1,
+      "agent": "c-lead",
+      "role": "user",
+      "body": {
+       "role": "user",
+       "content": "Port the parser to the new token API and add lexer tests. Use workers."
+      },
+      "created_ms": 1793600000000
+     },
+     {
+      "id": 2,
+      "agent": "c-lead",
+      "role": "assistant",
+      "body": {
+       "role": "assistant",
+       "content": "This splits into two independent parts, so I will plan it and hand each part to a worker.",
+       "tool_calls": [
+        {
+         "id": "t1",
+         "function": {
+          "name": "update_plan",
+          "arguments": "{\"plan\": \"- [x] Read the lexer and parser\\n- [x] Design the new token API\\n- [ ] Port the parser (worker 1)\\n- [ ] Write lexer tests (worker 2)\\n- [ ] Run the full test suite\\n- [ ] Update the docs\"}"
+         }
+        }
+       ]
+      },
+      "created_ms": 1793600000000
+     },
+     {
+      "id": 3,
+      "agent": "c-w1",
+      "role": "assistant",
+      "body": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "t9",
+         "function": {
+          "name": "update_plan",
+          "arguments": "{\"plan\": \"- [ ] worker private plan\"}"
+         }
+        }
+       ]
+      },
+      "created_ms": 1793600000000
+     }
+    ],
+    "more_before": false,
+    "total": 3,
+    "turn": {
+     "running": true,
+     "event_floor": 0,
+     "msg_floor": 3,
+     "events_head": 3
+    }
+   },
+   "team": {
+    "session": {
+     "id": "ch-demo",
+     "title": "Port the parser to the new token API",
+     "cwd": "/home/you/work",
+     "model": "Forge",
+     "mode": "chat",
+     "created_ms": 1793600001000,
+     "updated_ms": 1793600001000,
+     "running": true
+    },
+    "lead": {
+     "id": "c-lead",
+     "session": "ch-demo",
+     "parent": "",
+     "role": "lead",
+     "task": "",
+     "status": "running",
+     "result": "",
+     "created_ms": 1793600000000,
+     "updated_ms": 1793600000000,
+     "prompt_tokens": 5200,
+     "completion_tokens": 310,
+     "team": "",
+     "member": "",
+     "copy": "",
+     "activity": "waiting",
+     "tool": "",
+     "depth": 0,
+     "model": "gpu",
+     "tok_s": 0,
+     "ctx_pct": 34,
+     "model_name": "Ornith-1.5-35B-A3B-Heretic-APEX-I-Mini.gguf",
+     "last_output": ""
+    },
+    "teams": [],
+    "agents": [
+     {
+      "id": "c-w1",
+      "session": "ch-demo",
+      "parent": "c-lead",
+      "role": "worker",
+      "task": "Port the parser to the new token API",
+      "status": "running",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 8800,
+      "completion_tokens": 420,
+      "team": "",
+      "member": "",
+      "copy": "",
+      "activity": "tool",
+      "tool": "edit_file",
+      "depth": 1,
+      "model": "gpu",
+      "tok_s": 0,
+      "ctx_pct": 52,
+      "model_name": "Ornith-1.5-35B-A3B-Heretic-APEX-I-Mini.gguf",
+      "last_output": "Editing src/parse.cpp to use next_token()"
+     },
+     {
+      "id": "c-w2",
+      "session": "ch-demo",
+      "parent": "c-lead",
+      "role": "worker",
+      "task": "Write tests for the lexer",
+      "status": "running",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 3100,
+      "completion_tokens": 150,
+      "team": "",
+      "member": "",
+      "copy": "",
+      "activity": "generating",
+      "tool": "",
+      "depth": 1,
+      "model": "cpu",
+      "tok_s": 0,
+      "ctx_pct": 87,
+      "model_name": "LFM2.5-2.6B-Q4_K_M.gguf",
+      "last_output": "Added 6 cases covering empty input and unicode.\nNow checking escapes in string literals"
+     },
+     {
+      "id": "c-h1",
+      "session": "ch-demo",
+      "parent": "c-w1",
+      "role": "worker",
+      "task": "grep callers of next_token",
+      "status": "done",
+      "result": "",
+      "created_ms": 1793600000000,
+      "updated_ms": 1793600000000,
+      "prompt_tokens": 900,
+      "completion_tokens": 40,
+      "team": "",
+      "member": "",
+      "copy": "",
+      "activity": "done",
+      "tool": "",
+      "depth": 2,
+      "model": "gpu",
+      "tok_s": 0,
+      "ctx_pct": 12,
+      "model_name": "Ornith-1.5-35B-A3B-Heretic-APEX-I-Mini.gguf",
+      "last_output": "14 callers, all in src/parse*.cpp"
+     }
+    ]
+   },
+   "events": [
+    {
+     "type": "tool_call",
+     "session": "ch-demo",
+     "agent": "c-lead",
+     "parent": "",
+     "role": "lead",
+     "data": {
+      "id": "t2",
+      "name": "update_plan",
+      "args": {
+       "plan": "- [x] Read the lexer and parser\n- [x] Design the new token API\n- [ ] Port the parser (worker 1)\n- [ ] Write lexer tests (worker 2)\n- [ ] Run the full test suite\n- [ ] Update the docs"
+      }
+     }
+    }
+   ]
+  },
+  "sw-empty": {
+   "session": {
+    "session": {
+     "id": "sw-empty",
+     "title": "Fresh swarm job",
+     "cwd": "/home/you/work",
+     "model": "Forge",
+     "mode": "swarm",
+     "created_ms": 1793600002000,
+     "updated_ms": 1793600002000,
+     "running": false
+    },
+    "agents": [],
+    "messages": [],
+    "more_before": false,
+    "total": 0,
+    "turn": {}
+   },
+   "team": {
+    "teams": []
+   },
+   "events": []
+  }
+ }
 }

@@ -5,21 +5,31 @@
 #include <cstdlib>
 #include <filesystem>
 
+#ifdef JUDAS_TUI_PLANNER
+#include "tui_planner.h"
+#endif
+
 namespace fs = std::filesystem;
 
 namespace judas::tui {
 
 const std::vector<Command> & commands() {
-    static const std::vector<Command> c = {
+    static const std::vector<Command> c = [] {
+    std::vector<Command> v = {
         {"help", "", "show keys and commands"},
         {"new", "", "start a new session"},
         {"sessions", "", "pick a session and switch to it"},
-        {"resume", "", "resume a paused turn"},
+        {"resume", "[N|copy]", "resume a paused turn, or a paused team agent"},
         {"cancel", "", "cancel the running turn"},
         {"mode", "chat|cowork|code|learn|swarm", "set the session mode", true},
         {"model", "[name]", "list models or switch (restarts the daemon)"},
         {"agents", "", "live agent list"},
+        {"team", "[watch]", "Swarm team map; watch keeps a live status block until Esc"},
+        {"pause", "<N|copy>", "pause a team agent (N = row number from /team)", true},
+        {"cancel-agent", "<N|copy>", "cancel one team agent (asks y/n)", true},
+        {"read", "<N|copy> [chars]", "print a team agent's latest output", true},
         {"plan", "", "show the current plan"},
+        {"approvals", "", "list pending approvals for this session"},
         {"state", "", "daemon state: model, KV, queue, tok/s"},
         {"attach", "<path> [more]", "attach files or images (quote paths with spaces; dropping a file works too)", true},
         {"screenshot", "[region]", "attach a screenshot of the host screen (region: pick an area)"},
@@ -33,8 +43,17 @@ const std::vector<Command> & commands() {
         {"memory", "<query>", "search shared memory", true},
         {"learn", "[focus]", "save what this session taught as skills or memory", true},
         {"coach", "[list|show|adopt|reject ID]", "propose harness changes from this session (you adopt by hand)"},
+        {"snapshots", "[N|show ID]", "recent file-edit snapshots (+/- lines), or show one diff"},
+        {"revert", "ID [--to]", "undo a snapshot (asks y/n first); --to also undoes every later one", true},
+        {"theme", "[name]", "pick a color theme and apply it live (saved in tui.toml)"},
         {"quit", "", "leave the TUI (the daemon keeps running)"},
     };
+#ifdef JUDAS_TUI_PLANNER
+    auto extra = planner::command_rows();   // before /quit
+    v.insert(v.end() - 1, extra.begin(), extra.end());
+#endif
+    return v;
+    }();
     return c;
 }
 
@@ -184,6 +203,7 @@ Menu compute_menu(const std::string & text, size_t cursor, const MenuContext & c
     if (name == "mode") choices = {"chat", "cowork", "code", "learn", "swarm"};
     else if (name == "auto-resume") choices = {"on", "off"};
     else if (name == "model") choices = ctx.models;
+    else if (name == "team") choices = {"watch"};
     for (auto & c : choices)
         if (arg.empty() || c.rfind(arg, 0) == 0 || (name == "model" && c.find(arg) != std::string::npos))
             m.items.push_back({"/" + name + " " + c, c, ""});

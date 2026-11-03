@@ -245,11 +245,7 @@ int cmd_serve(std::vector<std::string> args) {
     if (int n = store.interrupt_orphans()) std::fprintf(stderr, "judas: marked %d agent(s) from the last run as interrupted\n", n);
     Journal journal(data_path(cfg, "snapshots"));
     AgentManager agents(cfg, *engine, store, journal);
-    agents.set_approver([](const std::string &, const std::string & what) {
-        std::fprintf(stderr, "denied (no approver in the daemon yet; use full-auto or judas run --local): %s\n",
-                     what.c_str());
-        return false;
-    });
+    agents.enable_remote_approvals();   // clients answer over the API (TUI, web); see docs/API.md, Approvals
     Server server(cfg, *engine, agents, store, journal);
     std::fprintf(stderr, "judas: serving on %s:%d (mode %s)\n", cfg.server.bind.c_str(), cfg.server.port,
                  cfg.permissions.mode.c_str());

@@ -73,12 +73,29 @@ Details for tool authors are in `docs/TOOLS-TABS.md`. Summary: the web app adds
 `?judas_theme=<name>&judas_origin=<encoded app origin>` to each framed URL (Tools tabs and the Learn tutor) and posts
 
 ```js
-{ type: "judas-theme", name: "glacier-dark", dark: true, vars: { "--bg": "#070B12", "--radius": "10px", ... } }
+{ type: "judas-theme", name: "glacier-dark", dark: true, vars: { "--bg": "#070B12", "--radius": "10px", ... },
+  fonts_css: "https://host:8079/fonts.css" }
 ```
 
 to the frame's `contentWindow` on every theme change and once after the frame loads. `targetOrigin` is the frame URL's
 exact origin, never `*`. The receiver must check `event.origin === judas_origin` and `event.source === window.parent`
 before applying `vars` to `document.documentElement.style`.
+
+## Fonts
+
+Settings > Fonts lets each browser pick a UI font, a mono font, a text size (90 to 125 percent) and a line height. The
+choice is kept in localStorage and overrides the theme's `--font-ui` and `--font-mono` (the theme's value applies while
+nothing is chosen). Sixteen OFL fonts ship inside the binary as Latin woff2 files (`web/fonts/`, declared in
+`web/fonts.css`, regenerate with `tools/gen-fonts-css.py`); no CDN is used, so phones and tablets get them too. The
+catalog and the settings UI live in `web/fonts.js` (`window.JudasFonts`). Licenses: `LICENSES/fonts/`, `THIRD_PARTY.md`.
+
+The theme broadcast carries the choice: when a font, size or line height is chosen, `vars` already contains the
+overriding `--font-ui` / `--font-mono`, plus `--font-scale` (1.0 = 100 percent) and `--line-h` (unitless) when they are
+not the defaults. The message also has `fonts_css`, the absolute URL of `/fonts.css` on the app origin. A framed page on
+the same origin as the app (such as the built-in planner at `/mach12/`) can `<link rel="stylesheet" href=fonts_css>`
+once, so the bundled family names in `--font-ui` resolve; a page on another origin cannot use the files (no CORS) and
+falls back to the stack's system fonts. `/fonts/*` is served with a week of caching and the page CSP allows
+`font-src 'self'`.
 
 ## Learn visual tutor
 

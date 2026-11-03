@@ -30,7 +30,7 @@ The app themes framed pages live (details in `docs/THEMES.md`).
 
 - Each iframe `src` gets `judas_theme=<theme name>` and `judas_origin=<encodeURIComponent(app origin)>` query params.
 - On every theme change, and once when the frame has loaded, the app posts
-  `{type: "judas-theme", name, dark, vars}` to the frame with `targetOrigin` set to the frame URL's exact origin.
+  `{type: "judas-theme", name, dark, vars, fonts_css}` to the frame with `targetOrigin` set to the frame URL's exact origin.
   `vars` maps CSS variable names (`--bg`, `--text`, `--accent`, `--radius`, `--font-ui`, ...) to values; `dark` is a boolean.
 - The framed page must only accept the message when `event.origin === judas_origin` (the value it was given) and
   `event.source === window.parent`, then apply the vars:
@@ -44,6 +44,19 @@ addEventListener("message", function (e) {
   for (var k in m.vars) document.documentElement.style.setProperty(k, m.vars[k]);
   document.documentElement.style.colorScheme = m.dark ? "dark" : "light";
 });
+```
+
+- `vars` includes the user's font choice (Settings > Fonts): `--font-ui` and `--font-mono` carry the chosen stacks, and
+  `--font-scale` / `--line-h` appear when text size or line height were changed. `fonts_css` is the absolute URL of the
+  bundled `/fonts.css` (Latin OFL fonts served by Judas). A same-origin page (such as `/mach12/`) loads it with a
+  `<link rel="stylesheet">` so those family names resolve; other origins cannot load the font files and fall back to
+  the stack's system fonts.
+
+```js
+if (m.fonts_css && !document.getElementById("judas-fonts")) {
+  var l = document.createElement("link"); l.id = "judas-fonts"; l.rel = "stylesheet"; l.href = m.fonts_css;
+  document.head.appendChild(l);
+}
 ```
 
 Pages that ignore the message keep their own look.

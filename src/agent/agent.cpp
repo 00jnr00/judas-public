@@ -63,6 +63,7 @@ const char * TEAMS_PROMPT = R"(Teams: you are the only agent the user talks to. 
 - A member with role lead is the team lead: you give it the team's whole task with team_assign and it splits the work among its members. Without a team lead you team_assign each member yourself (member "reader" picks a free copy, or name a copy like "reader.2").
 - Give every assignment a complete, self-contained task: which files or items, what to produce, where to write it. Members cannot see your conversation.
 - team_wait collects the reports (members also report automatically when you stop). Check the work, merge it, then answer the user with done. team_status shows who is doing what; team_read shows a member's latest output; team_message sends a note along an edge; team_disband stops a team.
+- Saved maps: when a team finishes well (every copy done, and the user is satisfied or the result passed its checks), offer to save its map with a short name (team_save {name, note}); the note says what the team did and how it went. When a new job resembles a saved one, call team_list_saved first and start from it with team_create {spec: "name"}, then adjust the brief for the new job.
 - Use model cpu only for wide, shallow reading (extraction, short summaries, triage); code, reasoning and merging stay on gpu members.
 - Small jobs need no team: do them yourself.)";
 
@@ -289,6 +290,9 @@ struct AgentManager::Impl {
         std::string last_answer;
         ReviewCounters review;       // per-session nudge counters and the in-flight flag
         std::string review_id;       // the review agent currently running, if any
+        struct Queued { std::string id, text, suffix; };
+        std::deque<Queued> queued;   // user messages sent mid-turn, drained one turn at a time
+        int next_q = 1;
     };
 
     const Config & cfg;
@@ -332,6 +336,64 @@ struct AgentManager::Impl {
     int next_listener = 1;
     std::function<bool(const std::string &, const std::string &)> approver;
     bool stopping = false;
+    // Remote approvals: pending and recently resolved, guarded by mu (cv wakes the waiting agent).
+    struct PendingApproval {
+        AgentManager::Approval info;
+        int state = 0;   // 0 pending, 1 approved, 2 declined
+        std::string by;  // user | cancelled | timeout | shutdown
+    };
+    bool remote_approvals = false;
+    int approval_timeout_s = 600;
+    int next_approval = 1;
+    std::map<std::string, std::shared_ptr<PendingApproval>> approval_map;
+    // Asks the user (or the approver hook) about one action. strict: the permission mode never answers.
+    bool ask_user(Agent * a, const std::string & tool, const std::string & what, bool strict) {
+        std::function<bool(const std::string &, const std::string &)> f;
+        std::shared_ptr<PendingApproval> pa;
+        {
+            std::lock_guard lk(mu);
+            f = approver;
+            if (remote_approvals) {
+                pa = std::make_shared<PendingApproval>();
+                pa->info = {"ap-" + std::to_string(next_approval++), a->row.session, a->row.id, a->row.role, tool, what,
+                            strict, now_ms()};
+                approval_map[pa->info.id] = pa;
+            }
+        }
+        if (!pa) {
+            if (!f) return false;
+            set_activity(a, "blocked", "approval");
+            bool ok = f(a->row.session, what);
+            set_activity(a, "tool");
+            return ok;
+        }
+        set_activity(a, "blocked", "approval");
+        emit(event(*a, "approval_request", {{"id", pa->info.id}, {"tool", tool}, {"what", what}, {"strict", strict},
+                                            {"created_ms", pa->info.created_ms}}));
+        bool announce = false;
+        {
+            std::unique_lock lk(mu);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(approval_timeout_s, 0));
+            while (pa->state == 0) {
+                if (stopping) { pa->state = 2; pa->by = "shutdown"; announce = true; break; }
+                if (a->cancel) { pa->state = 2; pa->by = "cancelled"; announce = true; break; }
+                if (approval_timeout_s > 0 && std::chrono::steady_clock::now() >= deadline) {
+                    pa->state = 2; pa->by = "timeout"; announce = true; break;
+                }
+                cv.wait_for(lk, std::chrono::milliseconds(200));
+            }
+        }
+        if (announce)
+            emit(event(*a, "approval_resolved", {{"id", pa->info.id}, {"approved", false}, {"by", pa->by}}));
+        set_activity(a, "tool");
+        std::lock_guard lk(mu);
+        // keep the last few resolved ones so a late answer gets "already resolved" instead of "unknown"
+        size_t resolved = 0;
+        for (auto & [id, p] : approval_map) if (p->state != 0) resolved++;
+        for (auto it = approval_map.begin(); resolved > 50 && it != approval_map.end();)
+            if (it->second->state != 0) { it = approval_map.erase(it); resolved--; } else ++it;
+        return pa->state == 1;
+    }
     // The engine cpu team members run on (the swarm instance), made on first use. Tests inject a factory.
     std::function<std::unique_ptr<Engine>(const std::string & url)> remote_factory;
     std::unique_ptr<Engine> remote;
@@ -478,6 +540,18 @@ struct AgentManager::Impl {
         std::string out;
         auto ps = session_skills(sid);
         for (const auto & s : (ps ? ps->matching(user_text) : skills.matching(user_text))) {
+#ifdef JUDAS_MACH12
+            // The planner skill is only for sessions that have the planner tools (lead of chat or cowork, planner on).
+            // There the day's context rides along, so the model does not need a first tool call to find its footing.
+            if (s.name == "mach12") {
+                auto sess = store.get_session(sid);
+                if (!cfg.mach12.enabled || !cfg.mach12.tools || !sess || (sess->mode != "chat" && sess->mode != "cowork")) continue;
+                if (usage) usage->record_load(s.name, true);
+                out += "# skill: " + s.name + "\n" + s.body + "\n\nPlanner context right now (from mach12_today):\n" +
+                       mach12::today_text(expand_home(cfg.mach12.data_dir), "today") + "\n\n";
+                continue;
+            }
+#endif
             if (usage) usage->record_load(s.name, true);
             out += "# skill: " + s.name + "\n" + s.body + "\n\n";
         }
@@ -696,11 +770,47 @@ struct AgentManager::Impl {
         a->thread = std::thread([this, a] { run(a); });
     }
 
+    json queue_json_locked(const std::string & sid) {
+        json arr = json::array();
+        auto s = sessions.find(sid);
+        if (s != sessions.end())
+            for (auto & q : s->second.queued) arr.push_back({{"id", q.id}, {"text", q.text}});
+        return arr;
+    }
+    // Lead turn over: promote the next queued message into the lead's inbox (mu held). Not when the turn was
+    // cancelled or paused (a pause keeps the queue). Returns the message to announce once mu is released.
+    struct Drained { bool any = false; std::string content; };
+    Drained drain_queue_locked(Agent * a) {
+        Drained d;
+        auto s = sessions.find(a->row.session);
+        if (s == sessions.end() || s->second.lead != a->row.id || a->review || s->second.queued.empty()) return d;
+        if (stopping || a->cancel || a->row.status == "paused") return d;
+        auto q = s->second.queued.front();
+        s->second.queued.pop_front();
+        d.any = true;
+        d.content = q.text + q.suffix;
+        s->second.request = d.content;
+        s->second.busy = true;
+        for (auto & [id, ag] : agents)
+            if (ag->row.session == a->row.session && ag->review) { ag->cancel = true; ag->inbox.clear(); }
+        a->inbox.push_back(d.content);
+        return d;
+    }
+    void announce_drained(Agent * a, const Drained & d) {
+        if (!d.any) return;
+        json q;
+        { std::lock_guard lk(mu); q = queue_json_locked(a->row.session); }
+        emit(event(*a, "queue", {{"queued", q}}));
+        emit(event(*a, "spawned", {{"task", d.content}, {"role", "lead"}, {"from_queue", true}}));
+    }
+
     void run(Agent * a) {
         while (true) {
             std::string input;
+            Drained dq;
             {
                 std::lock_guard lk(mu);
+                if (a->inbox.empty()) dq = drain_queue_locked(a);   // a message queued after the last drain
                 if (a->inbox.empty() || stopping || (a->cancel && a->pause_req)) {   // a paused agent keeps its inbox
                     a->running = false;
                     if (a->review) {
@@ -715,6 +825,7 @@ struct AgentManager::Impl {
                 input = a->inbox.front();
                 a->inbox.pop_front();
             }
+            announce_drained(a, dq);
             if (!a->review) {
                 skills.reload_if_changed();   // pick up curator/human edits to the skills dir
                 if (std::string sk = autoload_skills(input, a->row.session); !sk.empty())
@@ -747,6 +858,7 @@ struct AgentManager::Impl {
                 cv.notify_all();
                 continue;
             }
+            Drained end_dq;
             {
                 std::lock_guard lk(mu);
                 a->row.result = answer;
@@ -758,6 +870,7 @@ struct AgentManager::Impl {
                 a->activity = a->row.status == "done" ? "done" : a->row.status == "failed" ? "failed"
                             : a->row.status == "paused" ? "blocked" : "idle";
                 a->activity_tool.clear();
+                if (a->inbox.empty()) end_dq = drain_queue_locked(a);
                 auto s = sessions.find(a->row.session);
                 if (s != sessions.end() && s->second.lead == a->row.id && a->inbox.empty()) {
                     s->second.last_answer = answer;
@@ -766,6 +879,7 @@ struct AgentManager::Impl {
             }
             emit(event(*a, "activity", {{"activity", a->activity}}));
             emit(event(*a, "done", {{"result", answer}, {"status", a->row.status}, {"reason", a->reason}}));
+            announce_drained(a, end_dq);
             if (!a->team.empty()) {   // a member's report travels up its edge (the map animates it)
                 std::string to;
                 {
@@ -1207,30 +1321,12 @@ struct AgentManager::Impl {
                 ctx.autonomous = a->review || has_extras(a->row.session);   // probe sessions: no user to consent
                 ctx.progress = [this, a](const json & d) { emit(event(*a, "swarm", d)); };
                 ctx.checkpoint = journal.begin(a->row.session, a->row.id, label.substr(0, 200));
-                if (!a->review) ctx.approve = [this, a](const std::string & what) {
-                    std::function<bool(const std::string &, const std::string &)> f;
-                    {
-                        std::lock_guard lk(mu);
-                        f = approver;
-                    }
+                if (!a->review) ctx.approve = [this, a, tool = tc.name](const std::string & what) {
                     if (cfg.permissions.mode == "full-auto") return true;
-                    if (!f) return false;
-                    set_activity(a, "blocked", "approval");
-                    bool ok = f(a->row.session, what);
-                    set_activity(a, "tool");
-                    return ok;
+                    return ask_user(a, tool, what, false);
                 };
-                if (!a->review && !ctx.autonomous) ctx.approve_strict = [this, a](const std::string & what) {
-                    std::function<bool(const std::string &, const std::string &)> f;
-                    {
-                        std::lock_guard lk(mu);
-                        f = approver;
-                    }
-                    if (!f) return false;
-                    set_activity(a, "blocked", "approval");
-                    bool ok = f(a->row.session, what);
-                    set_activity(a, "tool");
-                    return ok;
+                if (!a->review && !ctx.autonomous) ctx.approve_strict = [this, a, tool = tc.name](const std::string & what) {
+                    return ask_user(a, tool, what, true);
                 };
                 bool writes = false;
                 if (const Tool * td = tools.find(tc.name)) writes = td->writes;
@@ -1455,7 +1551,7 @@ struct AgentManager::Impl {
     struct TeamAccess {
         bool create = false, assign = false, member = false;
         bool allows(const std::string & n) const {
-            if (n == "team_create" || n == "team_disband") return create;
+            if (n == "team_create" || n == "team_disband" || n == "team_save" || n == "team_list_saved") return create;
             if (n == "team_assign" || n == "team_wait") return assign;
             if (n == "team_status" || n == "team_message" || n == "team_read") return member || create;
             return false;
@@ -1597,6 +1693,7 @@ struct AgentManager::Impl {
                 {"tool", a.activity_tool}, {"depth", a.depth}, {"model", a.model}, {"tok_s", a.tok_s},
                 {"ctx_pct", a.ctx_pct < 0 ? json(nullptr) : json(std::round(a.ctx_pct * 10) / 10)},
                 {"model_name", a.eng ? a.eng->model_name() : engine.model_name()},
+                {"engine", a.eng ? "cpu" : "gpu"}, {"cpu_fallback", a.cpu_fallback},
                 {"last_output", tail}};
     }
 
@@ -1637,6 +1734,57 @@ struct AgentManager::Impl {
         }
         while (!out.empty() && out.back() == '\n') out.pop_back();
         return out;
+    }
+
+    // Save a team's map into the user teams dir. `caller` empty = from the web (no agent). Returns "" and fills
+    // `path_out` on success, else the reason.
+    std::string save_team(const std::string & sid, const std::string & team, const std::string & name, const std::string & note,
+                          bool overwrite, std::string & path_out, std::string & used_team) {
+        TeamSpec spec;
+        TeamSaveInfo info;
+        {
+            std::lock_guard lk(mu);
+            auto s = sessions.find(sid);
+            if (s == sessions.end() || s->second.teams.empty()) return "this session has no teams";
+            const TeamRt * t = nullptr;
+            if (!team.empty()) {
+                auto it = s->second.teams.find(team);
+                if (it == s->second.teams.end()) return "no team named '" + team + "'";
+                t = &it->second;
+            } else {
+                int live = 0;
+                for (auto & [n, r] : s->second.teams)
+                    if (!r.disbanded) { live++; t = &r; }
+                if (live != 1) {
+                    std::string e = "name the team (teams:";
+                    for (auto & [n, r] : s->second.teams)
+                        if (!r.disbanded) e += " " + n;
+                    return e + ")";
+                }
+            }
+            spec = t->spec;
+            used_team = spec.name;
+            info.session = sid;
+            long long first = 0, last = 0;
+            for (auto & [copy, id] : t->agents) {
+                auto it = agents.find(id);
+                if (it == agents.end()) continue;
+                const AgentRow & r = it->second->row;
+                info.agents++;
+                info.tokens += r.prompt_tokens + r.completion_tokens;
+                if (r.status == "failed" || r.status == "killed") info.failed++;
+                if (r.created_ms && (!first || r.created_ms < first)) first = r.created_ms;
+                last = std::max(last, std::max(r.updated_ms, r.created_ms));
+            }
+            if (first && last > first) info.wall_s = (last - first) / 1000.0;
+        }
+        info.date = today();
+        info.note = note;
+        std::string dir = team_dir_resolve(cfg.teams.dir);
+        std::string err = team_save_file(dir, name, team_save_text(spec, info), overwrite);
+        if (!err.empty()) return err;
+        path_out = (fs::path(dir) / (name + ".map")).string();
+        return "";
     }
 
     void register_team_tools() {
@@ -1685,7 +1833,7 @@ struct AgentManager::Impl {
                 bool ok = !name.empty() && name.size() <= 40;
                 for (char c : name) ok = ok && (std::isalnum((unsigned char) c) || c == '-' || c == '_');
                 if (!ok) return {false, "spec must be a saved team name (a-z, 0-9, _ or -)"};
-                fs::path dir = expand_home(cfg.teams.dir);
+                fs::path dir = team_dir_resolve(cfg.teams.dir);
                 fs::path pm = dir / (name + ".map"), pt = dir / (name + ".toml");
                 if (std::ifstream f(pm); f) {
                     std::string text((std::istreambuf_iterator<char>(f)), {});
@@ -2059,6 +2207,48 @@ struct AgentManager::Impl {
             return {true, "team " + name + " disbanded"};
         };
         tools.add(disband);
+
+        Tool save;
+        save.name = "team_save";
+        save.description = "Save a team's map so a later job can start from it (team_create {spec: name}). Offer this after a "
+                           "team finishes well. Writes ~/.config/judas/teams/NAME.map with a header (date, session, outcome, "
+                           "stats). Never overwrites unless overwrite is true; the old file is kept as NAME.map.bak.";
+        save.parameters = {{"type", "object"},
+                           {"properties",
+                            {{"name", {{"type", "string"}, {"description", "short name, a-z 0-9 and - only"}}},
+                             {"team", {{"type", "string"}, {"description", "team to save (default: the only live team)"}}},
+                             {"note", {{"type", "string"}, {"description", "one line: what the team did and how it went"}}},
+                             {"overwrite", {{"type", "boolean"}, {"description", "replace an existing saved map (default false)"}}}}},
+                           {"required", {"name"}}};
+        save.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a || !team_access(*a).create) return {false, "only the session lead of a Swarm session can save a team"};
+            std::string path, used;
+            std::string err = save_team(ctx.session, args.value("team", std::string()), args.value("name", std::string()),
+                                        args.value("note", std::string()), args.value("overwrite", false), path, used);
+            if (!err.empty()) return {false, err};
+            return {true, "saved team " + used + " as " + path + ". Start from it later with team_create {spec: \"" +
+                              args.value("name", std::string()) + "\"}."};
+        };
+        tools.add(save);
+
+        Tool listed;
+        listed.name = "team_list_saved";
+        listed.description = "List saved team maps (name, first comment line, date, last outcome). Check this when a new job "
+                             "resembles an earlier one, then start from it with team_create {spec: name}.";
+        listed.parameters = {{"type", "object"}, {"properties", json::object()}};
+        listed.run = [this](const json &, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a || !team_access(*a).create) return {false, "only the session lead of a Swarm session can list saved teams"};
+            auto l = team_saved_list(team_dir_resolve(cfg.teams.dir));
+            if (l.empty()) return {true, "no saved teams yet"};
+            std::string out;
+            for (auto & m : l)
+                out += m.name + " | " + (m.title.empty() ? "(no description)" : m.title) + " | " +
+                       (m.date.empty() ? "no date" : m.date) + " | " + (m.outcome.empty() ? "no outcome recorded" : m.outcome) + "\n";
+            return {true, out};
+        };
+        tools.add(listed);
     }
 
     std::optional<Skill> skills_lookup(const std::string & sid, const std::string & name) {
@@ -2183,13 +2373,116 @@ std::string AgentManager::wait_session(const std::string & session_id) {
 
 void AgentManager::cancel(const std::string & session_id) {
     auto & I = *impl_;
-    std::lock_guard lk(I.mu);
-    for (auto & [id, a] : I.agents)
-        if (a->row.session == session_id) {
-            a->cancel = true;
-            a->inbox.clear();
+    Impl::Agent * lead = nullptr;
+    bool had = false;
+    {
+        std::lock_guard lk(I.mu);
+        for (auto & [id, a] : I.agents)
+            if (a->row.session == session_id) {
+                a->cancel = true;
+                a->inbox.clear();
+            }
+        auto s = I.sessions.find(session_id);
+        if (s != I.sessions.end()) {
+            had = !s->second.queued.empty();
+            s->second.queued.clear();
+            auto it = I.agents.find(s->second.lead);
+            if (it != I.agents.end()) lead = it->second.get();
         }
-    I.cv.notify_all();
+        I.cv.notify_all();
+    }
+    if (had && lead) I.emit(I.event(*lead, "queue", {{"queued", json::array()}}));
+}
+
+AgentManager::SubmitResult AgentManager::submit_queued(const std::string & session_id, const std::string & text,
+                                                       const std::string & suffix, const std::string & cwd) {
+    auto & I = *impl_;
+    SubmitResult r;
+    Impl::Agent * lead = nullptr;
+    if (!session_id.empty()) {
+        std::lock_guard lk(I.mu);
+        auto s = I.sessions.find(session_id);
+        if (s != I.sessions.end()) {
+            auto it = I.agents.find(s->second.lead);
+            if (it != I.agents.end()) lead = it->second.get();
+        }
+    }
+    if (lead) {
+        json q;
+        {
+            std::lock_guard lk(I.mu);
+            // a lead that is stopping (cancelled) takes the message as a fresh turn, as submit always did
+            if (lead->running && !lead->cancel && !I.stopping) {
+                auto & s = I.sessions[session_id];
+                if (s.queued.size() >= kMaxQueued) {
+                    r.session = session_id;
+                    r.error = "the queue is full (" + std::to_string(kMaxQueued) + " messages waiting); wait for the turn or remove one";
+                    return r;
+                }
+                r.id = "q" + std::to_string(s.next_q++);
+                s.queued.push_back({r.id, text, suffix});
+                r.queued = true;
+                r.session = session_id;
+                q = I.queue_json_locked(session_id);
+            }
+        }
+        if (r.queued) {
+            I.emit(I.event(*lead, "queue", {{"queued", q}}));
+            return r;
+        }
+    }
+    r.session = submit(session_id, text + suffix, cwd);
+    return r;
+}
+
+std::vector<AgentManager::QueuedMsg> AgentManager::queued(const std::string & session_id) const {
+    auto & I = *impl_;
+    std::vector<QueuedMsg> out;
+    std::lock_guard lk(I.mu);
+    auto s = I.sessions.find(session_id);
+    if (s != I.sessions.end())
+        for (auto & q : s->second.queued) out.push_back({q.id, q.text});
+    return out;
+}
+
+bool AgentManager::queue_remove(const std::string & session_id, const std::string & qid) {
+    auto & I = *impl_;
+    Impl::Agent * lead = nullptr;
+    json q;
+    {
+        std::lock_guard lk(I.mu);
+        auto s = I.sessions.find(session_id);
+        if (s == I.sessions.end()) return false;
+        auto & dq = s->second.queued;
+        auto it = std::find_if(dq.begin(), dq.end(), [&](const Impl::Session::Queued & x) { return x.id == qid; });
+        if (it == dq.end()) return false;
+        dq.erase(it);
+        auto l = I.agents.find(s->second.lead);
+        if (l != I.agents.end()) lead = l->second.get();
+        q = I.queue_json_locked(session_id);
+    }
+    if (lead) I.emit(I.event(*lead, "queue", {{"queued", q}}));
+    return true;
+}
+
+bool AgentManager::queue_edit(const std::string & session_id, const std::string & qid, const std::string & text) {
+    auto & I = *impl_;
+    Impl::Agent * lead = nullptr;
+    json q;
+    {
+        std::lock_guard lk(I.mu);
+        auto s = I.sessions.find(session_id);
+        if (s == I.sessions.end()) return false;
+        bool hit = false;
+        for (auto & x : s->second.queued)
+            if (x.id == qid) { x.text = text; hit = true; }
+        if (!hit) return false;
+        auto l = I.agents.find(s->second.lead);
+        if (l != I.agents.end()) lead = l->second.get();
+        q = I.queue_json_locked(session_id);
+    }
+    if (lead) I.emit(I.event(*lead, "queue", {{"queued", q}}));
+    return true;
 }
 
 AgentManager::TurnInfo AgentManager::turn_info(const std::string & session_id) const {
@@ -2214,6 +2507,8 @@ AgentManager::TurnInfo AgentManager::turn_info(const std::string & session_id) c
     t.reason = lead->reason;
     t.plan = lead->plan;
     t.open_items = plan_state(lead->plan).open;
+    if (s != I.sessions.end())
+        for (auto & q : s->second.queued) t.queued.push_back({q.id, q.text});
     return t;
 }
 
@@ -2254,6 +2549,19 @@ bool AgentManager::resume(const std::string & session_id, const std::string & cw
     I.emit(I.event(*lead, "spawned", {{"task", msg}, {"role", "lead"}, {"resume", true}}));
     I.start_turn(lead);
     return true;
+}
+
+std::string AgentManager::team_save(const std::string & session, const std::string & team, const std::string & name,
+                                    const std::string & note, bool overwrite, std::string & path) {
+    std::string used;
+    return impl_->save_team(session, team, name, note, overwrite, path, used);
+}
+
+json AgentManager::team_saved() const {
+    json out = json::array();
+    for (auto & m : team_saved_list(team_dir_resolve(impl_->cfg.teams.dir)))
+        out.push_back({{"name", m.name}, {"title", m.title}, {"date", m.date}, {"outcome", m.outcome}});
+    return out;
 }
 
 json AgentManager::team_view(const std::string & session) const {
@@ -2348,6 +2656,46 @@ void AgentManager::remove_listener(int handle) {
 void AgentManager::set_approver(std::function<bool(const std::string &, const std::string &)> fn) {
     std::lock_guard lk(impl_->mu);
     impl_->approver = std::move(fn);
+}
+
+void AgentManager::enable_remote_approvals(bool on) {
+    std::lock_guard lk(impl_->mu);
+    impl_->remote_approvals = on;
+}
+
+void AgentManager::set_approval_timeout(int seconds) {
+    std::lock_guard lk(impl_->mu);
+    impl_->approval_timeout_s = seconds;
+}
+
+std::vector<AgentManager::Approval> AgentManager::approvals(const std::string & session) const {
+    std::vector<Approval> out;
+    std::lock_guard lk(impl_->mu);
+    for (auto & [id, p] : impl_->approval_map)
+        if (p->state == 0 && (session.empty() || p->info.session == session)) out.push_back(p->info);
+    std::sort(out.begin(), out.end(), [](const Approval & x, const Approval & y) {
+        return x.created_ms != y.created_ms ? x.created_ms < y.created_ms : x.id.size() != y.id.size() ? x.id.size() < y.id.size() : x.id < y.id;
+    });
+    return out;
+}
+
+AgentManager::ApprovalResult AgentManager::answer_approval(const std::string & session, const std::string & id, bool approve) {
+    std::shared_ptr<Impl::PendingApproval> pa;
+    Impl::Agent * a = nullptr;
+    {
+        std::lock_guard lk(impl_->mu);
+        auto it = impl_->approval_map.find(id);
+        if (it == impl_->approval_map.end() || it->second->info.session != session) return ApprovalResult::Unknown;
+        pa = it->second;
+        if (pa->state != 0) return ApprovalResult::AlreadyResolved;
+        pa->state = approve ? 1 : 2;
+        pa->by = "user";
+        auto ag = impl_->agents.find(pa->info.agent);
+        if (ag != impl_->agents.end()) a = ag->second.get();
+    }
+    impl_->cv.notify_all();
+    if (a) impl_->emit(impl_->event(*a, "approval_resolved", {{"id", id}, {"approved", approve}, {"by", "user"}}));
+    return ApprovalResult::Ok;
 }
 
 std::vector<AgentRow> AgentManager::agents(const std::string & session) const {

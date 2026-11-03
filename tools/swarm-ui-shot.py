@@ -98,12 +98,26 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, skin_css((q.get("name") or [DEFAULT_SKIN[0]])[0]), "text/css")
         if p == "/state":
             return self.js(FIXTURE["state"])
+        if p == "/api/teams/saved":
+            return self.js([{"name": "research-and-edit", "title": "Research then edit", "outcome": "report written", "date": "2026-11-02"},
+                            {"name": "review-pair", "title": "Review pair", "outcome": "two findings", "date": "2026-10-30"}])
         if p == "/api/skins":
             return self.js(FIXTURE["skins"])
         if p == "/api/swarm/state":
             return self.js(FIXTURE["swarm_state"])
         if p == "/api/sessions":
             return self.js({"sessions": FIXTURE["sessions"], "more": False})
+        for xsid, x in FIXTURE.get("extra", {}).items():
+            if p == "/api/sessions/%s" % xsid:
+                return self.js(x["session"])
+            if p == "/api/sessions/%s/team" % xsid:
+                return self.js(x["team"])
+            if p == "/api/sessions/%s/events" % xsid:
+                return self.sse(int((q.get("since") or [self.headers.get("Last-Event-ID") or "0"])[0] or 0), True, x["events"])
+        if p.startswith("/api/sessions/") and p.count("/") == 3 and p != "/api/sessions/%s" % SID:
+            sid = p.rsplit("/", 1)[1]
+            r = [x for x in FIXTURE["sessions"] if x["id"] == sid]
+            return self.js({"session": r[0], "agents": [], "messages": [], "more_before": False, "total": 0, "turn": {}} if r else {})
         if p == "/api/sessions/%s" % SID:
             return self.js(FIXTURE["session"])
         if p == "/api/sessions/%s/team" % SID:
@@ -127,7 +141,7 @@ class H(BaseHTTPRequestHandler):
             data = data.replace(b"</body>", b'<script src="/probe.js"></script></body>')
         self.send(200, data, ctype)
 
-    def sse(self, since, replay):
+    def sse(self, since, replay, events=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -135,7 +149,7 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             if replay:
-                for i, ev in enumerate(FIXTURE["events"], 1):
+                for i, ev in enumerate(FIXTURE["events"] if events is None else events, 1):
                     if i <= since:
                         continue
                     ev = dict(ev)

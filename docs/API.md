@@ -18,8 +18,10 @@ Base: `http://127.0.0.1:<port>` (default 8079). CORS `*` on `/v1` and `/api`.
 - `GET /api/sessions/<id>[?limit=N&before=<message id>]` -> `{session, agents:[AgentRow], messages:[{id,agent,role,body,created_ms}], more_before, total, turn:{running,event_floor,msg_floor,events_head}}`. Messages cover all agents, oldest first. No `limit` = every message; `limit=N` = the newest N (add `before` for the N before that id). `turn` describes a turn in progress: `event_floor` is the `since` that replays it from its first event, `msg_floor` the last stored message id from before it began.
   - AgentRow: `{id,session,parent,role,task,status:"queued|running|waiting|done|failed|killed",result,created_ms,updated_ms,prompt_tokens,completion_tokens}`
   - message `body` is an OpenAI message object: `{role, content, reasoning_content?, tool_calls?:[{id,type,function:{name,arguments}}], tool_call_id?}`
-- `POST /api/sessions/<id>/messages` `{content, cwd?, mode?}` (`<id>`="new" creates one with that mode) -> `{session}`. Starts a turn; watch /events.
-- `POST /api/sessions/<id>/cancel` -> `{ok:true}`
+- `POST /api/sessions/<id>/messages` `{content, cwd?, mode?}` (`<id>`="new" creates one with that mode) -> `{session}`. Starts a turn; watch /events. If the lead is busy the message is queued instead (next bullets).
+- `POST /api/sessions/<id>/cancel` -> `{ok:true}`. Stops every agent of the session and drops its queued messages (a stop means stop; resend what you still want). A pause (`/agents/<id>/pause` on the lead) keeps the queue.
+- Queued messages: `POST /api/sessions/<id>/messages` while the lead is mid-turn does not start a second turn and is not rejected: the message waits in a per-session FIFO queue (cap 10) and the reply is `{session, queued:true, id, queue:[{id,text}]}`. When the lead's turn ends (done or failed; not paused, not cancelled) the next message starts its own turn, one turn per message (never merged), announced by a lead `spawned` event with `from_queue:true`; `wait_session` and the busy state hold until the queue is empty. An 11th message gets 409 `{error:{type:"conflict"}}` and nothing is lost. The queue lives in the daemon: it survives a page reload and works the same from the API and the TUI, but not a daemon restart. It is visible as `queued:[{id,text}]` in `GET /api/sessions` rows, in the `session` object and `turn` of `GET /api/sessions/<id>`, and in `GET /api/sessions/<id>/queue`. `text` is what the user typed (attachment blocks are appended when it is sent). Every change emits a lead `queue` event `{queued:[{id,text}]}` on the session stream.
+- `DELETE /api/sessions/<id>/queue/<qid>` -> `{ok, queue}` removes a queued message (404 once it has started). `PATCH /api/sessions/<id>/queue/<qid>` `{text}` -> `{ok, queue}` edits it in place, keeping its position.
 - `POST /api/sessions/<id>/recover` -> `{ok,restored,removed,conflicts,irreversible,error}` (undo every change this chat made; cancels it first)
 - `POST /api/sessions/<id>/seal` -> `{ok:true, freed_bytes}` (keep the current result, drop this chat's undo history to save disk, end the chat)
 
@@ -51,6 +53,16 @@ Images reach a model only when it has vision (`vision` in `/api/state`). Without
 - `message` data `{message:<oai message>, usage:{prompt,cached,completion,prefill_s,generate_s}}`
 - `status` data `{error?}`
 - `done` data `{result, status}` (parent empty = the whole turn is finished)
+- `approval_request` data `{id, tool, what, strict, created_ms}` (an agent is blocked waiting for the user's yes; see Approvals)
+- `approval_resolved` data `{id, approved, by}` (`by`: `user`, `cancelled`, `timeout` or `shutdown`)
+
+## Approvals
+When a tool needs the user's yes (permission mode `suggest` asks for writes and shell, `auto-edit` for shell, MCP and skill actions that ask), the agent blocks and the daemon raises a pending approval. Any client answers it; the first answer wins and resolves it for everyone. A cancelled agent, a daemon shutdown or the timeout (600 s) resolves it as declined, so a session with no client attached never hangs for good.
+- `GET /api/sessions/<id>/approvals` -> `{approvals:[{id, agent, role, tool, what, strict, created_ms}]}` (pending only, oldest first). `what` is the text to show: the action plus a diff (`-` old lines, `+` new lines) for `edit_file` and `write_file`, the dry run for the planner tools.
+- `POST /api/sessions/<id>/approvals/<aid>` `{"approve": true|false}` -> `{ok, id, approved}`. 404 when the approval is unknown, 409 when it was already resolved, 400 on a bad body.
+- The session stream carries `approval_request` when one is raised and `approval_resolved` when it ends. The global feed carries `approval.requested` and `approval.resolved` (same data plus `session`, `agent`).
+- `strict` approvals (`approve_strict`: the mach12 planner tools) are never answered by the permission mode: `full-auto` still asks. Everything else is auto-approved in `full-auto` and never raised.
+- The safety floor (sudo, su, doas, pkexec, passwd, faillock, auth databases) is refused before any approval is raised; no answer can unlock it.
 
 ## Snapshots (the undo timeline)
 - `GET /api/snapshots?session=&limit=` -> `{snapshots:[{id,session,agent,label,created_ms,committed,reverted,files:[{path,before_hash,after_hash}],irreversible:[...]}]}`
@@ -82,6 +94,8 @@ A scheduler in the daemon fires due once/interval tasks automatically as new ses
     - `edges` holds only the extra spec edges; the default edges (lead -> team lead or every member, team lead -> members) are implied.
     - `place` is the pinned layout from the map file: row 1 first, each row a list of copies left to right. Empty = automatic layout. Copies not in any row go in an extra last row.
     - `map` is the team in the canonical map format (docs/SWARM-TEAMS.md "Map files"); `warnings` lists map lines that were skipped.
+- `POST /api/sessions/<id>/teams/<team>/save` body `{name, note?, overwrite?}` -> `{ok:true, path}`. Writes the team's map (with a comment header: date, session, outcome note, run stats) to `~/.config/judas/teams/<name>.map`. `name` is `[a-z0-9-]`, 1 to 40. 400 on a bad name or unknown team, 409 when the file exists and `overwrite` is not true; with `overwrite` the old file is kept as `<name>.map.bak`.
+- `GET /api/teams/saved` -> `[{name, title, date, outcome}]` for every `.map` and `.toml` in the teams folder (`title` = first comment line, `date` and `outcome` from the header; empty for hand-written files).
   - AgentLive: AgentRow plus `{team:str|"", member:str|"", activity:"queued|prefilling|generating|tool|waiting|blocked|done|failed|idle", tool:str|"", depth, model:"gpu|cpu", tok_s:number, ctx_pct:number|null, last_output:str}` (`ctx_pct` = the last prompt's share of this agent's context cap, 0 to 100) (`last_output` = tail of the latest assistant text, at most 600 chars)
 - `POST /api/sessions/<id>/agents/<agent>/cancel` -> `{ok}` (stops that agent's turn, status killed; its queued input is dropped)
 - `POST /api/sessions/<id>/agents/<agent>/pause` -> `{ok}` (stops the turn, status paused, resumable)

@@ -1,6 +1,10 @@
 // Swarm teams, pure parts: spec parsing (JSON and TOML), validation, copies, edges, rule sections, the pinned
 // block and the status merge.
 #include "agent/teams.h"
+#include <unistd.h>
+
+#include <filesystem>
+
 #include "test.h"
 
 using namespace judas;
@@ -265,7 +269,56 @@ place 1: runner.2
     CHECK(lead.teams[0].members[1].role == "worker");
 }
 
+static void test_save() {
+    TeamSpec r = research();
+    r.brief = "Answer the question.\nWrite REPORT.md.";
+    r.rules = {"Quote numbers exactly."};
+    TeamSaveInfo info;
+    info.date = "2026-11-02";
+    info.session = "s-abc";
+    info.note = "all copies done \xE2\x80\x94 passed checks\nsecond line";
+    info.agents = 5;
+    info.tokens = 12345;
+    info.wall_s = 61.4;
+    info.failed = 1;
+    std::string text = team_save_text(r, info);
+    CHECK(text.rfind("# Answer the question.\n", 0) == 0);
+    CHECK(text.find("# saved: 2026-11-02 session s-abc\n") != std::string::npos);
+    CHECK(text.find("# outcome: all copies done - passed checks second line\n") != std::string::npos);
+    CHECK(text.find("# stats: 5 agents, 12345 tokens, wall 61 s, 1 failed copies\n") != std::string::npos);
+    CHECK(text.find("\xE2\x80\x94") == std::string::npos);
+    // round trip: parse(serialize(team)) is the team
+    TeamMap m = parse_team_map(text);
+    CHECK(m.warnings.empty());
+    REQUIRE(m.teams.size() == 1);
+    CHECK(team_spec_to_json(m.teams[0]).dump() == team_spec_to_json(r).dump());
+    CHECK(team_map_text(m.teams[0]) == team_map_text(r));
+
+    CHECK(team_save_name_ok("research-2"));
+    CHECK(!team_save_name_ok("") && !team_save_name_ok("Research") && !team_save_name_ok("a_b") &&
+          !team_save_name_ok("../x") && !team_save_name_ok("a b") && !team_save_name_ok(std::string(41, 'a')));
+
+    std::string dir = std::string(JUDAS_TEST_TMP) + "/judas-team-save-" + std::to_string(getpid()) + "/teams";
+    std::filesystem::remove_all(dir);
+    CHECK(!team_save_file(dir, "../evil", text, true).empty());
+    CHECK(team_saved_list(dir).empty());
+    CHECK(team_save_file(dir, "research", text, false).empty());       // creates the dir
+    CHECK(!team_save_file(dir, "research", "x", false).empty());        // no silent overwrite
+    CHECK(std::filesystem::exists(dir + "/research.map") && !std::filesystem::exists(dir + "/research.map.bak"));
+    std::string second = team_save_text(r, [&] { auto i = info; i.note = "second run"; return i; }());
+    CHECK(team_save_file(dir, "research", second, true).empty());
+    CHECK(std::filesystem::exists(dir + "/research.map.bak"));
+    CHECK(team_save_file(dir, "other", team_save_text(r, TeamSaveInfo{}), false).empty());
+    auto l = team_saved_list(dir);
+    REQUIRE(l.size() == 2);                                              // .bak is not listed
+    CHECK(l[0].name == "other" && l[0].outcome == "not recorded");
+    CHECK(l[1].name == "research" && l[1].title == "Answer the question." && l[1].date == "2026-11-02" &&
+          l[1].outcome == "second run");
+    std::filesystem::remove_all(std::filesystem::path(dir).parent_path());
+}
+
 int main() {
+    test_save();
     test_map();
     test_parse();
     test_validate();

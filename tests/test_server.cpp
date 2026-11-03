@@ -107,6 +107,29 @@ int main() {
         CHECK(j["status"] == "ok");
         CHECK(j["model"] == "fake");
     }
+    {   // bundled web fonts: embedded, woff2 content type, magic bytes, CSS lists them, CSP allows font-src 'self'
+        auto css = cli.Get("/fonts.css");
+        REQUIRE(css && css->status == 200);
+        CHECK(css->get_header_value("Content-Type").find("text/css") == 0);
+        CHECK(css->body.find("\"Inter\"") != std::string::npos && css->body.find("font-display:swap") != std::string::npos);
+        size_t pos = css->body.find("url(\"/fonts/");
+        REQUIRE(pos != std::string::npos);
+        int n_fonts = 0;
+        while (pos != std::string::npos) {
+            size_t a = pos + 5, b = css->body.find('"', a);
+            std::string url = css->body.substr(a, b - a);
+            auto f = cli.Get(url);
+            REQUIRE(f && f->status == 200);
+            CHECK(f->get_header_value("Content-Type") == "font/woff2");
+            CHECK(f->body.size() > 1000 && f->body.compare(0, 4, "wOF2") == 0);
+            n_fonts++;
+            pos = css->body.find("url(\"/fonts/", b);
+        }
+        CHECK(n_fonts >= 30);
+        auto idx = cli.Get("/");
+        REQUIRE(idx && idx->status == 200);
+        CHECK(idx->get_header_value("Content-Security-Policy").find("font-src 'self'") != std::string::npos);
+    }
     {
         auto r = cli.Get("/state");
         REQUIRE(r && r->status == 200);
@@ -115,6 +138,17 @@ int main() {
         CHECK(j["seqs"].size() == 1);
         CHECK(j.contains("sessions"));
         CHECK(j["version"].is_string());
+    }
+    {   // phone UI: /m redirects, /m/ serves its page, with the frame CSP
+        auto rd = cli.Get("/m");
+        REQUIRE(rd && rd->status == 302);
+        CHECK(rd->get_header_value("Location").find("/m/") != std::string::npos);
+        auto r = cli.Get("/m/");
+        REQUIRE(r && r->status == 200);
+        CHECK(r->body.find("m.js") != std::string::npos);
+        CHECK(r->get_header_value("Content-Security-Policy").find("frame-src") != std::string::npos);
+        auto js = cli.Get("/m/m.js");
+        REQUIRE(js && js->status == 200);
     }
     for (const char * path : {"/state", "/api/state"}) {   // KV admission fields
         auto r = cli.Get(path);

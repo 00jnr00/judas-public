@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="color-scheme" content="dark light">
+<title>Judas</title>
+<link rel="stylesheet" href="/m/m.css">
+<link rel="stylesheet" href="/skin.css" id="skin-link">
+</head>
+<body>
+<div id="app">
+  <!-- home -->
+  <section id="v-home" class="view" aria-label="Home">
+    <header class="bar">
+      <span class="coin" aria-hidden="true">Ag</span>
+      <h1 class="brand">Judas</h1>
+      <button type="button" id="status" class="status" aria-label="Server status"><span class="dot" id="dot"></span><span id="status-txt">...</span></button>
+      <button type="button" id="menu-btn" class="icon-btn" aria-label="Menu"></button>
+    </header>
+    <main class="scroll" id="home-scroll">
+      <p class="hint" id="home-hint"></p>
+      <ul class="cards" id="cards" aria-label="Recent sessions"></ul>
+      <button type="button" id="more-btn" class="more" hidden>Show more</button>
+    </main>
+  </section>
+  <!-- session -->
+  <section id="v-sess" class="view" aria-label="Session" hidden>
+    <header class="bar">
+      <button type="button" id="back-btn" class="icon-btn" aria-label="Back"></button>
+      <button type="button" id="sess-title" class="title" aria-label="Session options">Session</button>
+      <button type="button" id="agents-chip" class="chip" hidden></button>
+      <span class="dot" id="sess-dot" aria-hidden="true"></span>
+      <button type="button" id="sess-menu" class="icon-btn" aria-label="Session options"></button>
+    </header>
+    <div id="approvals" class="approvals" hidden></div>
+    <main class="scroll" id="log" aria-live="polite"></main>
+    <button type="button" id="jump" class="jump" hidden aria-label="Jump to latest"></button>
+  </section>
+  <!-- planner -->
+  <section id="v-plan" class="view" aria-label="Planner" hidden>
+    <header class="bar">
+      <button type="button" id="plan-back" class="icon-btn" aria-label="Back"></button>
+      <h2 class="title static">Planner</h2>
+    </header>
+    <iframe id="plan-frame" title="mach12 planner"></iframe>
+  </section>
+  <!-- dock: composer -->
+  <footer id="dock" class="dock">
+    <div id="queue" class="queue" hidden></div>
+    <div id="seg" class="seg" role="tablist" aria-label="Mode"></div>
+    <div class="composer">
+      <div id="atts" class="atts" hidden></div>
+      <textarea id="input" rows="1" placeholder="Message Judas" aria-label="Message" enterkeyhint="enter" autocapitalize="sentences"></textarea>
+      <div class="crow">
+        <button type="button" id="attach" class="tool" aria-label="Attach a file"></button>
+        <button type="button" id="folder" class="tool wide" hidden></button>
+        <span class="grow"></span>
+        <button type="button" id="send" class="send" aria-label="Send"></button>
+      </div>
+      <input type="file" id="file" multiple hidden>
+    </div>
+  </footer>
+  <div id="sheet-bg" class="sheet-bg" hidden></div>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true" hidden></div>
+  <div id="offline" class="offline" hidden role="alert">
+    <div class="off-card">
+      <span class="coin big" aria-hidden="true">Ag</span>
+      <h2>Judas is not reachable</h2>
+      <p id="off-msg">The server did not answer. Check that Tailscale is connected and Judas is running on the desktop.</p>
+      <button type="button" id="retry" class="primary">Retry</button>
+      <p class="dim" id="off-auto"></p>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</div>
+<script src="/theme.js"></script>
+<script src="/m/m.js"></script>
+</body>
+</html>

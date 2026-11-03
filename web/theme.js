@@ -1,6 +1,6 @@
 /* Theme broadcast: keeps framed tools (Tools tab, Learn visual tutor) in the same theme as the app.
    Protocol in docs/THEMES.md. A framed page gets ?judas_theme=<name>&judas_origin=<this origin> in its URL and,
-   on every theme change and once after it loads, a postMessage {type:"judas-theme", name, dark, vars} sent to
+   on every theme change and once after it loads, a postMessage {type:"judas-theme", name, dark, vars, fonts_css} sent to
    the frame's exact origin (never "*"). Self-contained; app.js and tools.js call window.JudasTheme. */
 (function () {
   "use strict";
@@ -30,7 +30,10 @@
     themeData(current).then(function (t) {
       var w = f.el.contentWindow;
       if (!w) return;
-      w.postMessage({ type: "judas-theme", name: t.name, dark: !!t.dark, vars: t.vars || {} }, f.origin);
+      var vars = Object.assign({}, t.vars || {}), F = window.JudasFonts;
+      if (F) Object.assign(vars, F.overrides());   // the user's font choice wins over the theme's fonts
+      w.postMessage({ type: "judas-theme", name: t.name, dark: !!t.dark, vars: vars,
+                      fonts_css: F ? F.cssUrl() : undefined }, f.origin);
     }, function () { /* theme unknown: nothing to send */ });
   }
 
@@ -38,6 +41,8 @@
     name: function () { return current; },
     /* called by app.js whenever the skin changes (and once at boot) */
     set: function (name) { current = name || null; live().forEach(post); },
+    /* re-send to every framed tool (the font choice changed) */
+    refresh: function () { live().forEach(post); },
     /* url with the theme params added, for a frame's src */
     decorate: function (url) {
       try {

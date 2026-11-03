@@ -25,15 +25,23 @@
 #include <thread>
 
 #include "core/json.h"
+#include "core/skin.h"
 #include "cpp-httplib/httplib.h"
 #include "learning/learn.h"
+#include "tui/approvals.h"
 #include "tui/attach.h"
 #include "tui/commands.h"
 #include "tui/input.h"
 #include "tui/layout.h"
+#include "tui/snapshots.h"
 #include "tui/sprites.h"
+#include "tui/team.h"
+#include "tui/theme.h"
 #include "tui/text.h"
 #include "tui/view.h"
+#ifdef JUDAS_TUI_PLANNER
+#include "tui_planner.h"
+#endif
 
 namespace judas {
 namespace {
@@ -151,6 +159,7 @@ void fcntl_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK
 struct Reply {
     int status = 0;
     json body;
+    std::string raw;  // the response body as sent (plain-text endpoints such as a snapshot diff)
 };
 
 struct Api {
@@ -167,6 +176,7 @@ struct Api {
         Reply out;
         if (!r) return out;
         out.status = r->status;
+        out.raw = r->body;
         auto j = json::parse(r->body, nullptr, false);
         out.body = j.is_discarded() ? json::object() : j;
         return out;
@@ -181,6 +191,7 @@ struct Api {
         Reply out;
         if (!r) return out;
         out.status = r->status;
+        out.raw = r->body;
         auto j = json::parse(r->body, nullptr, false);
         out.body = j.is_discarded() ? json::object() : j;
         return out;
@@ -249,6 +260,11 @@ struct App {
     std::shared_ptr<Net> net = std::make_shared<Net>();
     Palette pal;
     Stream stream;
+    ApprovalQueue appr;                 // pending approvals for this session (src/tui/approvals.h)
+    std::string appr_announced;         // id of the request already printed
+    std::vector<std::string> appr_body; // full body rows of the current request, for the pager
+    bool appr_viewing = false;
+    size_t appr_pos = 0;
     Editor ed;
     History hist;
     KeyDecoder dec;
@@ -274,12 +290,23 @@ struct App {
     Menu picker;
     std::string picker_kind;
     int wake_r = -1, wake_w = -1;
+    // Swarm team view: /team watch keeps a live block in the live area; /cancel-agent asks y/n
+    bool team_watch = false, watch_dirty = false;
+    TeamView watch_view;
+    double watch_fetched = 0;
+    std::string cancel_agent, cancel_label;
     termios orig{};
     bool raw = false;
+    // snapshots, revert confirmation, diff pager, theme (tui/snapshots.cpp, tui/theme.cpp)
+    ThemeLook look;
+    std::string theme_name, term_bg, revert_id;
+    bool revert_to = false;
+    std::vector<std::string> pager;
+    size_t pager_pos = 0;
 
     App(const Config & c, const TuiOptions & o)
         : cfg(c), opts(o), api{c.server.port}, pal(Palette::from_skin(std::getenv("JUDAS_SKIN") ? std::getenv("JUDAS_SKIN") : "judas")),
-          stream(pal, 80), hist(expand_home("~/.local/share/judas/tui_history")) {}
+          stream(pal, 80), hist(expand_home("~/.local/share/judas/tui_history")) { init_theme(); }
 
     // ---- terminal -------------------------------------------------------------------------------------------
     void out(const std::string & s) {
@@ -335,7 +362,7 @@ struct App {
 
     Menu current_menu() {
         if (picker.active()) { Menu m = picker; m.sel = std::clamp(menu_sel, 0, (int) m.items.size() - 1); return m; }
-        if (stream.approval) return Menu();
+        if (appr.current() || !cancel_agent.empty() || !revert_id.empty() || !pager.empty()) return Menu();
         MenuContext mc;
         mc.cwd = cwd;
         mc.models = models;
@@ -370,9 +397,13 @@ struct App {
         BoxView box = render_input_box(ed, cols - 1, pal, "Message Judas  (/ commands, ! shell, @ files)",
                                        !ed.text.empty() && ed.text[0] == '!', 8);
         std::vector<std::string> below;
-        if (menu.active()) below = render_menu(menu, cols - 1, pal, 8);
-        else if (stream.approval) below.push_back(pal.warn + std::string("  Allow ") + truncate_width(one_line(stream.approval->what), cols - 40) +
-                                                   "?  [y] yes  [n] no  [a] always" + pal.reset);
+        // priority: pending approval, /cancel-agent y/n, revert y/n, snapshot pager, menu
+        if (appr.current())
+            below.push_back(approval_prompt(pal, appr.size() - 1, appr_viewing, appr_pos, appr_body.size()));
+        else if (!cancel_agent.empty()) below.push_back(pal.warn + std::string("  Cancel ") + truncate_width(cancel_label, cols - 30) + "?  [y] yes  [n] no" + pal.reset);
+        else if (!revert_id.empty()) below.push_back(pal.warn + std::string("  Revert ") + revert_id + (revert_to ? " and everything after it" : "") + "?  [y] yes  [any other key] cancel" + pal.reset);
+        else if (!pager.empty()) below.push_back(pal.dim + std::string("  -- ") + std::to_string(pager.size() - pager_pos) + " more lines: Enter or space for the next page, q to stop --" + pal.reset);
+        else if (menu.active()) below = render_menu(menu, cols - 1, pal, 8);
         else if (!flash.empty() && now_s() < flash_until) below.push_back(pal.warn + std::string(" ") + flash + pal.reset);
         else below.push_back(status_row());
         auto chips = render_chip_rows(pending, cols - 1, pal);
@@ -381,6 +412,11 @@ struct App {
         int reserve = (int) box.rows.size() + (int) below.size() + (int) queued.size() + (int) chips.size() + 1 + panel_n;
         auto live = stream.live(spin, turn_start > 0 ? now_s() - turn_start : 0);
         int room = std::max(1, rows - reserve - 1);
+        if (team_watch) {
+            auto wr = watch_rows(room);
+            for (auto & l : wr) rowsv.push_back(l);
+            room = std::max(1, room - (int) wr.size());
+        }
         if ((int) live.size() > room) live.erase(live.begin(), live.end() - room);
         for (auto & l : live) rowsv.push_back(l);
         for (auto & q : queued) rowsv.push_back(pal.dim + std::string("  queued: ") + truncate_width(one_line(q.text.empty() ? "(attachments)" : q.text), cols - 14) + pal.reset);
@@ -572,6 +608,7 @@ struct App {
         stop_follow();
         sid.clear();
         stream.reset();
+        appr.clear();
         queued.clear();
         turn_start = 0;
         say("new session (created with your first message)");
@@ -593,6 +630,7 @@ struct App {
         if (r.status != 200) { say("could not open session: " + err_text(r), 'e'); return false; }
         stop_follow();
         stream.reset();
+        appr.clear();
         queued.clear();
         sid = id;
         const json & s = r.body["session"];
@@ -615,6 +653,8 @@ struct App {
             }
             start_follow(t.value("events_head", 0LL));
         }
+        appr_refresh();
+        appr_announce();
         return true;
     }
 
@@ -652,6 +692,8 @@ struct App {
         say("  ! cmd runs a shell command locally   @path completes files   Tab completes the menu");
         say("Attachments: /attach path, /screenshot [region], /paste (clipboard), /detach [n]; dropping a file into the terminal attaches it.");
         say("  Pending attachments show above the input and are sent with the next message (the text may be empty).");
+        say("Snapshots: /snapshots [N] lists recent edits, /snapshots show ID prints a diff, /revert ID [--to] undoes one (asks y first).");
+        say("Themes: /theme picks a color theme live (kept in ~/.config/judas/tui.toml); light themes change text colors only.");
         say("Companions: /mascot toggles the pixel companions (terminals at least 100 columns by 30 rows).");
         say("Select and copy with the mouse as usual; /copy copies the last reply (OSC 52, wl-copy as fallback).");
     }
@@ -730,6 +772,105 @@ struct App {
         }
     }
 
+    // ---- Swarm team view (src/tui/team.h) -----------------------------------------------------------------------
+    bool fetch_team(TeamView & v) {
+        if (sid.empty()) { say("no session yet"); return false; }
+        auto r = api.get("/api/sessions/" + sid + "/team");
+        if (r.status != 200) { say("team: " + err_text(r), 'e'); return false; }
+        v = parse_team(r.body);
+        return true;
+    }
+    std::vector<std::string> watch_rows(int room) {
+        auto rowsv = render_team(watch_view, pal, cols - 1);
+        std::vector<std::string> o;
+        o.push_back(pal.dim + std::string("  team watch  (Esc to stop)") + pal.reset);
+        for (auto & r : rowsv) o.push_back(r);
+        size_t cap = (size_t) std::max(4, room - 3);
+        if (o.size() > cap) { o.resize(cap - 1); o.push_back(pal.dim + std::string("   ... more rows than fit; /team prints all") + pal.reset); }
+        return o;
+    }
+    void stop_team_watch() {
+        if (!team_watch) return;
+        team_watch = false;
+        stream.commit(render_team(watch_view, pal, cols - 1));
+        say("team watch stopped");
+    }
+    void team_event(const json & e) {
+        if (auto note = handoff_note(e)) {
+            if (mode == "swarm" || team_watch) say("  " + *note);
+        }
+        std::string t = jstr(e, "type");
+        if (team_watch && (t == "activity" || t == "team" || t == "spawned" || t == "done")) watch_dirty = true;
+    }
+    void team_tick() {
+        if (!team_watch) return;
+        if (!stream.running()) { stop_team_watch(); return; }
+        double t = now_s();
+        if ((watch_dirty && t - watch_fetched >= 0.4) || t - watch_fetched >= 2.0) {
+            auto r = api.get("/api/sessions/" + sid + "/team");
+            if (r.status == 200) { watch_view = parse_team(r.body); }
+            watch_fetched = t;
+            watch_dirty = false;
+        }
+    }
+    void confirm_cancel_agent(bool yes) {
+        std::string id = cancel_agent, label = cancel_label;
+        cancel_agent.clear();
+        cancel_label.clear();
+        if (!yes) { say("cancel-agent: not cancelled"); return; }
+        auto r = api.post("/api/sessions/" + sid + "/agents/" + id + "/cancel");
+        say(r.status == 200 ? "cancelled " + label : "cancel-agent: " + err_text(r), r.status == 200 ? 'd' : 'e');
+    }
+    void team_cmd(const Parsed & p) {
+        const std::string & n = p.name;
+        if (n == "team") {
+            if (p.arg == "watch") {
+                if (team_watch) { stop_team_watch(); return; }
+                if (!fetch_team(watch_view)) return;
+                if (!stream.running()) {
+                    say("no turn is running; here is the team once (/team watch follows a running turn)");
+                    stream.commit(render_team(watch_view, pal, cols - 1));
+                    return;
+                }
+                team_watch = true;
+                watch_fetched = now_s();
+                return;
+            }
+            if (!p.arg.empty()) { say("usage: /team [watch]", 'w'); return; }
+            TeamView v;
+            if (!fetch_team(v)) return;
+            stream.commit(render_team(v, pal, cols - 1));
+            return;
+        }
+        std::string key;
+        size_t num = 0;
+        split_key_arg(p.arg, key, num);
+        if (key.empty()) { say("usage: /" + n + " N|copy" + (n == "read" ? " [chars]" : "") + "   (N is the row number from /team)", 'w'); return; }
+        TeamView v;
+        if (!fetch_team(v)) return;
+        const TeamRow * r = find_row(v, key);
+        if (!r || r->agent.empty()) { say(r ? "that copy has no agent yet" : "no such agent: " + key + "  (see /team)", 'w'); return; }
+        std::string label = r->copy.empty() ? r->agent : r->copy;
+        if (n == "read") {
+            std::string text = agent_output_text(*r, num ? num : 4000);
+            if (text.empty()) { say(label + " has no output yet"); return; }
+            say(label + " (" + team_word(r->activity) + "):", 'n');
+            size_t pos = 0;
+            while (pos <= text.size()) {
+                size_t nl = text.find('\n', pos);
+                stream.commit({"  " + text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos)});
+                if (nl == std::string::npos) break;
+                pos = nl + 1;
+            }
+        } else if (n == "cancel-agent") {
+            cancel_agent = r->agent;
+            cancel_label = label;
+        } else {
+            auto rep = api.post("/api/sessions/" + sid + "/agents/" + r->agent + "/" + n);
+            say(rep.status == 200 ? (n == "pause" ? "paused " : "resumed ") + label : n + ": " + err_text(rep), rep.status == 200 ? 'd' : 'e');
+        }
+    }
+
     void show_state() {
         auto r = api.get("/api/state");
         if (r.status != 200) { say("daemon: " + err_text(r), 'e'); return; }
@@ -804,6 +945,149 @@ struct App {
         }
     }
 
+
+    // ---- theme ----------------------------------------------------------------------------------------------
+    void init_theme() {
+        term_bg = terminal_bg_from_colorfgbg(std::getenv("COLORFGBG"));
+        auto skins = load_skins();
+        std::string want = load_theme_pref(tui_prefs_path());
+        if (want.empty() && std::getenv("JUDAS_SKIN")) want = std::getenv("JUDAS_SKIN");
+        theme_name = resolve_theme(skins, want);
+        if (theme_name.empty()) theme_name = "judas";
+        look = look_for(skin_by_name(theme_name), term_bg);
+        pal = look.pal;
+        stream.set_palette(pal);
+    }
+
+    void apply_theme(const std::string & name) {
+        Skin sk = skin_by_name(name);
+        look = look_for(sk, term_bg);
+        pal = look.pal;
+        stream.set_palette(pal);
+        theme_name = sk.name;
+        bool saved = save_theme_pref(tui_prefs_path(), sk.name);
+        say("theme: " + sk.label + (sk.dark ? " (dark)" : " (light)") + (saved ? ", saved to " + tui_prefs_path() : "; could not save " + tui_prefs_path()), saved ? 'd' : 'w');
+        if (!look.warning.empty()) say(look.warning, 'w');
+    }
+
+    void theme_cmd(const std::string & arg) {
+        auto skins = load_skins();
+        if (arg == "sync") {
+            say("/theme sync is not available: the web app keeps its theme choice in the browser, and the server only reports the JUDAS_SKIN default (GET /api/skins/current).", 'w');
+            return;
+        }
+        if (!arg.empty()) {
+            std::string n = resolve_theme(skins, arg);
+            if (n.empty()) { say("no theme matches \"" + arg + "\"; /theme lists them", 'w'); return; }
+            apply_theme(n);
+            return;
+        }
+        Menu m;
+        m.kind = Menu::Picker;
+        int cur = 0;
+        for (auto & t : list_themes(skins)) {
+            if (t.name == theme_name) cur = (int) m.items.size();
+            m.items.push_back({t.name, t.name + (t.name == theme_name ? "  (current)" : ""), (t.dark ? "dark" : "light") + std::string("  ") + t.label});
+        }
+        picker = m;
+        picker_kind = "theme";
+        menu_sel = cur;
+    }
+
+    // ---- snapshots ------------------------------------------------------------------------------------------
+    // The current session's snapshots, or (no session yet) those touching files under the working folder.
+    std::vector<SnapInfo> fetch_snaps(size_t limit, bool all, std::string * err) {
+        std::string path = "/api/snapshots?limit=" + std::to_string(sid.empty() || all ? 500 : limit * 2 + 50);
+        if (!sid.empty() && !all) path += "&session=" + sid;
+        auto r = api.get(path);
+        if (r.status != 200) { *err = err_text(r); return {}; }
+        auto v = parse_snapshots(r.body["snapshots"]);
+        if (sid.empty() && !all) v = in_folder(v, cwd);
+        return v;
+    }
+    long long wall_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    bool pick_snap(const std::string & q, SnapInfo & out) {
+        std::string err;
+        auto v = fetch_snaps(200, false, &err);
+        std::string id = resolve_snapshot_id(v, q);
+        if (id.empty()) { v = fetch_snaps(200, true, &err); id = resolve_snapshot_id(v, q); }
+        if (!err.empty() && id.empty()) { say("snapshots: " + err, 'e'); return false; }
+        if (id.empty()) { say("no single snapshot matches \"" + q + "\"; /snapshots lists them", 'w'); return false; }
+        for (auto & s : v) if (s.id == id) { out = s; return true; }
+        return false;
+    }
+
+    void snapshots_cmd(const std::string & arg) {
+        if (arg.rfind("show", 0) == 0 && (arg.size() == 4 || arg[4] == ' ')) {
+            std::string q = arg.size() > 4 ? arg.substr(5) : "";
+            while (!q.empty() && q.front() == ' ') q.erase(q.begin());
+            if (q.empty()) { say("usage: /snapshots show ID", 'w'); return; }
+            SnapInfo s;
+            if (!pick_snap(q, s)) return;
+            auto r = api.get("/api/snapshots/" + s.id + "/diff");
+            if (r.status != 200) { say("diff: " + err_text(r), 'e'); return; }
+            stream.commit({"", pal.accent + pal.bold + std::string("Snapshot ") + pal.reset + pal.text + s.id + pal.reset + pal.dim + "  " + truncate_width(one_line(s.label), cols - 30) + pal.reset});
+            if (r.raw.empty()) { say("no differences: the files already match this snapshot's before-state (reverted or unchanged)"); return; }
+            pager = render_diff(r.raw, cols - 1, look);
+            pager_pos = 0;
+            pager_next();
+            return;
+        }
+        int n = 10;
+        if (!arg.empty()) {
+            n = std::atoi(arg.c_str());
+            if (n < 1) { say("usage: /snapshots [N]  or  /snapshots show ID", 'w'); return; }
+            n = std::min(n, 40);
+        }
+        std::string err;
+        auto v = fetch_snaps((size_t) n, false, &err);
+        if (!err.empty()) { say("snapshots: " + err, 'e'); return; }
+        if ((int) v.size() > n) v.resize((size_t) n);
+        for (auto & s : v) {
+            auto r = api.get("/api/snapshots/" + s.id + "/diff");
+            if (r.status == 200) { DiffStat st = diff_stat(r.raw); s.added = st.added; s.removed = st.removed; }
+        }
+        stream.commit(render_snapshot_list(v, wall_ms(), cols - 1, pal, sid.empty() ? "folder " + cwd : "session " + sid.substr(0, 8)));
+    }
+
+    // Prints the next page of the pending diff; keeps the pager open while rows remain.
+    void pager_next() {
+        size_t page = (size_t) std::max(5, rows - 6), next = 0;
+        stream.commit(page_slice(pager, pager_pos, page, &next));
+        pager_pos = next;
+        if (pager_pos >= pager.size()) { pager.clear(); pager_pos = 0; }
+    }
+
+    void revert_cmd(const std::string & arg) {
+        std::string q = arg;
+        bool to = false;
+        size_t k = q.find("--to");
+        if (k != std::string::npos) { to = true; q.erase(k, 4); }
+        while (!q.empty() && q.back() == ' ') q.pop_back();
+        while (!q.empty() && q.front() == ' ') q.erase(q.begin());
+        if (q.empty()) { say("usage: /revert ID [--to]   (ids: /snapshots)", 'w'); return; }
+        SnapInfo s;
+        if (!pick_snap(q, s)) return;
+        auto r = api.get("/api/snapshots/" + s.id + "/diff");
+        DiffStat st = r.status == 200 ? diff_stat(r.raw) : DiffStat();
+        stream.commit(render_revert_preview(s, st, to, cols - 1, pal));
+        if (stream.running()) say("  a turn is running; edits it makes after this are not covered by the revert", 'w');
+        revert_id = s.id;
+        revert_to = to;
+    }
+
+    void answer_revert(bool yes) {
+        std::string id = revert_id;
+        bool to = revert_to;
+        revert_id.clear();
+        if (!yes) { say("revert cancelled"); return; }
+        auto r = api.post("/api/snapshots/" + id + "/revert", to ? json{{"to", true}} : json::object());
+        if (r.status != 200) { say("revert: " + err_text(r), 'e'); return; }
+        stream.commit(render_revert_result(r.body, cols - 1, pal));
+    }
+
     void run_shell(const std::string & cmdline) {
         say("$ " + cmdline, 'w');
         std::string full = "cd " + sh_quote(cwd) + " && timeout 120 sh -c " + sh_quote(cmdline) + " </dev/null 2>&1";
@@ -826,6 +1110,26 @@ struct App {
         if (WIFEXITED(rc) && WEXITSTATUS(rc) != 0) say("exit status " + std::to_string(WEXITSTATUS(rc)), 'w');
     }
 
+#ifdef JUDAS_TUI_PLANNER
+    planner::Get planner_get() {
+        return [this](const std::string & path) { auto r = api.get(path); return std::make_pair(r.status, r.body); };
+    }
+    // Show the day, then start a chat turn asking the lead to plan it (a new chat session if this one is not chat or cowork).
+    void plan_day(const std::string & arg) {
+        std::string date, wish;
+        planner::split_plan_arg(arg, planner::today_local(), date, wish);
+        bool ok = false;
+        auto rows = planner::day_rows_for_plan(date, planner_get(), pal, cols, &ok);
+        stream.commit(rows);
+        if (!ok) return;
+        if (mode != "chat" && mode != "cowork") {
+            if (!sid.empty()) new_session();
+            mode = "chat";
+        }
+        send_text(planner::plan_label(date, wish), planner::plan_prompt(date, wish));
+    }
+#endif
+
     void run_slash(const Parsed & p) {
         const std::string & n = p.name;
         if (!find_command(n)) { say("unknown command /" + n + "  (try /help)", 'w'); return; }
@@ -833,6 +1137,7 @@ struct App {
         else if (n == "new") new_session();
         else if (n == "sessions") list_sessions();
         else if (n == "resume") {
+            if (!p.arg.empty()) { team_cmd(p); return; }   // /resume N|copy: a paused agent
             if (sid.empty()) { say("no session to resume", 'w'); return; }
             auto r = api.post("/api/sessions/" + sid + "/resume");
             if (r.status != 200) { say("resume: " + err_text(r), 'w'); return; }
@@ -855,6 +1160,8 @@ struct App {
             say("mode: " + mode);
         } else if (n == "model") list_models(p.arg);
         else if (n == "agents") show_agents();
+        else if (n == "approvals") show_approvals();
+        else if (n == "team" || n == "pause" || n == "cancel-agent" || n == "read") team_cmd(p);
         else if (n == "plan") {
             if (stream.plan().empty()) { say("no plan yet (the agent writes one with update_plan on bigger tasks)"); return; }
             say("plan:", 'n');
@@ -886,6 +1193,9 @@ struct App {
             memory_search(p.arg);
         } else if (n == "learn") send_text("/learn" + (p.arg.empty() ? "" : " " + p.arg), build_learn_prompt(p.arg));
         else if (n == "coach") coach_cmd(p.arg);
+        else if (n == "snapshots") snapshots_cmd(p.arg);
+        else if (n == "revert") revert_cmd(p.arg);
+        else if (n == "theme") theme_cmd(p.arg);
         else if (n == "attach") do_attach(p.arg);
         else if (n == "screenshot") do_screenshot(p.arg);
         else if (n == "paste") do_paste_clipboard();
@@ -894,6 +1204,12 @@ struct App {
             if (!comp.ready()) { say("no companions available (the daemon did not serve /sprites.json)", 'w'); return; }
             mascot_on = !mascot_on;
             say(mascot_on ? (mascot_visible() ? "companions on" : "companions on (they show in terminals of at least 100 columns by 30 rows)") : "companions off");
+#ifdef JUDAS_TUI_PLANNER
+        } else if (n == "day" || n == "week") {
+            stream.commit(planner::run(n, p.arg, planner_get(), pal, cols));
+        } else if (planner::is_plan_command(n)) {
+            plan_day(p.arg);
+#endif
         } else if (n == "quit") quit = true;
     }
 
@@ -956,22 +1272,98 @@ struct App {
         else set_flash("press Ctrl+C again to quit");
     }
 
-    void answer_approval(const std::string & decision) {
-        if (!stream.approval || sid.empty()) return;
-        api.post("/api/sessions/" + sid + "/approvals", {{"id", stream.approval->id}, {"decision", decision}});
-        say(std::string("  ") + (decision == "no" ? "denied: " : decision == "always" ? "allowed (always): " : "allowed: ") +
-            truncate_width(one_line(stream.approval->what), cols - 24));
-        stream.approval.reset();
+    // ---- approvals (src/tui/approvals.h; protocol in docs/API.md, Approvals) -------------------------------
+    // Print the request at the front of the queue once; later ones print when they reach the front.
+    void appr_announce() {
+        const ApprovalReq * c = appr.current();
+        if (!c) { appr_announced.clear(); appr_viewing = false; return; }
+        if (c->id == appr_announced) return;
+        appr_announced = c->id;
+        appr_viewing = false;
+        appr_pos = 0;
+        appr_body = approval_body_rows(*c, pal, cols - 1);
+        stream.commit(approval_rows(*c, pal, cols - 1));
+    }
+    void appr_refresh() {
+        if (sid.empty()) { appr.clear(); return; }
+        auto r = api.get("/api/sessions/" + sid + "/approvals");
+        if (r.status != 200 || !r.body.contains("approvals") || !r.body["approvals"].is_array()) return;
+        std::vector<ApprovalReq> v;
+        for (auto & j : r.body["approvals"]) v.push_back(approval_from_json(j));
+        appr.sync(v);
+    }
+    void appr_event(const json & e) {
+        const std::string type = jstr(e, "type");
+        if (type == "approval_request") appr.add(approval_from_json(e));
+        else if (type == "approval_resolved") {
+            const json d = e.contains("data") && e["data"].is_object() ? e["data"] : e;
+            if (appr.remove(jstr(d, "id"))) {
+                bool yes = d.contains("approved") && d["approved"].is_boolean() && d["approved"].get<bool>();
+                std::string by = jstr(d, "by");
+                say(std::string("  approval ") + (yes ? "approved" : "declined") + (by.empty() || by == "user" ? " elsewhere" : " (" + by + ")"), 'd');
+            }
+        } else if (type == "gap") appr_refresh();
+    }
+    void appr_answer(bool yes) {
+        const ApprovalReq * c = appr.current();
+        if (!c || sid.empty()) return;
+        ApprovalReq req = *c;
+        auto r = api.post("/api/sessions/" + sid + "/approvals/" + req.id, {{"approve", yes}});
+        if (r.status != 200 && r.status != 404 && r.status != 409) { set_flash("could not send the answer: " + err_text(r), 4); return; }
+        appr.remove(req.id);
+        if (r.status == 200) {
+            std::string first = req.what.substr(0, req.what.find('\n'));
+            stream.commit({"  " + (yes ? pal.ok : pal.err) + (yes ? "approved: " : "denied: ") + pal.reset +
+                           truncate_width(one_line(first), cols - 16)});
+        } else {
+            say("  that approval was already resolved", 'd');
+        }
+    }
+    void appr_key(const Key & k) {
+        switch (approval_key(appr_viewing, k)) {
+            case ApprovalAct::Approve: return appr_answer(true);
+            case ApprovalAct::Deny: return appr_answer(false);
+            case ApprovalAct::StopView: appr_viewing = false; return;
+            case ApprovalAct::ViewMore: {
+                if (appr_body.empty()) { say("  (no more text)", 'd'); return; }
+                if (appr_viewing && appr_pos >= appr_body.size()) { appr_viewing = false; say("  (end of text)", 'd'); return; }
+                appr_viewing = true;
+                size_t next = appr_pos;
+                stream.commit(approval_page(appr_body, appr_pos, std::max(5, rows - 8), &next));
+                appr_pos = next;
+                if (appr_pos >= appr_body.size()) { appr_viewing = false; say("  (end of text)", 'd'); }
+                return;
+            }
+            default: return;   // typing is paused while a request waits
+        }
+    }
+    void show_approvals() {
+        appr_refresh();
+        appr_announce();
+        stream.commit(approval_list_rows(appr, pal, cols - 1));
     }
 
     void on_key(const Key & k) {
-        // approval prompt first
-        if (stream.approval) {
-            if (k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "y" || k.text == "Y")) return answer_approval("yes");
-            if (k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "n" || k.text == "N")) return answer_approval("no");
-            if (k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "a" || k.text == "A")) return answer_approval("always");
-            if (k.type == Key::Enter) return answer_approval("yes");
-            if (k.type == Key::Esc) return answer_approval("no");
+        // key priority: a pending approval, then /cancel-agent y/n, then revert y/n, then the snapshot pager
+        // (typing is paused while a request waits; Ctrl+C still cancels the turn, which declines it)
+        if (appr.current() && !k.is_ctrl('c')) return appr_key(k);
+        if (!cancel_agent.empty()) {   // /cancel-agent confirmation
+            bool yes = k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "y" || k.text == "Y");
+            bool no = (k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "n" || k.text == "N")) || k.type == Key::Esc;
+            if (yes || no) confirm_cancel_agent(yes);
+            return;
+        }
+        // revert confirmation: only an explicit y reverts; every other key cancels
+        if (!revert_id.empty()) {
+            answer_revert(k.type == Key::Char && !k.ctrl && !k.alt && (k.text == "y" || k.text == "Y"));
+            return;
+        }
+        // snapshot diff pager
+        if (!pager.empty()) {
+            bool more = k.type == Key::Enter || k.type == Key::Down || (k.type == Key::Char && !k.ctrl && !k.alt && k.text == " ");
+            if (more) pager_next();
+            else { pager.clear(); pager_pos = 0; }
+            return;
         }
         Menu menu = current_menu();
         const bool picking = picker.active();
@@ -1024,6 +1416,7 @@ struct App {
                     picker = Menu();
                     if (kind == "session") open_session(it.value);
                     else if (kind == "model") switch_model(it.value);
+                    else if (kind == "theme") apply_theme(it.value);
                     break;
                 }
                 if (k.shift || k.alt) { ed.newline(); break; }
@@ -1071,6 +1464,7 @@ struct App {
                 double t = now_s();
                 if (picking) { picker = Menu(); break; }
                 if (menu.active()) { dismissed = true; dismissed_text = ed.text; break; }
+                if (team_watch) { stop_team_watch(); break; }
                 if (stream.running()) { interrupt(); break; }
                 if (!ed.empty()) {
                     if (t - last_esc < 1.0) ed.clear(); else set_flash("press Esc again to clear the input", 1.0);
@@ -1088,7 +1482,15 @@ struct App {
         std::deque<json> evs;
         { std::lock_guard<std::mutex> lk(net->mu); evs.swap(net->events); }
         bool was = stream.running();
-        for (auto & e : evs) { comp.on_event(e, now_s()); stream.on_event(e); }
+        for (auto & e : evs) {
+            comp.on_event(e, now_s());
+            const std::string et = jstr(e, "type");
+            if (et == "approval_request" || et == "approval_resolved" || et == "gap") appr_event(e);
+            if (et != "approval_request" && et != "approval_resolved") stream.on_event(e);
+            team_event(e);
+        }
+        appr_announce();
+        team_tick();
         if (!was && stream.running()) turn_start = now_s();
         if (was && !stream.running() && !queued.empty()) {
             Queued next = queued.front();

@@ -38,6 +38,7 @@ public:
     Stream(Palette pal, int width);
     void set_width(int w) { width_ = w < 20 ? 20 : w; }
     int width() const { return width_; }
+    void set_palette(const Palette & p) { pal_ = p; }  // live theme switch: new output uses it
     void set_verbose(bool v) { verbose_ = v; }
     bool verbose() const { return verbose_; }
     void reset();                                   // new or switched session: drop all state

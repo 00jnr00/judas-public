@@ -3,11 +3,17 @@
 #include "agent/teams.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
 
 #include <toml++/toml.hpp>
+
+#include "core/config.h"
 
 namespace judas {
 
@@ -706,6 +712,112 @@ std::string team_map_text(const TeamSpec & s) {
         o += "\n";
     }
     return o;
+}
+
+// ---------- saved maps ----------
+
+bool team_save_name_ok(const std::string & name) {
+    if (name.empty() || name.size() > 40) return false;
+    for (char c : name)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    return true;
+}
+
+static std::string one_line(std::string t, size_t max) {
+    for (auto & c : t)
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    for (size_t p; (p = t.find("\xE2\x80\x94")) != std::string::npos;) t.replace(p, 3, "-");   // no em dashes
+    t = trim_ws(t);
+    if (t.size() > max) {
+        t.resize(max);
+        while (!t.empty() && ((unsigned char) t.back() & 0xC0) == 0x80) t.pop_back();
+        if (!t.empty() && ((unsigned char) t.back() & 0x80)) t.pop_back();
+        t += "...";
+    }
+    return t;
+}
+
+std::string team_save_text(const TeamSpec & s, const TeamSaveInfo & info) {
+    std::string first = s.brief;
+    if (auto nl = first.find('\n'); nl != std::string::npos) first.resize(nl);
+    std::string title = one_line(first.empty() ? s.name : first, 80);
+    std::ostringstream o;
+    o << "# " << title << "\n";
+    o << "# saved: " << (info.date.empty() ? "unknown" : info.date);
+    if (!info.session.empty()) o << " session " << one_line(info.session, 60);
+    o << "\n";
+    o << "# outcome: " << (info.note.empty() ? "not recorded" : one_line(info.note, 300)) << "\n";
+    char w[32];
+    std::snprintf(w, sizeof w, "%.0f", info.wall_s);
+    o << "# stats: " << info.agents << " agents, " << info.tokens << " tokens, wall " << w << " s, " << info.failed
+      << " failed copies\n";
+    o << team_map_text(s);
+    return o.str();
+}
+
+std::string team_dir_resolve(const std::string & configured) {
+    if (const char * e = std::getenv("JUDAS_TEAMS_DIR"); e && *e) return e;
+    return expand_home(configured);
+}
+
+std::string team_save_file(const std::string & dir, const std::string & name, const std::string & text, bool overwrite) {
+    namespace fs = std::filesystem;
+    if (!team_save_name_ok(name)) return "the name must be 1 to 40 characters of a-z, 0-9 and - (got '" + name + "')";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) return "cannot create " + dir + ": " + ec.message();
+    fs::path p = fs::path(dir) / (name + ".map");
+    if (fs::exists(p, ec)) {
+        if (!overwrite) return p.string() + " already exists; pass overwrite: true to replace it (the old one is kept as .bak)";
+        fs::copy_file(p, fs::path(p.string() + ".bak"), fs::copy_options::overwrite_existing, ec);
+        if (ec) return "cannot keep the old map as .bak: " + ec.message();
+    }
+    fs::path tmp = fs::path(p.string() + ".tmp");
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return "cannot write " + tmp.string();
+        f << text;
+        if (!f) return "write failed for " + tmp.string();
+    }
+    fs::rename(tmp, p, ec);
+    if (ec) return "cannot move the map into place: " + ec.message();
+    return "";
+}
+
+std::vector<SavedMap> team_saved_list(const std::string & dir) {
+    namespace fs = std::filesystem;
+    std::vector<SavedMap> out;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return out;
+    for (auto & e : fs::directory_iterator(dir, ec)) {
+        std::string ext = e.path().extension().string();
+        if (ext != ".map" && ext != ".toml") continue;
+        SavedMap m;
+        m.name = e.path().stem().string();
+        if (ext == ".map") {
+            std::ifstream f(e.path());
+            int comments = 0;
+            for (std::string l; std::getline(f, l) && comments < 8;) {
+                l = trim_ws(l);
+                if (l.empty()) continue;
+                if (l[0] != '#') break;
+                comments++;
+                std::string body = trim_ws(l.substr(1));
+                if (body.rfind("saved:", 0) == 0) {
+                    std::string d = trim_ws(body.substr(6));
+                    m.date = d.substr(0, d.find(' '));
+                } else if (body.rfind("outcome:", 0) == 0) {
+                    m.outcome = trim_ws(body.substr(8));
+                } else if (body.rfind("stats:", 0) == 0) {
+                } else if (m.title.empty()) {
+                    m.title = body;
+                }
+            }
+        }
+        out.push_back(m);
+    }
+    std::sort(out.begin(), out.end(), [](const SavedMap & a, const SavedMap & b) { return a.name < b.name; });
+    return out;
 }
 
 }  // namespace judas

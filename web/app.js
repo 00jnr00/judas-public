@@ -352,10 +352,148 @@
   var turnInfo = { status: "idle", reason: "", open_items: 0 };
   var autoDefault = false; // agents.auto_resume from the daemon
   function setTurnInfo(t) {
+    if (t && Array.isArray(t.queued)) setQueue(t.queued);
     turnInfo = { status: (t && t.status) || "idle", reason: (t && t.reason) || "", open_items: (t && t.open_items) || 0 };
     if (t && typeof t.auto_resume_default === "boolean") autoDefault = t.auto_resume_default;
     renderTurnBanner();
   }
+  /* ---------- queued messages: sent while a turn runs, held by the server, sent in order when the turn ends ---------- */
+  function setQueue(list) { cur.queued = Array.isArray(list) ? list : []; renderQueue(); }
+  function queueURL(qid) { return "/api/sessions/" + encodeURIComponent(cur.id) + "/queue/" + encodeURIComponent(qid); }
+  function renderQueue() {
+    var box = $("#queue-box"), list = (cur && cur.queued) || [];
+    box.textContent = "";
+    box.hidden = !list.length;
+    if (!list.length) return;
+    box.appendChild(el("div", "qb-cap dim small", list.length + " queued, sent one by one when this turn ends"));
+    list.forEach(function (q, i) {
+      var row = el("div", "qb-item");
+      row.appendChild(el("span", "qb-n dim small", String(i + 1)));
+      var tx = el("span", "qb-text", q.text || "(attachments only)");
+      tx.title = q.text || "";
+      row.appendChild(tx);
+      var ed = el("button", "btn small ghost", "Edit"); ed.type = "button";
+      ed.setAttribute("aria-label", "Edit queued message " + (i + 1));
+      ed.onclick = function () { editQueued(row, q); };
+      var rm = el("button", "btn small ghost", "Remove"); rm.type = "button";
+      rm.setAttribute("aria-label", "Remove queued message " + (i + 1));
+      rm.onclick = function () {
+        api(queueURL(q.id), { method: "DELETE" }).then(function (t) { var r = t ? JSON.parse(t) : {}; setQueue(r.queue || cur.queued.filter(function (x) { return x.id !== q.id; })); },
+          function (e) { addNote("Could not remove the queued message: " + e.message, true); loadQueue(); });
+      };
+      row.appendChild(ed); row.appendChild(rm);
+      box.appendChild(row);
+    });
+  }
+  function editQueued(row, q) {
+    row.textContent = "";
+    var ta = el("textarea", "qb-edit"); ta.value = q.text || ""; ta.rows = 2;
+    ta.setAttribute("aria-label", "Queued message text");
+    var save = el("button", "btn small primary", "Save"); save.type = "button";
+    var no = el("button", "btn small ghost", "Cancel"); no.type = "button";
+    function done() { renderQueue(); }
+    save.onclick = function () {
+      var t = ta.value.trim();
+      if (!t) return;
+      api(queueURL(q.id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) })
+        .then(function (r) { var j = r ? JSON.parse(r) : {}; setQueue(j.queue || cur.queued); },
+          function (e) { addNote("Could not edit the queued message (it may have started): " + e.message, true); loadQueue(); });
+    };
+    no.onclick = done;
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); save.onclick(); }
+      else if (e.key === "Escape") { e.preventDefault(); done(); }
+    });
+    row.appendChild(ta); row.appendChild(save); row.appendChild(no);
+    ta.focus();
+  }
+  function loadQueue() {
+    if (!cur.id) { setQueue([]); return; }
+    var sid = cur.id;
+    getJSON("/api/sessions/" + encodeURIComponent(sid) + "/queue").then(function (r) { if (cur.id === sid) setQueue(r.queue); }, function () { /* leave it */ });
+  }
+  /* ---------- approvals: an agent waits for the user's yes; any client may answer, the first answer wins ---------- */
+  var approvalsBy = {};   // session id -> number pending (from the global feed, for the sidebar badge)
+  function curApprovals() { return cur.approvals || (cur.approvals = []); }
+  function setApprovals(list) {
+    cur.approvals = Array.isArray(list) ? list : [];
+    approvalsBy[cur.id || ""] = cur.approvals.length;
+    renderApprovals(); renderSessions();
+  }
+  function approvalURL(aid) { return "/api/sessions/" + encodeURIComponent(cur.id) + "/approvals/" + encodeURIComponent(aid); }
+  function loadApprovals() {
+    if (!cur.id) { setApprovals([]); return; }
+    var sid = cur.id;
+    getJSON("/api/sessions/" + encodeURIComponent(sid) + "/approvals").then(function (r) { if (cur.id === sid) setApprovals(r.approvals); },
+      function () { /* leave it */ });
+  }
+  function addApproval(a) {
+    if (!a || !a.id) return;
+    var l = curApprovals();
+    if (l.some(function (x) { return x.id === a.id; })) return;
+    l.push(a);
+    approvalsBy[cur.id || ""] = l.length;
+    renderApprovals(); renderSessions();
+  }
+  function dropApproval(aid) {
+    var l = curApprovals(), n = l.filter(function (x) { return x.id !== aid; });
+    if (n.length === l.length) return;
+    cur.approvals = n;
+    approvalsBy[cur.id || ""] = n.length;
+    renderApprovals(); renderSessions();
+  }
+  function answerApproval(a, yes, btns) {
+    btns.forEach(function (b) { b.disabled = true; });
+    postJSON(approvalURL(a.id), { approve: yes }).then(function () { dropApproval(a.id); }, function (e) {
+      // 404/409: someone else answered first (the TUI, another tab); the resolved event removes it, so just resync
+      if (!/already|no such/i.test(e.message)) addNote("Could not send the answer: " + e.message, true);
+      loadApprovals();
+    });
+  }
+  function diffBody(text) {
+    var pre = el("pre", "ap-body");
+    String(text || "").split("\n").forEach(function (ln, i, all) {
+      var c = ln.charAt(0) === "+" && ln.slice(0, 3) !== "+++" ? "ap-add" : ln.charAt(0) === "-" && ln.slice(0, 3) !== "---" ? "ap-del" : "";
+      var sp = el("span", c, ln);
+      pre.appendChild(sp);
+      if (i < all.length - 1) pre.appendChild(document.createTextNode("\n"));
+    });
+    return pre;
+  }
+  function renderApprovals() {
+    var box = $("#approval-box"), l = (cur && cur.approvals) || [];
+    box.textContent = "";
+    box.hidden = !l.length;
+    if (!l.length) return;
+    var a = l[0], first = String(a.what || "").split("\n")[0];
+    var card = el("div", "ap-card" + (a.strict ? " strict" : ""));
+    var hd = el("div", "ap-head");
+    hd.appendChild(el("b", "ap-tool mono", a.tool || "tool"));
+    var who = a.role ? a.role + (a.agent ? " " + a.agent : "") : (a.agent || "");
+    if (who) hd.appendChild(el("span", "dim small", who));
+    if (a.strict) hd.appendChild(el("span", "tag ap-strict", "needs your yes"));
+    if (l.length > 1) hd.appendChild(el("span", "ap-more dim small", "+" + (l.length - 1) + " waiting"));
+    card.appendChild(hd);
+    card.appendChild(el("div", "ap-what", first || "(no details)"));
+    var rest = String(a.what || "").indexOf("\n") >= 0;
+    if (rest) {
+      var det = el("details", "ap-det");
+      det.appendChild(el("summary", "", "Show details"));
+      det.appendChild(diffBody(a.what));
+      card.appendChild(det);
+    }
+    var row = el("div", "ap-btns");
+    var yes = el("button", "btn small primary", "Approve"); yes.type = "button";
+    var no = el("button", "btn small danger", "Deny"); no.type = "button";
+    yes.onclick = function () { answerApproval(a, true, [yes, no]); };
+    no.onclick = function () { answerApproval(a, false, [yes, no]); };
+    // Enter must never approve: a stray Enter in the composer cannot reach these buttons, and keydown on them is ignored
+    card.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); } });
+    row.appendChild(yes); row.appendChild(no);
+    card.appendChild(row);
+    box.appendChild(card);
+  }
+
   function renderTurnBanner() {
     var b = $("#turn-banner"), st = turnInfo.status, shown = !!cur.id && (st === "paused" || st === "error" || st === "failed");
     b.hidden = !shown;
@@ -397,10 +535,9 @@
   var running = {};         // session id -> true while a turn is running (from the global event feed)
   var cur = mkCur(null);
   var live = null; // the open session's event stream and live turn state
-  var sessFilter = "all";
   var lastUserText = "";
 
-  function mkCur(id) { return { id: id, session: null, agents: [], fileops: [], snaps: [], cps: {}, more: false, oldest: 0 }; }
+  function mkCur(id) { return { id: id, queued: [], approvals: [], session: null, agents: [], fileops: [], snaps: [], cps: {}, more: false, oldest: 0 }; }
 
   /* the mode of each session lives on the server (any device sees the same one) */
   function sessionById(id) {
@@ -520,11 +657,12 @@
     var pt = $("#panel-toggle");
     pt.hidden = m === "chat";
     pt.textContent = (sideHidden ? "Show " : "Hide ") + (m === "code" ? "changes" : "agents");
-    renderRecent(); renderSessions(); renderChanges(); renderBoard();
+    renderRecent(); renderSessions(); renderChanges(); renderBoard(); renderQueue(); renderApprovals(); updateSend();
     $("#swarm-strip").hidden = m !== "swarm";
     $("#team-area").hidden = m !== "swarm";
     if (m === "swarm") { pollSwarm(); tmEnter(); } else tmLeave();
     if (m === "learn") loadLearnVisual(); else showLearnVisual(false);
+    if (window.JudasAgentPane) JudasAgentPane.mode(m);
   }
 
   /* ---------- Learn: optional visual tutor ([learn] visual_url), embedded beside the tutor chat ---------- */
@@ -737,6 +875,14 @@
         running[ev.session] = true; renderSessions();
       } else if (ev.type === "turn.finished") {
         delete running[ev.session]; renderSessions();
+      } else if (ev.type === "approval.requested" || ev.type === "approval.resolved") {
+        if (cur.id === ev.session) {
+          if (ev.type === "approval.requested") addApproval({ id: ev.id, agent: ev.agent, tool: ev.tool, what: ev.what, strict: !!ev.strict, created_ms: ev.created_ms });
+          else dropApproval(ev.id);
+        } else {
+          approvalsBy[ev.session] = Math.max(0, (approvalsBy[ev.session] || 0) + (ev.type === "approval.requested" ? 1 : -1));
+          renderSessions();
+        }
       } else if (ev.type === "gap") {
         loadSessions();
       }
@@ -755,10 +901,10 @@
     var box = $("#sess-list");
     box.textContent = "";
     var list = sessions.filter(function (s) {
-      return sessFilter === "all" || s.id === cur.id || !knownMode(s.mode) || modeOf(s.id) === curMode;
+      return modeOf(s.id) === curMode;
     });
     if (!list.length) {
-      var p = el("p", "dim small", sessFilter === "all" ? "No sessions yet." : "No " + MODE_UI[curMode].title + " sessions yet. Start one from the message box.");
+      var p = el("p", "dim small", "No " + MODE_UI[curMode].title + " sessions yet. Start one from the message box.");
       p.style.padding = ".8em"; box.appendChild(p);
     }
     list.forEach(function (s) {
@@ -768,6 +914,7 @@
       var tt = el("span", "t", s.title || s.id);
       if (running[s.id]) { var dot = el("span", "run-dot", "● "); dot.title = "a turn is running"; tt.insertBefore(dot, tt.firstChild); }
       b.appendChild(tt);
+      if (approvalsBy[s.id]) { var ab = el("span", "tag ap-badge", "needs your yes"); ab.title = approvalsBy[s.id] + " approval(s) waiting"; tt.appendChild(ab); }
       var sub = el("span", "s");
       var m = modeOf(s.id);
       sub.appendChild(el("span", "tag mt m-" + m, MODE_UI[m].title));
@@ -790,15 +937,7 @@
       more.onclick = loadOlderSessions;
       box.appendChild(more);
     }
-    Array.prototype.forEach.call(document.querySelectorAll("#sess-filter button"), function (b) {
-      b.classList.toggle("active", b.dataset.f === sessFilter);
-      if (b.dataset.f === "mode") b.textContent = "Only " + MODE_UI[curMode].title;
-    });
   }
-  $("#sess-filter").addEventListener("click", function (e) {
-    var b = e.target.closest("button[data-f]");
-    if (b) { sessFilter = b.dataset.f; renderSessions(); }
-  });
   $("#sess-toggle").onclick = function () { $("#sess-pane").classList.toggle("open"); };
   $("#panel-toggle").onclick = function () {
     sideHidden = !sideHidden;
@@ -824,6 +963,7 @@
     $("#chat-title").textContent = "New session";
     syncSessionActions();
     tmReset("");
+    if (window.JudasAgentPane) JudasAgentPane.reset("");
     $("#cwd").value = (m === "code" || m === "swarm") ? (recents()[0] || "") : "";
     renderSessions(); renderBoard(); renderChanges();
   }
@@ -832,6 +972,7 @@
   function openSession(id) {
     stopLive();
     cur = mkCur(id);
+    if (window.JudasAgentPane) JudasAgentPane.reset(id);
     applyMode(modeOf(id));
     logEl.textContent = "";
     syncSessionActions();
@@ -853,6 +994,7 @@
       $("#cwd").value = (r.session && r.session.cwd) || "";
       var t = r.turn || {}, msgs = r.messages || [];
       setTurnInfo(t);
+      loadApprovals();
       // a turn in progress is rebuilt from its replayed events, so history stops where the turn began
       if (t.running) msgs = msgs.filter(function (m) { return m.id <= t.msg_floor; });
       cur.more = !!r.more_before; cur.oldest = firstId(r.messages || []);
@@ -860,6 +1002,7 @@
       renderBoard();
       loadSessionSnaps();
       if (curMode === "swarm") tmOpen(id, msgs);
+      if (window.JudasAgentPane) JudasAgentPane.open(id, r.messages || []);
       attachLive(id, t.running ? t.event_floor : t.events_head);
     }, function (e) { addNote("Could not load session: " + e.message, true); });
   }
@@ -1313,6 +1456,7 @@
 
   function handleEvent(ev) {
     if (!live) return;
+    if (window.JudasAgentPane) JudasAgentPane.event(ev);
     if (curMode === "swarm" && tm.sid === live.sid) tmEvent(ev);
     var d = ev.data || {}, lead = !ev.parent, a;
     if (ev.type === "gap") return; // the ring dropped older events; the history reload on turn end repairs the log
@@ -1320,6 +1464,9 @@
       if (d.summary) { var rn = addNote("review: " + d.summary, false); rn.classList.add("review-line"); }
       return;
     }
+    if (ev.type === "approval_request") { if (cur.id === ev.session) addApproval({ id: d.id, agent: ev.agent, role: ev.role, tool: d.tool, what: d.what, strict: !!d.strict, created_ms: d.created_ms }); return; }
+    if (ev.type === "approval_resolved") { if (cur.id === ev.session) dropApproval(d.id); return; }
+    if (ev.type === "queue") { if (lead && cur.id === ev.session) setQueue(d.queued); return; }
     if (lead && !live.inTurn && ev.type !== "done" && ev.type !== "status") beginTurn(ev.type === "spawned" ? d.task : "");
     switch (ev.type) {
       case "swarm":
@@ -1460,7 +1607,8 @@
   }
   function uploading() { return atts.some(function (a) { return a.state === "up"; }); }
   function updateSend() {
-    $("#send").disabled = isRunning() || uploading();
+    $("#send").disabled = uploading();
+    $("#send").textContent = isRunning() && cur.id ? "Queue" : MODE_UI[curMode].send;
     $("#send").title = uploading() ? "Wait for the uploads to finish" : "";
   }
   function renderAtts() {
@@ -1719,7 +1867,9 @@
     e.preventDefault();
     var text = input.value.trim();
     var ready = atts.filter(function (a) { return a.state === "ok"; });
-    if ((!text && !ready.length) || isRunning() || uploading()) return;
+    if ((!text && !ready.length) || uploading()) return;
+    var busy = isRunning();
+    if (busy && !cur.id) return; // the first message of a new session is still being sent
     if (atts.some(function (a) { return a.state === "err"; })) { attHint("Remove the file that failed (the x on it) to send.", true); return; }
     attHint("");
     var cwd = $("#cwd").value.trim(), mode = curMode;
@@ -1739,6 +1889,24 @@
       var id = cur.id || "new";
       body.mode = mode; // the server owns the mode; a new session is created with it
       url = "/api/sessions/" + encodeURIComponent(id) + "/messages";
+    }
+    if (busy && url === "/api/learn") { attHint("A /learn request cannot be queued; wait for the turn to end.", true); return; }
+    if (busy) {
+      // the lead is mid-turn: the server queues it and starts it when the turn ends
+      input.value = "";
+      atts = atts.filter(function (a) { return ready.indexOf(a) < 0; }); renderAtts();
+      postJSON(url, body).then(function (r) {
+        if (r.queued) { setQueue(r.queue); return; }
+        // the turn had just ended: it started right away, so draw it like a normal send
+        addUser(ready.length ? (text ? text + "\n" : "") + attMarkers(ready) : text);
+        if (live) live.echoed = true;
+        setRunning(true);
+      }).catch(function (err) {
+        addNote("Not queued: " + err.message, true);
+        input.value = text;
+        atts = ready.concat(atts); renderAtts();
+      });
+      return;
     }
     var title = (text || (ready[0] && ready[0].name) || "").slice(0, 60);
     clearEmpty();
@@ -2170,6 +2338,7 @@
     tm.sid = sid; tm.data = null; tm.agents = {}; tm.panes = {}; tm.sel = ""; tm.focus = ""; tm.pollT = null; tm.orgT = null; tm.userScrolled = false;
     tm.map = null; tm.mapKey = ""; tm.cards = {}; tm.edgeEls = {}; tm.nodeAgent = {}; tm.canvas = null; tmHidePop();
     tmCloseOverlay();
+    var sb = document.getElementById("team-save-bar"); if (sb) sb.remove();   // team-save.js bar belongs to the old session
     var g = $("#team-grid");
     if (g) {
       g.textContent = ""; g.classList.remove("has-focus");
@@ -2471,6 +2640,21 @@
     root.onblur = tmHidePop;
     return c;
   }
+  // which engine an agent really runs on: a cpu member whose swarm is off runs on the main model
+  function tmShortModel(n) {
+    n = String(n || "").split("/").pop().replace(/\.gguf$/i, "");
+    return n.length > 22 ? n.slice(0, 21) + "\u2026" : n;
+  }
+  function tmEngine(a, copy) {
+    if (!a) {
+      var pm = copy && copy.model === "cpu" ? "cpu" : "gpu";
+      return { mark: pm.toUpperCase(), cls: pm, name: "", title: "Planned on the " + pm.toUpperCase() + " (not started yet)" };
+    }
+    var name = tmShortModel(a.model_name);
+    var real = a.engine || (a.model === "cpu" && !a.cpu_fallback ? "cpu" : "gpu");
+    if (a.cpu_fallback) return { mark: "CPU>GPU", cls: "warn", name: name, title: "Meant for the CPU swarm model, which is off: running on the main model" + (a.model_name ? " (" + a.model_name + ")" : "") };
+    return { mark: real.toUpperCase(), cls: real, name: name, title: "Running " + (a.model_name || "the model") + " on the " + real.toUpperCase() };
+  }
   function tmUpdateCard(c) {
     var n = tm.map.nodes[c.key], ag = tmNodeAgent(c.key), a = ag ? tm.agents[ag] : null;
     var act = a ? tmAct(a) : "idle", isLead = c.key === "__lead";
@@ -2479,10 +2663,15 @@
     c.id.textContent = isLead ? "lead" : c.key;
     c.hd.className = "tmc-hd" + (isLead || teamLead ? " core" : "");
     var role = isLead ? "session lead" : (copy ? copy.role : (a && a.role) || "agent");
-    var model = (a && a.model) || (copy && copy.model) || "gpu";
+    // the real engine, not the spec: model_name and the engine the agent runs on come from the server
+    var eng = tmEngine(a, copy);
     c.role.textContent = "";
     c.role.appendChild(document.createTextNode(role + " "));
-    c.role.appendChild(el("span", "tmc-mark " + model, model));
+    var mk = el("span", "tmc-mark " + eng.cls, eng.mark);
+    mk.title = eng.title;
+    c.role.appendChild(mk);
+    if (eng.name) { c.role.appendChild(document.createTextNode(" ")); c.role.appendChild(el("span", "tmc-mname", eng.name)); }
+    c.role.title = eng.title;
     var pct = a && a.ctx_pct != null ? Math.round(a.ctx_pct) : null;
     c.ctx.textContent = pct == null ? "--" : pct + "%";
     c.ctx.className = "tmc-ctx " + tmCtxClass(pct);
@@ -2502,6 +2691,7 @@
   }
   function tmRenderMap() {
     var box = $("#team-map"), d = tm.data || {};
+    if (window.TeamSave) window.TeamSave.render(tm.sid, d);   // team-save.js: Save map button, Saved maps list
     if (!d.lead && !(d.teams || []).length) {
       box.textContent = ""; tm.mapKey = ""; tm.cards = {};
       box.appendChild(el("p", "dim small team-empty", "No teams yet. The lead creates them when a job needs help."));
@@ -2603,6 +2793,102 @@
     }
   }
   window.addEventListener("resize", function () { clearTimeout(tm.fitT); tm.fitT = setTimeout(function () { if (curMode === "swarm" && tm.view === "map") tmFitMap(); }, 120); });
+
+  /* ----- resizing -----
+     Draggable dividers for the Panes and Map views, in the spirit of herdr's pane splits (src/ui/panes.rs,
+     Apache-2.0, LICENSES/Apache-2.0.txt), modified: pointer events on DOM handles, sizes in CSS variables.
+     Pointer events cover mouse, pen and touch; the arrow keys move a handle 16px; a double click resets. */
+  var TM_RZ_STEP = 16;
+  var tmSz = (function () {
+    try { var o = JSON.parse(lsGet("judas.swarm.sizes") || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; }
+  })();
+  function tmSzSave() { lsSet("judas.swarm.sizes", JSON.stringify(tmSz)); }
+  function clampN(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function tmApplySizes() {
+    var pv = $("#team-v-panes"), g = $("#team-grid"), box = $("#team-map");
+    if (!pv || !g || !box) return;
+    function setv(el_, name, v) { if (v == null) el_.style.removeProperty(name); else el_.style.setProperty(name, Math.round(v) + "px"); }
+    setv(pv, "--tp-side", tmSz.side);
+    setv(g, "--tp-colw", tmSz.colw);
+    setv(g, "--tp-h", tmSz.h);
+    g.classList.toggle("tp-custom", tmSz.colw != null);
+    if (tmSz.mapH != null) { box.style.height = Math.round(tmSz.mapH) + "px"; box.classList.add("sized"); }
+    else { box.style.removeProperty("height"); box.classList.remove("sized"); }
+  }
+  /* o.x / o.y: { get(): current px, set(v), min, max() } ; o.reset() on double click */
+  function tmResizer(h, o) {
+    var drag = null;
+    function end() { if (!drag) return; drag = null; h.classList.remove("drag"); document.body.classList.remove("tp-dragging"); tmSzSave(); }
+    function apply(sx, sy, dx, dy) {
+      if (o.x) o.x.set(clampN(sx + dx, o.x.min, o.x.max()));
+      if (o.y) o.y.set(clampN(sy + dy, o.y.min, o.y.max()));
+      tmApplySizes();
+    }
+    h.addEventListener("pointerdown", function (e) {
+      if (e.button != null && e.button > 0) return;
+      e.preventDefault();
+      drag = { id: e.pointerId, px: e.clientX, py: e.clientY, sx: o.x ? o.x.get() : 0, sy: o.y ? o.y.get() : 0 };
+      try { h.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
+      h.classList.add("drag"); document.body.classList.add("tp-dragging");
+    });
+    h.addEventListener("pointermove", function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      apply(drag.sx, drag.sy, e.clientX - drag.px, e.clientY - drag.py);
+    });
+    h.addEventListener("pointerup", end);
+    h.addEventListener("pointercancel", end);
+    h.addEventListener("lostpointercapture", end);
+    h.addEventListener("dblclick", function () { o.reset(); tmApplySizes(); tmSzSave(); });
+    h.addEventListener("keydown", function (e) {
+      var dx = 0, dy = 0;
+      if (e.key === "ArrowRight") dx = TM_RZ_STEP; else if (e.key === "ArrowLeft") dx = -TM_RZ_STEP;
+      else if (e.key === "ArrowDown") dy = TM_RZ_STEP; else if (e.key === "ArrowUp") dy = -TM_RZ_STEP;
+      else if (e.key === "Home" || e.key === "Escape") { e.preventDefault(); o.reset(); tmApplySizes(); tmSzSave(); return; }
+      else return;
+      e.preventDefault();
+      if ((dx && !o.x) || (dy && !o.y)) return;
+      apply(o.x ? o.x.get() : 0, o.y ? o.y.get() : 0, dx, dy);
+      tmSzSave();
+    });
+  }
+  function tmPaneW() { var p = document.querySelector("#team-grid .tpane:not([hidden])"); return p ? p.getBoundingClientRect().width : 420; }
+  function tmPaneH() { var p = document.querySelector("#team-grid .tpane:not([hidden])"); return p ? p.getBoundingClientRect().height : 420; }
+  var tmColAxis = {
+    get: function () { return tmSz.colw != null ? tmSz.colw : tmPaneW(); },
+    set: function (v) { tmSz.colw = v; }, min: 240,
+    max: function () { var g = $("#team-grid"); return Math.max(240, g.clientWidth || 1600); }
+  };
+  var tmRowAxis = {
+    get: function () { return tmSz.h != null ? tmSz.h : tmPaneH(); },
+    set: function (v) { tmSz.h = v; }, min: 160, max: function () { return 1600; }
+  };
+  function tmPaneHandles(root) {
+    function mk(cls, label, orient) {
+      var h = el("div", "tp-rz " + cls);
+      h.setAttribute("role", "separator"); h.setAttribute("aria-orientation", orient); h.setAttribute("aria-label", label);
+      h.tabIndex = 0; root.appendChild(h); return h;
+    }
+    var reset = function () { delete tmSz.colw; delete tmSz.h; };
+    tmResizer(mk("tp-rz-e", "Resize pane width (arrow keys, double click resets)", "vertical"), { x: tmColAxis, reset: function () { delete tmSz.colw; } });
+    tmResizer(mk("tp-rz-s", "Resize pane height (arrow keys, double click resets)", "horizontal"), { y: tmRowAxis, reset: function () { delete tmSz.h; } });
+    tmResizer(mk("tp-rz-se", "Resize pane width and height (arrow keys, double click resets)", "vertical"), { x: tmColAxis, y: tmRowAxis, reset: reset });
+  }
+  tmResizer($("#team-side-rz"), {
+    x: {
+      get: function () { return tmSz.side != null ? tmSz.side : $("#team-side").getBoundingClientRect().width; },
+      set: function (v) { tmSz.side = v; }, min: 140,
+      max: function () { return Math.max(140, Math.min(520, $("#team-v-panes").clientWidth - 280)); }
+    },
+    reset: function () { delete tmSz.side; }
+  });
+  tmResizer($("#team-map-rz"), {
+    y: {
+      get: function () { return tmSz.mapH != null ? tmSz.mapH : $("#team-map").getBoundingClientRect().height; },
+      set: function (v) { tmSz.mapH = v; }, min: 160, max: function () { return 4000; }
+    },
+    reset: function () { delete tmSz.mapH; }
+  });
+  tmApplySizes();
 
   /* ----- hot potato: a packet travels the edge of a hand-off -----
      Ported from OpenRig packages/ui/src/components/topology/HotPotatoEdge.tsx and the hot-potato-*, activity-card-*
@@ -2901,6 +3187,7 @@
     p.status = el("footer", "tp-status mono");
     root.appendChild(p.status);
     p.root = root;
+    tmPaneHandles(root);
     tm.panes[id] = p;
     $("#team-grid").appendChild(root);
     tmPaneHead(p);
@@ -2941,7 +3228,8 @@
     seg(tmFolder(), "tps-dir");
     sep();
     var model = a.model_name || (a.model === "cpu" ? "cpu" : ((cur.session && cur.session.model) || (lastState && lastState.model) || "gpu"));
-    seg(model, "tps-model");
+    var pe = tmEngine(a, null);
+    seg(tmShortModel(model) + " " + pe.mark.toLowerCase(), "tps-model").title = pe.title;
     sep();
     var pct = a.ctx_pct == null ? null : Math.round(a.ctx_pct);
     seg("ctx", "dim");
@@ -3871,6 +4159,7 @@
   Array.prototype.forEach.call(document.querySelectorAll("[data-desc]"), function (n) { n.textContent = INFO[n.getAttribute("data-desc")].desc; });
   sideHidden = !!(window.matchMedia && window.matchMedia("(max-width:760px)").matches);
   (function () { var s = lsGet("judas.skin"); if (s) setSkin(s); })();
+  if (window.JudasAgentPane) JudasAgentPane.init({ getJSON: getJSON, postJSON: postJSON, openSwarm: function (sid) { openInMode(sid, "swarm"); } });
   pollState();
   var startName = (location.hash || "#chat").slice(1);
   show(startName);
@@ -3880,7 +4169,7 @@
     if (cur.id || !sessions.length) return;
     var pick = MODES.indexOf(startName) >= 0
       ? sessions.filter(function (s) { return modeOf(s.id) === curMode; })[0]
-      : sessions[0];
+      : sessions.filter(function (s) { return modeOf(s.id) === curMode; })[0];
     if (pick) { openSession(pick.id); syncNav(); }
   });
   window.addEventListener("hashchange", function () { show((location.hash || "#chat").slice(1)); });

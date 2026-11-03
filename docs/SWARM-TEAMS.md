@@ -96,6 +96,35 @@ Rules of the format:
 `team_create {map: "..."}` takes the text inline, `team_create {spec: "research"}` loads
 `~/.config/judas/teams/research.map` (or `.toml`). The tool result carries the canonical text and the warnings.
 
+## Saving a team
+
+After a team finishes well (every copy done, and the user is satisfied or the result passed its checks) the lead
+offers to save its map, and `team_save {name, team?, note?, overwrite?}` writes
+`~/.config/judas/teams/<name>.map`. `name` is `[a-z0-9-]`, up to 40 characters; `team` defaults to the only live
+team; `note` is one line on what the team did and how it went. An existing file is never replaced unless
+`overwrite: true`, and then the previous one is kept as `<name>.map.bak`. The file starts with a comment header
+(the format ignores comments), then the canonical map:
+
+```
+# Answer the question from the sources. Cite every file.
+# saved: 2026-11-02 session s-3f9a
+# outcome: all copies done, REPORT.md passed the reviewer
+# stats: 5 agents, 48211 tokens, wall 312 s, 0 failed copies
+team research
+brief Answer the question from the sources. Cite every file.
+lead editor
+member reader x3
+member check role=reviewer
+place 1: editor
+place 2: reader.1 reader.2 reader.3 check
+```
+
+`team_list_saved` returns `name | first comment line | date | last outcome` for each saved map, so the lead can check
+it when a new job resembles an earlier one and start from it with `team_create {spec: "name"}`, then adjust the
+brief. In the Swarm screen the team bar has a "Save map" button (it asks for a name), and the empty Swarm state lists
+"Saved maps"; "Use" prefills the composer with `use the saved map NAME for: `. The folder is `[teams].dir`; the
+environment variable `JUDAS_TEAMS_DIR` overrides it (tests use this to stay out of the real config).
+
 ## Why new tools, not a bigger spawn_agent
 
 `spawn_agent` is fire-and-forget: a task string and a role. A team needs state that outlives one call (member ids,
@@ -112,6 +141,8 @@ hang on. So teams get their own tools and spawn_agent stays as it is for ad hoc 
 | `team_read` | along an observe edge or to a child | `{agent, max_chars}` the tail of an agent's latest output, bounded (default 4000, cap 12000). |
 | `team_wait` | session lead, team lead | `{team, timeout_s}` waits for every running member you assigned, returns their reports. Auto-wait still applies. |
 | `team_disband` | session lead | cancels the team's agents and closes the team. |
+| `team_save` | session lead | `{name, team?, note?, overwrite?}` saves the team's map to the teams folder (see "Saving a team"). |
+| `team_list_saved` | session lead | saved maps: name, first comment line, date, last outcome. |
 
 ## Pinning (the fix for lost house rules)
 

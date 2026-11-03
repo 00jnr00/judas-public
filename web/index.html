@@ -6,8 +6,10 @@
 <title>Judas</title>
 <link rel="stylesheet" href="/skin.css" id="skin-link">
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/tools.css">
+<link rel="stylesheet" href="/agent-pane.css">
 </head>
 <body>
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop to attach</div></div>
@@ -53,10 +55,6 @@
     <section id="screen-work" class="screen active" data-mode="chat">
       <aside class="sess" id="sess-pane">
         <div class="sess-head"><b>Sessions</b><button type="button" id="new-session" class="btn small primary">+ New</button></div>
-        <div class="sess-filter" id="sess-filter">
-          <button type="button" data-f="mode">This mode</button>
-          <button type="button" data-f="all" class="active">All</button>
-        </div>
         <div id="sess-list" class="sess-list"></div>
       </aside>
       <div class="work">
@@ -112,9 +110,10 @@
                 <div id="team-views" class="team-views" role="tablist" aria-label="Swarm views"></div>
                 <span id="team-sub" class="dim small"></span>
               </div>
-              <div id="team-v-map" class="tm-view"><div id="team-map" class="tm-map-box"></div></div>
+              <div id="team-v-map" class="tm-view"><div id="team-map" class="tm-map-box"></div><div id="team-map-rz" class="tp-rz tp-rz-map" role="separator" aria-orientation="horizontal" aria-label="Resize the map height (arrow keys, double click resets)" tabindex="0"></div></div>
               <div id="team-v-panes" class="tm-view tp-split" hidden>
                 <aside id="team-side" class="team-side" aria-label="Agents"></aside>
+                <div id="team-side-rz" class="tp-rz tp-rz-side" role="separator" aria-orientation="vertical" aria-label="Resize the agent list (arrow keys, double click resets)" tabindex="0"></div>
                 <div id="team-grid" class="team-grid"></div>
               </div>
               <div id="team-v-table" class="tm-view" hidden><div id="team-table" class="tm-table-box"></div></div>
@@ -131,6 +130,8 @@
               </div>
             </div>
             <form id="composer" class="composer" autocomplete="off">
+              <div id="approval-box" class="approval-box" role="region" aria-label="Waiting for your yes" hidden></div>
+              <div id="queue-box" class="queue-box" aria-live="polite" hidden></div>
               <div id="att-chips" class="att-chips" hidden></div>
               <div id="att-hint" class="att-hint small" role="status" hidden></div>
               <div class="comp-row">
@@ -248,6 +249,9 @@
         <h3>Theme</h3>
         <p class="dim">Click a theme to try it right now. The choice is saved in this browser only, for now (not on the server). Themes also restyle the terminal UI.</p>
         <div id="skins" class="skins"></div>
+        <h3>Fonts</h3>
+        <p class="dim">Fonts are bundled with Judas, so they also work on phones and tablets. The choice overrides the theme and is saved in this browser only.</p>
+        <div id="font-settings" class="font-settings"></div>
         <h3>Companion</h3>
         <p class="dim">A small pixel buddy that reacts while Judas works. It only moves a little and stops when this tab is hidden.</p>
         <div id="companion-settings" class="companion-settings"></div>
@@ -280,8 +284,11 @@
 </div>
 <script src="/vendor/katex/katex.min.js"></script>
 <script src="/companion.js"></script>
+<script src="/fonts.js"></script>
 <script src="/theme.js"></script>
+<script src="/agent-pane.js"></script>
 <script src="/app.js"></script>
+<script src="/team-save.js"></script>
 <script src="/tools.js"></script>
 </body>
 </html>
