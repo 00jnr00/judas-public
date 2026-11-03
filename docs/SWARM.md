@@ -1,5 +1,7 @@
 # Swarm mode
 
+Swarm mode is also the team runtime: the lead organizes big jobs into teams of agents on the main model (and on the CPU swarm for wide, shallow reading), and the Swarm screen shows every agent live. See [SWARM-TEAMS.md](SWARM-TEAMS.md). This page covers the CPU bulk tool, `swarm_map`, which any team member can use.
+
 Bulk jobs (summarize, extract or classify many files or items) run on a swarm of small models on the CPU. The main model, which stays the only one on the GPU, only plans, checks and merges.
 
 ## How it works

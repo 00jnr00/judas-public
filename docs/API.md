@@ -7,7 +7,8 @@ Base: `http://127.0.0.1:<port>` (default 8079). CORS `*` on `/v1` and `/api`.
 - `GET /state` -> EngineState: `{model, model_path, loaded, hybrid, max_agents, active, queued, ctx_total, ctx_used, vram_used_mib, vram_total_mib, gen_tok_s, seqs:[{id, tag, phase:"idle|prefill|generate", tokens, priority}], total_prompt_tokens, total_completion_tokens, requests, sessions:[{id,title,updated_ms}], version, vision:bool, ui:{mascot:bool}}`
   (`vision` = the loaded model takes images; `ui.mascot` = the companions setting from `[ui]`)
 - `GET /skin.css` -> the active skin as `:root{--bg;--surface;--surface2;--border;--title;--accent;--text;--dim;--ok;--warn;--error;--thinking;--added;--removed;--accent-soft}`. `?name=<skin>` for a specific one.
-- `GET /api/skins` -> `{skins:[{name,label,dark,colors:{...}}]}`
+- `GET /api/skins` -> `{skins:[{name,label,dark,colors:{...},tokens:{...}}]}`
+- `GET /api/skins/<name>` -> `{name,label,dark,vars:{"--bg":...}}` (`current` = the server's active skin); see `docs/THEMES.md`
 
 ## Sessions
 - `GET /api/sessions[?limit=200&before=<updated_ms>]` -> `{sessions:[{id,title,cwd,model,mode,created_ms,updated_ms,running}], more}` (newest first; `before` = `updated_ms` of the last row seen pages on; `running` = a turn is in progress)
@@ -74,3 +75,18 @@ A scheduler in the daemon fires due once/interval tasks automatically as new ses
 - `POST /api/heartbeat/run` -> runs it now, returns the same shape
 - `GET /api/channels` -> `{channels:[name], default}`
 - `POST /api/channels/test` `{channel?}` -> `{ok, error}` (sends a test message to the channel)
+
+## Swarm teams (docs/SWARM-TEAMS.md)
+- `GET /api/sessions/<id>/team` -> `{session, lead:AgentLive|null, teams:[Team], agents:[AgentLive]}` (in memory; empty `teams` after a daemon restart)
+  - Team: `{name, brief, rules:[str], lead_member:str|"", owner:agent_id, disbanded:bool, members:[{id, role, count, model, skills:[str]}], edges:[{from,to,kind}], copies:[{copy, member, agent:agent_id|""}], place:[[copy,...],...], map:str, warnings:[str]}`
+    - `edges` holds only the extra spec edges; the default edges (lead -> team lead or every member, team lead -> members) are implied.
+    - `place` is the pinned layout from the map file: row 1 first, each row a list of copies left to right. Empty = automatic layout. Copies not in any row go in an extra last row.
+    - `map` is the team in the canonical map format (docs/SWARM-TEAMS.md "Map files"); `warnings` lists map lines that were skipped.
+  - AgentLive: AgentRow plus `{team:str|"", member:str|"", activity:"queued|prefilling|generating|tool|waiting|blocked|done|failed|idle", tool:str|"", depth, model:"gpu|cpu", tok_s:number, ctx_pct:number|null, last_output:str}` (`ctx_pct` = the last prompt's share of this agent's context cap, 0 to 100) (`last_output` = tail of the latest assistant text, at most 600 chars)
+- `POST /api/sessions/<id>/agents/<agent>/cancel` -> `{ok}` (stops that agent's turn, status killed; its queued input is dropped)
+- `POST /api/sessions/<id>/agents/<agent>/pause` -> `{ok}` (stops the turn, status paused, resumable)
+- `POST /api/sessions/<id>/agents/<agent>/resume` -> `{ok}` (a paused or killed agent carries on with its task)
+- Events on the session stream (in addition to the ones above):
+  - `activity` data `{activity, tool?}` whenever an agent's activity changes
+  - `team` data `{action:"created"|"assigned"|"disbanded"|"message"|"report", team, member?, copy?, agent?, from?, to?}`. `from` and `to` are copies or `lead`: assigned goes from the assigner to the copy, message along its edge, report from a member whose turn ended to its parent. The UI animates a hand-off along that edge.
+  - `spawned` data gains `{team?, member?, model?}` for team members

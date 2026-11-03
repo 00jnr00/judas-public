@@ -1,0 +1,24 @@
+name = "phosphor-light"
+label = "Phosphor Light"
+dark = false
+
+[tokens]
+radius = '2px'
+radius_sm = '1px'
+font_ui = 'ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace'
+
+[colors]
+bg = "#EFF7F1"
+surface = "#E1EEE5"
+surface2 = "#D6E2DA"
+border = "#A8C3B2"
+title = "#07160D"
+accent = "#0A7142"
+text = "#14291C"
+dim = "#4D6959"
+ok = "#2E7D1F"
+warn = "#7D5F00"
+error = "#B8352E"
+thinking = "#768C7F"
+added = "#B9D5B6"
+removed = "#DEBDB6"

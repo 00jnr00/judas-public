@@ -1,0 +1,23 @@
+name = "glacier-dark"
+label = "Glacier Dark"
+dark = true
+
+[tokens]
+radius = '10px'
+radius_sm = '5px'
+
+[colors]
+bg = "#070B12"
+surface = "#0F1622"
+surface2 = "#1C2430"
+border = "#3E4F63"
+title = "#EAF4FF"
+accent = "#38BDF8"
+text = "#C8DCEE"
+dim = "#7592AD"
+ok = "#5FCB8E"
+warn = "#E8B04B"
+error = "#E5595B"
+thinking = "#5A7086"
+added = "#204135"
+removed = "#4A2228"

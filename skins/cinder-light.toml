@@ -1,0 +1,23 @@
+name = "cinder-light"
+label = "Cinder Light"
+dark = false
+
+[tokens]
+radius = '6px'
+radius_sm = '3px'
+
+[colors]
+bg = "#F4F3F0"
+surface = "#E8E6E2"
+surface2 = "#DCDAD7"
+border = "#B8B5AF"
+title = "#0A0B0C"
+accent = "#B3201F"
+text = "#222426"
+dim = "#5B6065"
+ok = "#2E7442"
+warn = "#8A5C00"
+error = "#B3201F"
+thinking = "#818588"
+added = "#BDCFBF"
+removed = "#E0B4B1"

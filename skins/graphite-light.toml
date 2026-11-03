@@ -1,0 +1,23 @@
+name = "graphite-light"
+label = "Graphite Light"
+dark = false
+
+[tokens]
+radius = '4px'
+radius_sm = '2px'
+
+[colors]
+bg = "#F1F2F4"
+surface = "#E6E8EB"
+surface2 = "#DADCDF"
+border = "#B4BAC2"
+title = "#12141A"
+accent = "#1E5CC1"
+text = "#23272D"
+dim = "#59616B"
+ok = "#2F7A3D"
+warn = "#8A5C00"
+error = "#B93A32"
+thinking = "#7F858D"
+added = "#BBD0C1"
+removed = "#E0BBBA"

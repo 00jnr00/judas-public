@@ -1,0 +1,23 @@
+name = "ember-plum-dark"
+label = "Ember Plum Dark"
+dark = true
+
+[tokens]
+radius = '12px'
+radius_sm = '6px'
+
+[colors]
+bg = "#17131F"
+surface = "#241E30"
+surface2 = "#322C3E"
+border = "#5E5470"
+title = "#F7F3FC"
+accent = "#FF8A3D"
+text = "#EDE6F7"
+dim = "#9A92AC"
+ok = "#8CCB7E"
+warn = "#F6C35B"
+error = "#F0605D"
+thinking = "#797289"
+added = "#38473A"
+removed = "#582A32"

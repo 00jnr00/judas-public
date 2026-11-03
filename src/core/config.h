@@ -317,6 +317,15 @@ struct SwarmConfig {
     std::string config = "~/.config/judas/swarm.toml";  // the swarm instance's own config (cores are written there)
     std::string unit = "judas-swarm";               // systemd user unit the on/off switch starts and stops
 };
+// Swarm teams (docs/SWARM-TEAMS.md): the lead organizes members into teams with a pinned brief and house rules.
+struct TeamsConfig {
+    bool enabled = true;                            // team tools in Swarm-mode sessions
+    std::string dir = "~/.config/judas/teams";      // saved team specs (*.toml), loaded with team_create {spec}
+    int max_members = 16;                           // member copies per session, all teams together
+    std::vector<std::string> house_rules;           // pinned into every member of every team
+    int request_max_chars = 2000;                   // the user's request, pinned verbatim, is cut here
+    int read_max_chars = 12000;                     // cap of one team_read
+};
 // Tools tab (web): each entry is a sub-tab. `url` is embedded in an iframe, `skill` adds a "Plan with Judas"
 // side chat that loads that skill, `prompt_hint` is its placeholder.
 struct ToolsTab {
@@ -331,8 +340,10 @@ struct ToolsConfig {
 };
 // Built-in day planner server (compiled in with JUDAS_MACH12). Off unless enabled.
 struct Mach12Config {
-    bool enabled = false;
+    bool enabled = false;                     // serve the page and API at /mach12/
+    bool tools = true;                        // the lead agent's mach12_* planner tools (also need enabled)
     std::string data_dir = "~/.local/share/mach12";
+    std::string merge_cmd = "mach12-merge";   // the plan-editing helper the mach12_* tools run (PATH lookup unless it has a slash)
 };
 
 struct Config {
@@ -357,6 +368,7 @@ struct Config {
     ChannelsConfig channels;
     McpConfig mcp;
     SwarmConfig swarm;
+    TeamsConfig teams;
     ToolsConfig tools;
     Mach12Config mach12;
     std::string data_dir = "~/.local/share/judas";  // sessions.db, snapshots/, logs/

@@ -1,0 +1,23 @@
+name = "glacier-light"
+label = "Glacier Light"
+dark = false
+
+[tokens]
+radius = '10px'
+radius_sm = '5px'
+
+[colors]
+bg = "#EEF5FB"
+surface = "#E0ECF6"
+surface2 = "#D5E0EA"
+border = "#A9C0D6"
+title = "#0A1826"
+accent = "#03679E"
+text = "#14283C"
+dim = "#4C657C"
+ok = "#1F7A4D"
+warn = "#8A5A00"
+error = "#BE2F31"
+thinking = "#74899C"
+added = "#B4D3CA"
+removed = "#E0BABE"

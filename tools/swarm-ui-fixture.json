@@ -1,0 +1,1272 @@
+{
+ "state": {
+  "model": "Forge",
+  "loaded": true,
+  "hybrid": false,
+  "max_agents": 8,
+  "active": 3,
+  "queued": 1,
+  "ctx_total": 131072,
+  "ctx_used": 22000,
+  "vram_used_mib": 14200,
+  "vram_total_mib": 16384,
+  "gen_tok_s": 96.4,
+  "seqs": [],
+  "sessions": [],
+  "version": "fixture",
+  "vision": false,
+  "ui": {
+   "mascot": false
+  }
+ },
+ "sessions": [
+  {
+   "id": "sw-demo",
+   "title": "Compare batching papers and triage the inbox",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "swarm",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793600000000,
+   "running": true
+  }
+ ],
+ "session": {
+  "session": {
+   "id": "sw-demo",
+   "title": "Compare batching papers and triage the inbox",
+   "cwd": "/home/you/work",
+   "model": "Forge",
+   "mode": "swarm",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793600000000,
+   "running": true
+  },
+  "agents": [
+   {
+    "id": "ag-lead",
+    "session": "sw-demo",
+    "parent": "",
+    "role": "lead",
+    "task": "",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 3120,
+    "completion_tokens": 96
+   },
+   {
+    "id": "ag-ed",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "lead",
+    "task": "Split the papers",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 4100,
+    "completion_tokens": 180
+   },
+   {
+    "id": "ag-r1",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper A",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 6400,
+    "completion_tokens": 210
+   },
+   {
+    "id": "ag-r2",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper B",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 2200,
+    "completion_tokens": 60
+   },
+   {
+    "id": "ag-r3",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper C",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 9000,
+    "completion_tokens": 40
+   },
+   {
+    "id": "ag-tr",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Sort 400 inbox files",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 1800,
+    "completion_tokens": 88
+   },
+   {
+    "id": "ag-ru1",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "worker",
+    "task": "Run the throughput script",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 14200,
+    "completion_tokens": 520
+   },
+   {
+    "id": "ag-ru2",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "worker",
+    "task": "Run the latency script",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 0,
+    "completion_tokens": 0
+   }
+  ],
+  "messages": [
+   {
+    "id": 1,
+    "agent": "ag-lead",
+    "role": "user",
+    "body": {
+     "role": "user",
+     "content": "Compare the three batching papers in papers/ and sort the inbox dump. Use teams."
+    },
+    "created_ms": 1793600000000
+   },
+   {
+    "id": 2,
+    "agent": "ag-r3",
+    "role": "user",
+    "body": {
+     "role": "user",
+     "content": "Paper C: extract batching policy and numbers"
+    },
+    "created_ms": 1793600000000
+   }
+  ],
+  "more_before": false,
+  "total": 2,
+  "turn": {
+   "running": true,
+   "event_floor": 0,
+   "msg_floor": 2,
+   "events_head": 51
+  }
+ },
+ "team": {
+  "session": "sw-demo",
+  "lead": {
+   "id": "ag-lead",
+   "session": "sw-demo",
+   "parent": "",
+   "role": "lead",
+   "task": "",
+   "status": "running",
+   "result": "",
+   "created_ms": 1793600000000,
+   "updated_ms": 1793600000000,
+   "prompt_tokens": 3120,
+   "completion_tokens": 96,
+   "team": "",
+   "member": "",
+   "activity": "waiting",
+   "tool": "",
+   "depth": 0,
+   "model": "gpu",
+   "tok_s": 0,
+   "ctx_pct": 31,
+   "last_output": ""
+  },
+  "agents": [
+   {
+    "id": "ag-ed",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "lead",
+    "task": "Split the papers",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 4100,
+    "completion_tokens": 180,
+    "team": "research",
+    "member": "editor",
+    "activity": "prefilling",
+    "tool": "",
+    "depth": 1,
+    "model": "gpu",
+    "tok_s": 0.0,
+    "ctx_pct": 48,
+    "last_output": "Merging the first two reports into REPORT.md"
+   },
+   {
+    "id": "ag-r1",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper A",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 6400,
+    "completion_tokens": 210,
+    "team": "research",
+    "member": "reader",
+    "activity": "generating",
+    "tool": "",
+    "depth": 2,
+    "model": "gpu",
+    "tok_s": 96.4,
+    "ctx_pct": 72,
+    "last_output": "Prefix sharing is not used; every request prefills its own prompt."
+   },
+   {
+    "id": "ag-r2",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper B",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 2200,
+    "completion_tokens": 60,
+    "team": "research",
+    "member": "reader",
+    "activity": "tool",
+    "tool": "web_fetch",
+    "depth": 2,
+    "model": "gpu",
+    "tok_s": 0,
+    "ctx_pct": 24,
+    "last_output": "Paper B is a preprint, fetching the HTML version."
+   },
+   {
+    "id": "ag-r3",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Paper C",
+    "status": "failed",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 9000,
+    "completion_tokens": 40,
+    "team": "research",
+    "member": "reader",
+    "activity": "failed",
+    "tool": "",
+    "depth": 2,
+    "model": "gpu",
+    "tok_s": 0.0,
+    "ctx_pct": 93,
+    "last_output": "I cannot read this file."
+   },
+   {
+    "id": "ag-tr",
+    "session": "sw-demo",
+    "parent": "ag-ed",
+    "role": "worker",
+    "task": "Sort 400 inbox files",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 1800,
+    "completion_tokens": 88,
+    "team": "research",
+    "member": "triage",
+    "activity": "blocked",
+    "tool": "",
+    "depth": 2,
+    "model": "cpu",
+    "tok_s": 0,
+    "ctx_pct": 66,
+    "last_output": "Two files need a decision: tax-2023.pdf and lease-draft.docx."
+   },
+   {
+    "id": "ag-ru1",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "worker",
+    "task": "Run the throughput script",
+    "status": "done",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 14200,
+    "completion_tokens": 520,
+    "team": "ops",
+    "member": "runner",
+    "activity": "done",
+    "tool": "",
+    "depth": 1,
+    "model": "gpu",
+    "tok_s": 0.0,
+    "ctx_pct": 85,
+    "last_output": "Throughput script finished: 1388 tok/s at batch 32."
+   },
+   {
+    "id": "ag-ru2",
+    "session": "sw-demo",
+    "parent": "ag-lead",
+    "role": "worker",
+    "task": "Run the latency script",
+    "status": "running",
+    "result": "",
+    "created_ms": 1793600000000,
+    "updated_ms": 1793600000000,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "team": "ops",
+    "member": "runner",
+    "activity": "queued",
+    "tool": "",
+    "depth": 1,
+    "model": "gpu",
+    "tok_s": 0.0,
+    "ctx_pct": null,
+    "last_output": ""
+   }
+  ],
+  "teams": [
+   {
+    "name": "research",
+    "brief": "Answer from primary sources.",
+    "rules": [
+     "Quote numbers exactly."
+    ],
+    "lead_member": "editor",
+    "owner": "ag-lead",
+    "disbanded": false,
+    "members": [
+     {
+      "id": "editor",
+      "role": "lead",
+      "count": 1,
+      "model": "gpu",
+      "skills": []
+     },
+     {
+      "id": "reader",
+      "role": "worker",
+      "count": 3,
+      "model": "gpu",
+      "skills": [
+       "web-research"
+      ]
+     },
+     {
+      "id": "triage",
+      "role": "worker",
+      "count": 1,
+      "model": "cpu",
+      "skills": []
+     }
+    ],
+    "edges": [
+     {
+      "from": "reader",
+      "to": "reader",
+      "kind": "observe"
+     },
+     {
+      "from": "triage",
+      "to": "editor",
+      "kind": "message"
+     }
+    ],
+    "copies": [
+     {
+      "copy": "editor",
+      "member": "editor",
+      "agent": "ag-ed"
+     },
+     {
+      "copy": "reader.1",
+      "member": "reader",
+      "agent": "ag-r1"
+     },
+     {
+      "copy": "reader.2",
+      "member": "reader",
+      "agent": "ag-r2"
+     },
+     {
+      "copy": "reader.3",
+      "member": "reader",
+      "agent": "ag-r3"
+     },
+     {
+      "copy": "triage",
+      "member": "triage",
+      "agent": "ag-tr"
+     }
+    ],
+    "place": [
+     [
+      "editor"
+     ],
+     [
+      "reader.1",
+      "reader.2",
+      "reader.3",
+      "triage"
+     ]
+    ],
+    "map": "team research\nbrief Answer the question from the sources. Cite every file.\nrules SPEC.md#House rules\nrule Quote numbers exactly as the source gives them.\nlead editor\nmember reader x3 skills=web-research\nmember triage cpu\nlink reader -> reader observe\nlink triage -> editor message\nplace 1: editor\nplace 2: reader.1 reader.2 reader.3 triage\n",
+    "warnings": [
+     "line 9: 'permissions all' skipped: a team cannot change what an agent may do"
+    ]
+   },
+   {
+    "name": "ops",
+    "brief": "Run the measurement scripts.",
+    "rules": [],
+    "lead_member": "",
+    "owner": "ag-lead",
+    "disbanded": false,
+    "members": [
+     {
+      "id": "runner",
+      "role": "worker",
+      "count": 2,
+      "model": "gpu",
+      "skills": []
+     }
+    ],
+    "edges": [],
+    "copies": [
+     {
+      "copy": "runner.1",
+      "member": "runner",
+      "agent": "ag-ru1"
+     },
+     {
+      "copy": "runner.2",
+      "member": "runner",
+      "agent": "ag-ru2"
+     }
+    ],
+    "place": [],
+    "map": "team ops\nmember runner x2\n",
+    "warnings": []
+   }
+  ]
+ },
+ "skins": {
+  "skins": [
+   {
+    "name": "judas",
+    "label": "Judas",
+    "dark": true,
+    "colors": {
+     "bg": "#0f1115",
+     "surface": "#171a21",
+     "surface2": "#1e222b",
+     "border": "#2b3140",
+     "title": "#f2f4f8",
+     "accent": "#e5484d",
+     "text": "#d9dde5",
+     "dim": "#8b93a5",
+     "ok": "#3fb97a",
+     "warn": "#e5a93d",
+     "error": "#ff5d5d",
+     "thinking": "#9a8cff",
+     "added": "#4fb4d8",
+     "removed": "#ff7a7a",
+     "accent-soft": "rgba(229,72,77,.25)"
+    }
+   },
+   {
+    "name": "parchment",
+    "label": "Parchment",
+    "dark": false,
+    "colors": {
+     "bg": "#f6f0e2",
+     "surface": "#fbf7ec",
+     "surface2": "#efe7d3",
+     "border": "#d6cab0",
+     "title": "#2c2416",
+     "accent": "#a8442a",
+     "text": "#3a3224",
+     "dim": "#7a6f58",
+     "ok": "#2f7d4f",
+     "warn": "#a8741a",
+     "error": "#b3261e",
+     "thinking": "#5b4fa8",
+     "added": "#1f6f8b",
+     "removed": "#b3261e",
+     "accent-soft": "rgba(168,68,42,.2)"
+    }
+   }
+  ]
+ },
+ "swarm_state": {
+  "enabled": true,
+  "up": true,
+  "unit": "judas-swarm",
+  "state": {
+   "model": "LFM2.5-2.6B",
+   "active": 1,
+   "queued": 0,
+   "gen_tok_s": 47.0
+  }
+ },
+ "events": [
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "task": "Compare three local-LLM batching papers and triage the inbox dump."
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "reasoning",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "text": "Two jobs: a source-backed comparison (needs readers and an editor) and a cheap triage pass of 400 inbox files (CPU swarm). I will make two teams and wait for both."
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "text": "I split this into two teams: **research** (an editor with three readers) and **triage** (one CPU sorter). I will merge their reports when both finish."
+   }
+  },
+  {
+   "type": "message",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "message": {
+     "role": "assistant",
+     "content": "x",
+     "tool_calls": [
+      {
+       "id": "t1"
+      }
+     ]
+    },
+    "usage": {
+     "prompt": 3120,
+     "cached": 2800,
+     "completion": 96,
+     "prefill_s": 0.4,
+     "generate_s": 1.6
+    }
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "id": "c1",
+    "name": "team_create",
+    "args": {
+     "name": "research",
+     "brief": "Answer from primary sources; every claim cites a saved file.",
+     "members": "editor, reader x3, checker, summarizer"
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "id": "c1",
+    "name": "team_create",
+    "ok": true,
+    "output": "team research created: editor, reader.1, reader.2, reader.3, triage"
+   }
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "action": "created",
+    "team": "research"
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "id": "c2",
+    "name": "team_create",
+    "args": {
+     "name": "ops",
+     "members": "runner x2"
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "id": "c2",
+    "name": "team_create",
+    "ok": true,
+    "output": "team ops created: runner.1, runner.2"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "activity": "waiting"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "task": "Split the papers between readers, merge their notes.",
+    "team": "research",
+    "member": "editor",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "reasoning",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "text": "Three papers, three readers. Give each one paper and ask for batch size, latency and the exact numbers."
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "id": "e1",
+    "name": "team_assign",
+    "args": {
+     "team": "research",
+     "member": "reader.1",
+     "task": "Paper A: extract batching policy and numbers"
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "id": "e1",
+    "name": "team_assign",
+    "ok": true,
+    "output": "assigned reader.1"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "activity": "waiting"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "task": "Paper A: extract batching policy and numbers",
+    "team": "research",
+    "member": "reader",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-r2",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "task": "Paper B: extract batching policy and numbers",
+    "team": "research",
+    "member": "reader",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "task": "Paper C: extract batching policy and numbers",
+    "team": "research",
+    "member": "reader",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "prefilling"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "reasoning",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "Section 4 describes continuous batching with a token budget per step. I need the table with throughput at batch 8, 16 and 32."
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "id": "r1a",
+    "name": "read_file",
+    "args": {
+     "path": "papers/a.md",
+     "offset": 120,
+     "limit": 80
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "id": "r1a",
+    "name": "read_file",
+    "ok": true,
+    "output": "Table 3. Throughput (tok/s)\nbatch 8: 612\nbatch 16: 1004\nbatch 32: 1388\n"
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "## Paper A\n\n- Policy: **continuous batching**, token budget 4096 per step\n- Throughput: 612 / 1004 / 1388 tok/s at batch 8 / 16 / 32\n- "
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "Prefix sharing is not used; every request prefills its own prompt.\n"
+   }
+  },
+  {
+   "type": "message",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "message": {
+     "role": "assistant",
+     "content": "x"
+    },
+    "usage": {
+     "prompt": 6400,
+     "cached": 1200,
+     "completion": 210,
+     "prefill_s": 2.1,
+     "generate_s": 4.4
+    }
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "Next: checking the appendix for latency percentiles"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r2",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "reasoning",
+   "session": "sw-demo",
+   "agent": "ag-r2",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "Paper B is a preprint, the PDF has no text layer for the tables. Fetch the HTML version."
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-r2",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "id": "r2a",
+    "name": "web_fetch",
+    "args": {
+     "url": "https://example.org/preprint-b.html",
+     "max_chars": 9000
+    }
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r2",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "tool",
+    "tool": "web_fetch"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "id": "r3a",
+    "name": "read_file",
+    "args": {
+     "path": "papers/c.pdf"
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "id": "r3a",
+    "name": "read_file",
+    "ok": false,
+    "output": "error: papers/c.pdf is a scanned PDF with no text; use the markitdown tool"
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "text": "I cannot read this file."
+   }
+  },
+  {
+   "type": "status",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "error": "context overflow after 3 retries"
+   }
+  },
+  {
+   "type": "done",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "status": "failed",
+    "result": "context overflow"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "task": "Sort 400 inbox files into keep, archive, delete",
+    "team": "research",
+    "member": "triage",
+    "model": "cpu"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "tool_call",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "id": "s1",
+    "name": "list_dir",
+    "args": {
+     "path": "inbox/"
+    }
+   }
+  },
+  {
+   "type": "tool_result",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "id": "s1",
+    "name": "list_dir",
+    "ok": true,
+    "output": "2024-03-01-invoice.txt\n2024-03-02-newsletter.txt\n2024-03-02-receipt.pdf\n... 397 more"
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "text": "Sorted 120 of 400. Two files need a decision: `tax-2023.pdf` and `lease-draft.docx` look like keepers but sit in the delete pile. Waiting for an approval to touch them."
+   }
+  },
+  {
+   "type": "message",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "message": {
+     "role": "assistant",
+     "content": "x"
+    },
+    "usage": {
+     "prompt": 1800,
+     "cached": 0,
+     "completion": 88,
+     "prefill_s": 3.0,
+     "generate_s": 3.5
+    }
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-tr",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "activity": "blocked"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-ru1",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "task": "Run the throughput script",
+    "team": "ops",
+    "member": "runner",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "spawned",
+   "session": "sw-demo",
+   "agent": "ag-ru2",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "task": "Run the latency script",
+    "team": "ops",
+    "member": "runner",
+    "model": "gpu"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-ru1",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "activity": "generating"
+   }
+  },
+  {
+   "type": "delta",
+   "session": "sw-demo",
+   "agent": "ag-ru1",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "text": "Throughput script finished: 1388 tok/s at batch 32."
+   }
+  },
+  {
+   "type": "done",
+   "session": "sw-demo",
+   "agent": "ag-ru1",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "status": "done",
+    "result": "ok"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-ru2",
+   "parent": "ag-lead",
+   "role": "worker",
+   "data": {
+    "activity": "queued"
+   }
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "action": "created",
+    "team": "ops"
+   }
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-lead",
+   "parent": "",
+   "role": "lead",
+   "data": {
+    "action": "assigned",
+    "team": "research",
+    "member": "editor",
+    "copy": "editor",
+    "agent": "ag-ed",
+    "from": "lead",
+    "to": "editor"
+   },
+   "_delay_ms": 1200
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "action": "assigned",
+    "team": "research",
+    "member": "reader",
+    "copy": "reader.2",
+    "agent": "ag-r2",
+    "from": "editor",
+    "to": "reader.2"
+   }
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-r1",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "action": "message",
+    "team": "research",
+    "from": "reader.1",
+    "to": "editor"
+   }
+  },
+  {
+   "type": "team",
+   "session": "sw-demo",
+   "agent": "ag-r3",
+   "parent": "ag-ed",
+   "role": "worker",
+   "data": {
+    "action": "report",
+    "team": "research",
+    "from": "reader.3",
+    "to": "editor"
+   }
+  },
+  {
+   "type": "activity",
+   "session": "sw-demo",
+   "agent": "ag-ed",
+   "parent": "ag-lead",
+   "role": "lead",
+   "data": {
+    "activity": "prefilling"
+   }
+  }
+ ]
+}

@@ -24,24 +24,31 @@ prompt_hint = "Plan my day"      # placeholder of the side chat (optional)
   There is also an "Open in a new tab" link.
 - Judas has no auth, so only embed pages you trust and reach over a trusted network.
 
-## Built-in mach12 planner (optional, compile-time)
+## Theme protocol for framed pages
 
-Built with `-DJUDAS_MACH12=ON` (CMake option; it defaults ON only when `src/mach12/` is present, and that module is not
-included in this source tree, so public builds have it OFF and every reference compiled out).
-It serves the mach12 day planner page and JSON API from inside the Judas server:
+The app themes framed pages live (details in `docs/THEMES.md`).
 
-```toml
-[mach12]
-enabled = false                  # default off
-data_dir = "~/.local/share/mach12"
+- Each iframe `src` gets `judas_theme=<theme name>` and `judas_origin=<encodeURIComponent(app origin)>` query params.
+- On every theme change, and once when the frame has loaded, the app posts
+  `{type: "judas-theme", name, dark, vars}` to the frame with `targetOrigin` set to the frame URL's exact origin.
+  `vars` maps CSS variable names (`--bg`, `--text`, `--accent`, `--radius`, `--font-ui`, ...) to values; `dark` is a boolean.
+- The framed page must only accept the message when `event.origin === judas_origin` (the value it was given) and
+  `event.source === window.parent`, then apply the vars:
+
+```js
+var origin = new URLSearchParams(location.search).get("judas_origin");
+addEventListener("message", function (e) {
+  if (e.origin !== origin || e.source !== window.parent) return;
+  var m = e.data;
+  if (!m || m.type !== "judas-theme" || !m.vars) return;
+  for (var k in m.vars) document.documentElement.style.setProperty(k, m.vars[k]);
+  document.documentElement.style.colorScheme = m.dark ? "dark" : "light";
+});
 ```
 
-- Page at `/mach12/`, API at `/mach12/api/...`; same files and JSON shapes as the standalone `mach12-serve`
-  (notes revision check with 409, day notes, note files, vision board, block notes, energy score, archive,
-  status ticking, Syncthing conflict-copy merge). It writes only `status.json` (progress), notes, day notes,
-  note files, vision, block notes and the energy score, like `mach12-serve`; it never writes `events.json`.
-- Statistics, accomplishment scoring (human half), sketches and pages, and handwriting transcription are ported too. Transcription runs `python3 mach12_ocr.py` code (from `$MACH12_HOME` or `~/src/mach12`) in a subprocess with a 900 s timeout, because the vision-model client lives there; override the command with `MACH12_OCR_CMD` (tests).
-- **Settings > Built-in planner** switches it on or off live (no restart) and rewrites `[mach12].enabled`.
-  While on, a tools tab named `mach12` embeds `/mach12/` (same origin); while off it falls back to its `url`.
-- `GET/POST /api/mach12` report and set the switch (`{"enabled": true}`).
-- Tests use a copy of `tests/fixtures/mach12`, never a real data directory.
+Pages that ignore the message keep their own look.
+
+## Built-in modules
+
+A private build can compile in extra modules (CMake options) that serve their own page under the Judas server;
+a Tools sub-tab can frame one with a same-origin relative URL such as `url = "/planner/"`.

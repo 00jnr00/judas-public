@@ -58,9 +58,10 @@
     var main = el("div", "tools-frame");
     if (t.url) {
       var fr = el("iframe");
-      fr.src = t.url; fr.title = t.label || t.name;
+      fr.src = window.JudasTheme ? window.JudasTheme.decorate(t.url) : t.url; fr.title = t.label || t.name;
       fr.setAttribute("loading", "lazy");
       main.appendChild(fr);
+      if (window.JudasTheme) window.JudasTheme.track(fr);
       var open = el("a", "tools-open small", "Open in a new tab");
       open.href = t.url; open.target = "_blank"; open.rel = "noopener";
       main.appendChild(open);

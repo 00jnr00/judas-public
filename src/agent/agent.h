@@ -86,6 +86,16 @@ public:
     // Register or remove the swarm_map tool live (the Swarm on/off switch).
     void set_swarm_tool(bool on);
 
+    // Swarm teams (docs/SWARM-TEAMS.md). The live view for GET /api/sessions/<id>/team: {session, lead, teams,
+    // agents}, with engine phases merged into each agent's activity.
+    json team_view(const std::string & session) const;
+    // Per-agent controls from the Swarm screen. False if the agent is unknown or not in that session.
+    bool cancel_agent(const std::string & session, const std::string & agent);
+    bool pause_agent(const std::string & session, const std::string & agent);
+    bool resume_agent(const std::string & session, const std::string & agent);
+    // Tests: build the engine cpu team members run on (default: RemoteEngine on [swarm].url).
+    void set_remote_engine_factory(std::function<std::unique_ptr<Engine>(const std::string & url)> f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

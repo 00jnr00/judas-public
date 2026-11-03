@@ -1,0 +1,16 @@
+# Generate skins_generated.cpp from skins/*.toml: the built-in themes ship inside the judas binary.
+# Invoked with: cmake -DIN_DIR=.. -DOUT=.. -P embed_skins.cmake
+file(GLOB files RELATIVE "${IN_DIR}" "${IN_DIR}/*.toml")
+list(SORT files)
+set(body "// generated from skins/ by embed_skins.cmake; do not edit\n#include \"core/skin_assets.h\"\nnamespace judas {\n")
+set(entries "")
+set(i 0)
+foreach(f ${files})
+    file(READ "${IN_DIR}/${f}" hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," arr "${hex}")
+    string(APPEND body "static const char s${i}[] = {${arr}0x00};\n")
+    string(APPEND entries "  {\"${f}\", s${i}},\n")
+    math(EXPR i "${i}+1")
+endforeach()
+string(APPEND body "const SkinAsset * skin_assets(size_t & n) {\n  static const SkinAsset t[] = {\n${entries}  {nullptr, nullptr}};\n  n = sizeof(t)/sizeof(t[0]) - 1;\n  return t;\n}\n}\n")
+file(WRITE "${OUT}" "${body}")

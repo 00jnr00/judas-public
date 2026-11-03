@@ -1,0 +1,18 @@
+name = "parchment"
+label = "Parchment (light)"
+dark = false
+[colors]
+bg = "#efe9dc"
+surface = "#e6dece"
+surface2 = "#dcd2bd"
+border = "#b9ad93"
+title = "#2b2318"
+accent = "#6e572f"
+text = "#3a3020"
+dim = "#635a47"
+error = "#9c2b2b"
+added = "#c5e0c0"
+removed = "#e6c3c0"
+ok = "#4f8a4f"
+warn = "#9c791d"
+thinking = "#7a6e55"

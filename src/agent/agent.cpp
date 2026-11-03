@@ -7,6 +7,8 @@
 #include "agent/gitstep.h"
 #include "attach/attach.h"
 #include "agent/policy.h"
+#include "agent/teams.h"
+#include "engine/remote_engine.h"
 #include "channels/channels.h"
 #include "coach/coach.h"
 #include "context/compactor.h"
@@ -21,12 +23,17 @@
 #include "tutor/tutor.h"
 #include "tools/swarm_tools.h"
 #include "tools/session_tools.h"
+#ifdef JUDAS_MACH12
+#include "mach12/mach12_tools.h"
+#endif
 
 #include <unistd.h>
 
+#include <optional>
 #include <set>
 
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <deque>
 #include <filesystem>
@@ -49,6 +56,20 @@ const char * SWARM_PROMPT = R"(Swarm mode: bulk work is done by a swarm of small
 - Keep your own work to planning, spot-checking and merging the results. Full replies are in the JSONL file swarm_map names; read it in parts instead of pasting it into your context.
 - Small models are good at extraction, short summaries, classification and tagging. They are not good at coding, long reasoning or anything that needs the whole picture; do those yourself.
 - If swarm_map is missing or reports the swarm is off or down, tell the user to turn the swarm on with the switch in the Swarm tab or in Settings, or with `judas swarm on`.)";
+
+// Appended to the lead's prompt in a Swarm-mode session when [teams] is on.
+const char * TEAMS_PROMPT = R"(Teams: you are the only agent the user talks to. For big jobs, organize the work into teams of agents and run them.
+- team_create makes a team: a name, a brief (goal, constraints, output format), house rules and members (id, role, count, model gpu or cpu, skills). Put rules that live in a file in rule_files as "FILE#Heading" so they are copied to every member verbatim; you never restate them in hand-offs. {spec: "name"} loads a saved team from the teams folder.
+- A member with role lead is the team lead: you give it the team's whole task with team_assign and it splits the work among its members. Without a team lead you team_assign each member yourself (member "reader" picks a free copy, or name a copy like "reader.2").
+- Give every assignment a complete, self-contained task: which files or items, what to produce, where to write it. Members cannot see your conversation.
+- team_wait collects the reports (members also report automatically when you stop). Check the work, merge it, then answer the user with done. team_status shows who is doing what; team_read shows a member's latest output; team_message sends a note along an edge; team_disband stops a team.
+- Use model cpu only for wide, shallow reading (extraction, short summaries, triage); code, reasoning and merging stay on gpu members.
+- Small jobs need no team: do them yourself.)";
+
+const char * TEAM_LEAD_PROMPT = R"(Role: team lead. The session lead gave your team a task. Split it into pieces, team_assign one complete piece to each of your members, team_wait for their reports, check and merge them, and report up with done: what was done, what was checked, what is left.
+- Members see the brief and house rules pinned by the harness; your assignment only needs the piece itself (files, items, output path).
+- If a member's report is wrong or incomplete, team_assign it again with what to fix.
+- Do the merge yourself; keep your own reading to what the merge needs.)";
 
 const char * BASE_PROMPT = R"(You are Judas, a helpful assistant and agent running locally on the user's own machine.
 Nothing the user shares leaves this computer.
@@ -175,6 +196,7 @@ std::map<std::string, Role> load_roles(const Config & cfg) {
     std::map<std::string, Role> roles;
     roles["lead"] = {"lead", "Owns the request, plans, spawns workers, verifies", LEAD_PROMPT, {}, 0, -1};
     roles["worker"] = {"worker", "Does one self-contained task and reports", WORKER_PROMPT, {}, 1, -1};
+    roles["team-lead"] = {"team-lead", "Leads one team: splits its task among the members, merges, reports up", TEAM_LEAD_PROMPT, {}, 1, -1};
     roles["reviewer"] = {"reviewer", "Checks work, read-only, PASS or FAIL", REVIEWER_PROMPT, READ_ONLY_TOOLS, 1, 20};
     roles["review"] = {"review", "Hidden background review of a finished lead turn", "", REVIEW_TOOLS, REVIEW_PRIORITY, -1};
     for (const auto & d : cfg.agents.role_dirs) {
@@ -227,6 +249,19 @@ struct AgentManager::Impl {
         std::vector<std::string> review_writes;  // successful memory/skill writes, for the review event summary
         std::atomic<bool> cancel{false};
         std::set<std::string> delivered;  // child agents whose reports this agent has already received
+        // Swarm teams. team/member/copy are empty for agents outside a team.
+        std::string team, member, copy;
+        std::string model = "gpu";       // gpu | cpu (runs on `eng`, the swarm instance)
+        bool cpu_fallback = false;       // a cpu member running on the main model because the swarm is off
+        Engine * eng = nullptr;          // null = the main engine
+        int ctx_cap_override = 0;        // > 0: context cap for an agent on another engine
+        std::string activity = "idle";   // queued | generating | tool | waiting | blocked | done | failed | idle (under mu)
+        std::string activity_tool;       // the tool running while activity is tool (under mu)
+        std::string last_text;           // tail of the latest assistant output, for team_read and the UI (under mu)
+        double tok_s = 0;                // generation speed of the last model call
+        double ctx_pct = -1;             // last prompt's share of this agent's context cap (-1 = unknown)
+        bool pause_req = false;          // a cancel that should leave the agent paused, not killed
+        std::deque<std::string> mail;    // team messages delivered at the next model step of a running agent
         std::thread thread;
     };
     // How one turn ended. status is the agent row status it maps to.
@@ -235,8 +270,21 @@ struct AgentManager::Impl {
         std::string status = "done";   // done | paused | failed
         std::string reason;
     };
+    // One team in a session (docs/SWARM-TEAMS.md). Lives in memory; a daemon restart forgets it.
+    struct TeamRt {
+        TeamSpec spec;
+        std::string owner;                             // the session lead's agent id
+        std::string cwd;
+        std::string rules_text;                        // resolved house rules, pinned verbatim
+        std::map<std::string, std::string> agents;     // copy -> agent id (created on first assignment)
+        std::vector<std::string> warnings;             // map lines that were skipped when the team was loaded
+        bool disbanded = false;
+    };
     struct Session {
         std::string lead;
+        std::string request;                           // the lead's current turn input, pinned for team members
+        std::map<std::string, TeamRt> teams;
+        int team_copies = 0;                           // member copies of live teams, against teams.max_members
         bool busy = false;
         std::string last_answer;
         ReviewCounters review;       // per-session nudge counters and the in-flight flag
@@ -284,6 +332,10 @@ struct AgentManager::Impl {
     int next_listener = 1;
     std::function<bool(const std::string &, const std::string &)> approver;
     bool stopping = false;
+    // The engine cpu team members run on (the swarm instance), made on first use. Tests inject a factory.
+    std::function<std::unique_ptr<Engine>(const std::string & url)> remote_factory;
+    std::unique_ptr<Engine> remote;
+    std::mutex remote_mu;
 
     Impl(const Config & c, Engine & e, Store & s, Journal & j)
         : cfg(c), engine(e), store(s), journal(j), attachments(c), skills(c.skills), hooks(c.hooks) {
@@ -302,6 +354,7 @@ struct AgentManager::Impl {
         register_learn_tools(tools);
         register_session_tools(tools, store);
         register_agent_tools();
+        register_team_tools();
         register_skill_tool();
         if (cfg.skills.enabled && cfg.skills.manage) register_skill_tools(tools, skills, usage.get());
         if (cfg.swarm.enabled) register_swarm_tool(tools);
@@ -310,6 +363,9 @@ struct AgentManager::Impl {
         register_plan_tool();
         register_context_tools();
         register_done_tool();
+#ifdef JUDAS_MACH12
+        mach12::register_mach12_tools(tools);
+#endif
         if (cfg.mcp.enabled && !cfg.mcp.servers.empty()) {
             mcp_ = std::make_unique<mcp::Manager>(cfg, tools);
             mcp_->start();   // servers connect in the background; their tools appear as they come up
@@ -375,7 +431,10 @@ struct AgentManager::Impl {
         p += "\n\n" + a.role.prompt;
         if (a.role.name == "lead" && !a.review) {
             auto sess = store.get_session(a.row.session);
-            if (sess && sess->mode == "swarm") p += "\n\n" + std::string(SWARM_PROMPT);
+            if (sess && sess->mode == "swarm") {
+                p += "\n\n" + std::string(SWARM_PROMPT);
+                if (cfg.teams.enabled) p += "\n\n" + std::string(TEAMS_PROMPT);
+            }
         }
         auto ps = session_skills(a.row.session);
         std::string sk = ps ? ps->index_block() : skills.index_block();
@@ -454,6 +513,7 @@ struct AgentManager::Impl {
         }
         bool can_spawn = a.depth < cfg.agents.max_depth;
         int mcp_seen = 0;
+        TeamAccess ta = team_access(a);
         bool learn = is_learn_session(a);
         bool sealed;   // coach probe sessions (they carry session extras) must not write global skills or memory
         {
@@ -462,6 +522,17 @@ struct AgentManager::Impl {
         }
         for (const Tool * t : tools.list()) {
             if (sealed && (t->name == "skill_manage" || t->name == "memory_append")) continue;
+#ifdef JUDAS_MACH12
+            if (t->name.rfind("mach12_", 0) == 0 && !mach12_tools_allowed(a)) continue;
+#else
+            if (t->name.rfind("mach12_", 0) == 0) continue;
+#endif
+            bool team_tool = t->name.rfind("team_", 0) == 0;
+            if (team_tool && !ta.allows(t->name)) continue;
+            // cpu members run a small model: read-only tools, team tools and done only
+            if (a.model == "cpu" && !a.cpu_fallback && !team_tool && t->name != "done" && t->name != "update_plan" &&
+                std::find(READ_ONLY_TOOLS.begin(), READ_ONLY_TOOLS.end(), t->name) == READ_ONLY_TOOLS.end())
+                continue;
             // Learn sessions get a read-only toolset; the learner tools exist only there
             if (learn ? !learn_tool_allowed(t->name) : (t->name == "learner_context" || t->name == "learn_progress")) continue;
             bool agent_tool = t->name.rfind("spawn_agent", 0) == 0 || t->name == "wait_agents" ||
@@ -469,7 +540,7 @@ struct AgentManager::Impl {
             if (agent_tool && !can_spawn) continue;
             // the context-editing tools exist only in clm mode (compact prunes automatically instead)
             if ((t->name == "drop_context" || t->name == "note_context") && cfg.context.mode != "clm") continue;
-            if (!a.role.tools.empty() && !agent_tool && t->name != "done" && !mcp::role_allows(a.role.tools, *t))
+            if (!a.role.tools.empty() && !agent_tool && !team_tool && t->name != "done" && !mcp::role_allows(a.role.tools, *t))
                 continue;
             if (!t->source.empty()) {   // MCP tool: at most max_tools_per_agent per agent (small models degrade with many)
                 if (cfg.mcp.max_tools_per_agent > 0 && mcp_seen >= cfg.mcp.max_tools_per_agent) continue;
@@ -479,6 +550,15 @@ struct AgentManager::Impl {
         }
         return out;
     }
+
+#ifdef JUDAS_MACH12
+    // The planner tools: the lead of a chat or cowork session, only while the module is enabled.
+    bool mach12_tools_allowed(const Agent & a) {
+        if (!cfg.mach12.enabled || !cfg.mach12.tools || a.review || a.role.name != "lead" || !a.row.parent.empty()) return false;
+        auto sess = store.get_session(a.row.session);
+        return sess && (sess->mode == "chat" || sess->mode == "cowork");
+    }
+#endif
 
     bool advertised(const Agent & a, const std::string & name) {
         for (const Tool * t : tools_for(a))
@@ -621,7 +701,7 @@ struct AgentManager::Impl {
             std::string input;
             {
                 std::lock_guard lk(mu);
-                if (a->inbox.empty() || stopping) {
+                if (a->inbox.empty() || stopping || (a->cancel && a->pause_req)) {   // a paused agent keeps its inbox
                     a->running = false;
                     if (a->review) {
                         auto s = sessions.find(a->row.session);
@@ -671,17 +751,34 @@ struct AgentManager::Impl {
                 std::lock_guard lk(mu);
                 a->row.result = answer;
                 // done | paused (a cap was hit with work left; resumable) | failed (engine error) | killed
-                a->row.status = a->cancel ? "killed" : out.status;
-                a->reason = a->cancel ? "cancelled" : out.reason;
+                a->row.status = a->cancel ? (a->pause_req ? "paused" : "killed") : out.status;
+                a->reason = a->cancel ? (a->pause_req ? "paused by the user" : "cancelled") : out.reason;
                 a->row.updated_ms = now_ms();
                 store.update_agent(a->row);
+                a->activity = a->row.status == "done" ? "done" : a->row.status == "failed" ? "failed"
+                            : a->row.status == "paused" ? "blocked" : "idle";
+                a->activity_tool.clear();
                 auto s = sessions.find(a->row.session);
                 if (s != sessions.end() && s->second.lead == a->row.id && a->inbox.empty()) {
                     s->second.last_answer = answer;
                     s->second.busy = false;
                 }
             }
+            emit(event(*a, "activity", {{"activity", a->activity}}));
             emit(event(*a, "done", {{"result", answer}, {"status", a->row.status}, {"reason", a->reason}}));
+            if (!a->team.empty()) {   // a member's report travels up its edge (the map animates it)
+                std::string to;
+                {
+                    std::lock_guard lk(mu);
+                    auto s = sessions.find(a->row.session);
+                    if (s != sessions.end())
+                        if (auto t = s->second.teams.find(a->team); t != s->second.teams.end())
+                            to = team_parent_of(t->second.spec, a->copy);
+                }
+                if (!to.empty())
+                    emit(event(*a, "team", {{"action", "report"}, {"team", a->team}, {"copy", a->copy}, {"agent", a->row.id},
+                                            {"from", a->copy}, {"to", to}, {"status", a->row.status}}));
+            }
             maybe_start_review(a, out);
             cv.notify_all();
         }
@@ -703,12 +800,13 @@ struct AgentManager::Impl {
                 for (auto & [id, other] : agents)
                     if (other->running) live++;
             }
-            cap = effective_ctx_cap(cfg.active_model(), cfg.context, std::max(1, live));
+            cap = a->ctx_cap_override > 0 ? a->ctx_cap_override
+                                          : effective_ctx_cap(cfg.active_model(), cfg.context, std::max(1, live));
         } catch (...) {
             return;  // model not resolvable (e.g. a test with no models); nothing to size against
         }
         if (cap <= 0) return;
-        auto count = [this](const std::string & s) { return engine.count_tokens(s); };
+        auto count = [this, a](const std::string & s) { return eng_for(a).count_tokens(s); };
         int total = 0;
         // Count everything the rendered prompt carries, not just text: tool call arguments (whole files on a
         // write/edit), the tool schemas, and ~8 template tokens per message. Counting text only undercounted a
@@ -747,7 +845,7 @@ struct AgentManager::Impl {
             r.sampling.max_tokens = 400;
             r.priority = a->row.parent.empty() ? 0 : 2;
             r.tag = "compact " + a->row.id;
-            return engine.chat(r).message.content;
+            return eng_for(a).chat(r).message.content;
         };
         auto recall_ref = [](const ChatMessage & m) { return m.tool_call_id; };  // stored; recall tool fetches it
         auto res = compact(a->messages, cfg.context, cap, count, summarize, recall_ref);
@@ -936,6 +1034,7 @@ struct AgentManager::Impl {
     bool auto_wait_children(Agent * a) {
         if (!has_live_children(*a)) return false;
         emit(event(*a, "status", {{"waiting", "workers"}}));
+        set_activity(a, "waiting");
         json reports = json::array();
         {
             std::unique_lock lk(mu);
@@ -981,6 +1080,8 @@ struct AgentManager::Impl {
         for (int step = 0;; step++) {
             maybe_compact(a);
             sync_plan(a);
+            sync_team(a);
+            drain_mail(a);
             bool last = step >= max_steps;
             if (last && plan_state(a->plan).open > 0)
                 return paused(a, "step limit (" + std::to_string(max_steps) + ") reached with plan items still open");
@@ -1000,14 +1101,30 @@ struct AgentManager::Impl {
             if (last) req.messages.push_back({"user", "Step limit reached. Answer now with what you have, no tools."});
             req.priority = a->review ? REVIEW_PRIORITY : (a->row.parent.empty() ? 0 : a->role.priority);
             req.tag = a->row.role + " " + a->row.id;
-            auto res = engine.chat(
+            set_activity(a, "queued");
+            bool streaming = false;
+            auto res = eng_for(a).chat(
                 req,
                 [&](const ChatDelta & d) {
+                    if (!streaming) {
+                        streaming = true;
+                        set_activity(a, "generating");
+                    }
                     if (!d.reasoning.empty()) emit(event(*a, "reasoning", {{"text", d.reasoning}}));
                     if (!d.content.empty()) emit(event(*a, "delta", {{"text", d.content}}));
                     return !a->cancel.load();
                 },
                 &a->cancel);
+            if (res.generate_s > 0) a->tok_s = res.completion_tokens / res.generate_s;
+            try {
+                int cap = a->ctx_cap_override > 0 ? a->ctx_cap_override : cfg.active_model().ctx_per_agent;
+                if (cap > 0 && res.prompt_tokens > 0) a->ctx_pct = std::min(100.0, 100.0 * res.prompt_tokens / cap);
+            } catch (...) {}
+            if (!res.message.content.empty()) {
+                std::lock_guard lk(mu);
+                a->last_text = res.message.content.size() > 12000 ? res.message.content.substr(res.message.content.size() - 12000)
+                                                                  : res.message.content;
+            }
             a->row.prompt_tokens += res.prompt_tokens - res.cached_tokens;
             a->row.completion_tokens += res.completion_tokens;
             if (res.finish_reason == "error" && res.error.find("over ctx_per_agent") != std::string::npos &&
@@ -1077,6 +1194,7 @@ struct AgentManager::Impl {
                     bad_args = true;
                 }
                 emit(event(*a, "tool_call", {{"id", tc.id}, {"name", tc.name}, {"args", args}}));
+                set_activity(a, "tool", tc.name);
                 std::string label = tc.name + " " + (args.contains("path") ? args["path"].dump()
                                                      : args.contains("command") ? args["command"].dump()
                                                                                 : std::string());
@@ -1096,7 +1214,23 @@ struct AgentManager::Impl {
                         f = approver;
                     }
                     if (cfg.permissions.mode == "full-auto") return true;
-                    return f ? f(a->row.session, what) : false;
+                    if (!f) return false;
+                    set_activity(a, "blocked", "approval");
+                    bool ok = f(a->row.session, what);
+                    set_activity(a, "tool");
+                    return ok;
+                };
+                if (!a->review && !ctx.autonomous) ctx.approve_strict = [this, a](const std::string & what) {
+                    std::function<bool(const std::string &, const std::string &)> f;
+                    {
+                        std::lock_guard lk(mu);
+                        f = approver;
+                    }
+                    if (!f) return false;
+                    set_activity(a, "blocked", "approval");
+                    bool ok = f(a->row.session, what);
+                    set_activity(a, "tool");
+                    return ok;
                 };
                 bool writes = false;
                 if (const Tool * td = tools.find(tc.name)) writes = td->writes;
@@ -1148,7 +1282,7 @@ struct AgentManager::Impl {
                 // which always keeps the newest message, could not bring it back.
                 if (!a->review) store.add_message(a->row.session, a->row.id, "tool", message_to_oai(tm));
                 try {
-                    int cap = cfg.active_model().ctx_per_agent;
+                    int cap = a->ctx_cap_override > 0 ? a->ctx_cap_override : cfg.active_model().ctx_per_agent;
                     if (cap > 0) tm.content = cap_tool_result(tm.content, (size_t) cap * 9 / 10, a->review ? "" : tc.id);
                 } catch (...) {}
                 a->messages.push_back(tm);
@@ -1254,6 +1388,7 @@ struct AgentManager::Impl {
             std::vector<std::string> ids = args.value("agents", std::vector<std::string>{});
             int timeout = args.value("timeout_s", 1800);
             Agent * self = find(ctx.agent);
+            if (self) set_activity(self, "waiting");
             std::unique_lock lk(mu);
             bool ok = cv.wait_for(lk, std::chrono::seconds(timeout), [&] {
                 if (stopping || (self && self->cancel)) return true;
@@ -1311,6 +1446,624 @@ struct AgentManager::Impl {
             return {true, out.dump(2)};
         };
         tools.add(list);
+    }
+
+    // ---------- Swarm teams (docs/SWARM-TEAMS.md) ----------
+
+    // Which team tools an agent sees. The session lead of a Swarm-mode session gets all of them; a team lead can
+    // assign and wait inside its own team; every member can check status, message along an edge and read.
+    struct TeamAccess {
+        bool create = false, assign = false, member = false;
+        bool allows(const std::string & n) const {
+            if (n == "team_create" || n == "team_disband") return create;
+            if (n == "team_assign" || n == "team_wait") return assign;
+            if (n == "team_status" || n == "team_message" || n == "team_read") return member || create;
+            return false;
+        }
+    };
+    TeamAccess team_access(const Agent & a) {
+        TeamAccess t;
+        if (!cfg.teams.enabled || a.review) return t;
+        if (a.row.parent.empty()) {
+            auto sess = store.get_session(a.row.session);
+            if (sess && sess->mode == "swarm") t.create = t.assign = true;
+            return t;
+        }
+        if (a.team.empty()) return t;
+        t.member = true;
+        t.assign = a.row.role == "team-lead" && a.depth < cfg.agents.max_depth;
+        return t;
+    }
+
+    // Record what an agent is doing and tell the UI when it changes.
+    void set_activity(Agent * a, const std::string & act, const std::string & tool = "") {
+        if (a->review) return;
+        {
+            std::lock_guard lk(mu);
+            if (a->activity == act && a->activity_tool == tool) return;
+            a->activity = act;
+            a->activity_tool = tool;
+        }
+        json d = {{"activity", act}};
+        if (!tool.empty()) d["tool"] = tool;
+        emit(event(*a, "activity", d));
+    }
+
+    Engine & eng_for(const Agent * a) { return a->eng ? *a->eng : engine; }
+
+    // The engine cpu members run on, or null when the swarm is off or does not answer.
+    Engine * remote_engine() {
+        if (!swarm_is_on(cfg)) return nullptr;
+        std::lock_guard lk(remote_mu);
+        if (!remote) remote = remote_factory ? remote_factory(cfg.swarm.url) : std::make_unique<RemoteEngine>(cfg.swarm.url);
+        if (!remote || !remote->state().loaded) return nullptr;
+        return remote.get();
+    }
+
+    // The pinned team block, refreshed before every model step and put back if compaction dropped it.
+    void sync_team(Agent * a) {
+        if (a->team.empty()) return;
+        TeamBlockInput in;
+        TeamSpec spec;
+        {
+            std::lock_guard lk(mu);
+            auto s = sessions.find(a->row.session);
+            if (s == sessions.end()) return;
+            auto t = s->second.teams.find(a->team);
+            if (t == s->second.teams.end()) return;
+            spec = t->second.spec;
+            in.rules_text = t->second.rules_text;
+            in.request = s->second.request;
+        }
+        in.spec = &spec;
+        in.copy = a->copy;
+        in.request_max = (size_t) std::max(0, cfg.teams.request_max_chars);
+        in.cpu_fallback = a->cpu_fallback;
+        std::string block = team_block(in);
+        for (auto & m : a->messages)
+            if (m.role == "system" && m.content.rfind(TEAM_BLOCK_PREFIX, 0) == 0) {
+                m.content = block;
+                return;
+            }
+        size_t at = (!a->messages.empty() && a->messages[0].role == "system") ? 1 : 0;
+        a->messages.insert(a->messages.begin() + at, {"system", block});
+    }
+
+    // Team mail that arrived while the agent was running goes in before its next model step.
+    void drain_mail(Agent * a) {
+        std::deque<std::string> got;
+        {
+            std::lock_guard lk(mu);
+            got.swap(a->mail);
+        }
+        for (auto & m : got) nudge(a, m, "team message");
+    }
+
+    // Who the calling agent is inside a team: "lead" for the session lead, else its copy id. Empty = not allowed.
+    std::string team_identity(const Agent & a, const TeamRt & t) {
+        if (a.row.parent.empty() && a.row.id == t.owner) return "lead";
+        if (a.team == t.spec.name) return a.copy;
+        return "";
+    }
+
+    // Resolve a team name for the caller: explicit, the caller's own team, or the only team of the session.
+    // Caller holds mu.
+    TeamRt * find_team(const std::string & sid, const Agent & a, const std::string & name, std::string & err) {
+        auto s = sessions.find(sid);
+        if (s == sessions.end() || s->second.teams.empty()) {
+            err = "this session has no teams; create one with team_create";
+            return nullptr;
+        }
+        std::string want = !name.empty() ? name : a.team;
+        if (want.empty()) {
+            int live = 0;
+            for (auto & [n, t] : s->second.teams)
+                if (!t.disbanded) {
+                    live++;
+                    want = n;
+                }
+            if (live != 1) {
+                err = "name the team (teams:";
+                for (auto & [n, t] : s->second.teams)
+                    if (!t.disbanded) err += " " + n;
+                err += ")";
+                return nullptr;
+            }
+        }
+        auto t = s->second.teams.find(want);
+        if (t == s->second.teams.end()) {
+            err = "no team named '" + want + "'";
+            return nullptr;
+        }
+        if (!a.team.empty() && a.team != want) {
+            err = "you can only use your own team (" + a.team + ")";
+            return nullptr;
+        }
+        return &t->second;
+    }
+
+    json agent_live(const Agent & a, const std::map<std::string, std::string> & phases) {
+        AgentRow r = a.row;
+        if (a.running) r.status = "running";
+        std::string ph;
+        if (auto it = phases.find(a.row.role + " " + a.row.id); it != phases.end()) ph = it->second;
+        std::string tail = a.last_text.size() > 600 ? a.last_text.substr(a.last_text.size() - 600) : a.last_text;
+        while (!tail.empty() && ((unsigned char) tail[0] & 0xC0) == 0x80) tail.erase(0, 1);
+        return {{"id", r.id}, {"session", r.session}, {"parent", r.parent}, {"role", r.role}, {"task", r.task},
+                {"status", r.status}, {"result", r.result}, {"created_ms", r.created_ms}, {"updated_ms", r.updated_ms},
+                {"prompt_tokens", r.prompt_tokens}, {"completion_tokens", r.completion_tokens},
+                {"team", a.team}, {"member", a.member}, {"copy", a.copy},
+                {"activity", a.eng ? team_status_merge(a.activity, "") : team_status_merge(a.activity, ph)},
+                {"tool", a.activity_tool}, {"depth", a.depth}, {"model", a.model}, {"tok_s", a.tok_s},
+                {"ctx_pct", a.ctx_pct < 0 ? json(nullptr) : json(std::round(a.ctx_pct * 10) / 10)},
+                {"model_name", a.eng ? a.eng->model_name() : engine.model_name()},
+                {"last_output", tail}};
+    }
+
+    // Engine phase per request tag: prefill | generate | queue.
+    std::map<std::string, std::string> engine_phases() {
+        std::map<std::string, std::string> out;
+        EngineState st = engine.state();
+        for (auto & q : st.queue) out[q.tag] = "queue";
+        for (auto & sq : st.seqs)
+            if (!sq.tag.empty() && sq.phase != "idle") out[sq.tag] = sq.phase;
+        return out;
+    }
+
+    std::string resolve_rules(const TeamSpec & spec, const std::string & cwd, const ToolContext & ctx, std::string & err) {
+        std::string out;
+        for (auto & r : cfg.teams.house_rules) out += "- " + r + "\n";
+        for (auto & r : spec.rules) out += "- " + r + "\n";
+        for (auto & ref : spec.rule_files) {
+            std::string resolved;
+            ToolContext c = ctx;
+            c.cwd = cwd;
+            if (std::string why = check_read_path(c, team_rule_path(ref), resolved); !why.empty()) {
+                err = "rule_files " + ref + ": " + why;
+                return "";
+            }
+            std::ifstream f(resolved);
+            if (!f) {
+                err = "rule_files " + ref + ": cannot read " + team_rule_path(ref);
+                return "";
+            }
+            std::string text((std::istreambuf_iterator<char>(f)), {});
+            std::string sec = team_rule_text(ref, text);
+            if (sec.empty()) {
+                err = "rule_files " + ref + ": no heading '" + ref.substr(ref.find('#') + 1) + "' in " + team_rule_path(ref);
+                return "";
+            }
+            out += (out.empty() ? "" : "\n") + sec + "\n";
+        }
+        while (!out.empty() && out.back() == '\n') out.pop_back();
+        return out;
+    }
+
+    void register_team_tools() {
+        Tool create;
+        create.name = "team_create";
+        create.description = "Create a team of agents with a shared brief and house rules the harness pins into every "
+                             "member (they survive compaction; never restate them in hand-offs). Members start on their "
+                             "first team_assign. Easiest: pass map, the team as plain lines (team NAME / brief TEXT / "
+                             "rules FILE#Heading / rule TEXT / lead ID / member ID x3 cpu / link A -> B observe / "
+                             "place 1: ID ID). Or spec to load a saved team by name, or the JSON fields.";
+        json member_schema = {{"type", "object"},
+                              {"properties",
+                               {{"id", {{"type", "string"}}},
+                                {"role", {{"type", "string"}, {"description", "lead (team lead, at most one) | worker | reviewer"}}},
+                                {"count", {{"type", "integer"}, {"description", "copies id.1..id.N (1 to 8)"}}},
+                                {"model", {{"type", "string"}, {"description", "gpu (default) | cpu (small fast model, read-only work)"}}},
+                                {"skills", {{"type", "array"}, {"items", {{"type", "string"}}}}}}},
+                              {"required", {"id"}}};
+        create.parameters = {
+            {"type", "object"},
+            {"properties",
+             {{"name", {{"type", "string"}}},
+              {"brief", {{"type", "string"}, {"description", "goal, constraints, output format"}}},
+              {"rules", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"rule_files", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "\"FILE\" or \"FILE#Heading\", pinned verbatim"}}},
+              {"members", {{"type", "array"}, {"items", member_schema}}},
+              {"edges", {{"type", "array"}, {"items", {{"type", "object"}, {"properties", {{"from", {{"type", "string"}}}, {"to", {{"type", "string"}}}, {"kind", {{"type", "string"}, {"description", "message | observe"}}}}}}}}},
+              {"spec", {{"type", "string"}, {"description", "load a saved team (teams folder, NAME.map or NAME.toml)"}}},
+              {"map", {{"type", "string"}, {"description", "the team(s) as map lines, one fact per line"}}},
+              {"place", {{"type", "array"}, {"items", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}}}};
+        create.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a || !team_access(*a).create) return {false, "only the session lead of a Swarm session can create teams"};
+            std::vector<TeamSpec> specs;
+            std::vector<std::string> warnings;
+            json j = args;
+            auto from_map = [&](const std::string & text, const std::string & name) -> std::string {
+                TeamMap m = parse_team_map(text, name);
+                warnings = m.warnings;
+                if (m.teams.empty()) return "the map has no team in it (start with: team NAME, then member lines)";
+                specs = m.teams;
+                return "";
+            };
+            if (j.contains("spec")) {
+                std::string name = j.value("spec", "");
+                bool ok = !name.empty() && name.size() <= 40;
+                for (char c : name) ok = ok && (std::isalnum((unsigned char) c) || c == '-' || c == '_');
+                if (!ok) return {false, "spec must be a saved team name (a-z, 0-9, _ or -)"};
+                fs::path dir = expand_home(cfg.teams.dir);
+                fs::path pm = dir / (name + ".map"), pt = dir / (name + ".toml");
+                if (std::ifstream f(pm); f) {
+                    std::string text((std::istreambuf_iterator<char>(f)), {});
+                    if (auto e = from_map(text, name); !e.empty()) return {false, pm.string() + ": " + e};
+                } else if (std::ifstream g(pt); g) {
+                    std::string text((std::istreambuf_iterator<char>(g)), {});
+                    TeamSpec one;
+                    if (std::string e = team_spec_from_toml(text, one); !e.empty()) return {false, pt.string() + ": " + e};
+                    specs.push_back(one);
+                } else {
+                    return {false, "no saved team " + pm.string() + " (or .toml)"};
+                }
+                if (specs.size() == 1 && j.contains("name") && j["name"].is_string()) specs[0].name = j["name"].get<std::string>();
+            } else if (j.contains("map")) {
+                if (!j["map"].is_string()) return {false, "map must be the map text (one fact per line)"};
+                if (auto e = from_map(j["map"].get<std::string>(), j.value("name", std::string("team"))); !e.empty())
+                    return {false, e};
+            } else {
+                TeamSpec one;
+                if (std::string e = team_spec_from_json(j, one); !e.empty()) return {false, e};
+                specs.push_back(one);
+            }
+            // validate every team first (names unique, room left), then create them all
+            int used;
+            {
+                std::lock_guard lk(mu);
+                auto & s = sessions[a->row.session];
+                used = s.team_copies;
+                for (auto & sp : specs)
+                    if (s.teams.count(sp.name) && !s.teams[sp.name].disbanded)
+                        return {false, "a team named '" + sp.name + "' already exists; disband it or pick another name"};
+            }
+            std::vector<std::string> rules(specs.size());
+            for (size_t i = 0; i < specs.size(); i++) {
+                for (size_t k = 0; k < i; k++)
+                    if (specs[k].name == specs[i].name) return {false, "the map names team '" + specs[i].name + "' twice"};
+                int left = std::max(0, cfg.teams.max_members - used);
+                if (std::string e = validate_team_spec(specs[i], left, a->depth, cfg.agents.max_depth); !e.empty())
+                    return {false, "team " + specs[i].name + ": " + e};
+                used += (int) team_all_copies(specs[i]).size();
+                std::string err;
+                rules[i] = resolve_rules(specs[i], a->cwd, ctx, err);
+                if (!err.empty()) return {false, "team " + specs[i].name + ": " + err};
+            }
+            std::string out;
+            for (size_t i = 0; i < specs.size(); i++) {
+                const TeamSpec & spec = specs[i];
+                {
+                    std::lock_guard lk(mu);
+                    auto & s = sessions[a->row.session];
+                    TeamRt t;
+                    t.spec = spec;
+                    t.owner = a->row.id;
+                    t.cwd = a->cwd;
+                    t.rules_text = rules[i];
+                    t.warnings = warnings;
+                    s.teams[spec.name] = std::move(t);
+                    s.team_copies += (int) team_all_copies(spec).size();
+                }
+                emit(event(*a, "team", {{"action", "created"}, {"team", spec.name}, {"spec", team_spec_to_json(spec)}}));
+                std::string tl = team_lead_of(spec);
+                std::string copies_s;
+                for (auto & c : team_all_copies(spec)) copies_s += (copies_s.empty() ? "" : ", ") + c;
+                out += "team " + spec.name + " created: " + copies_s + ". Pinned rules: " + std::to_string(rules[i].size()) +
+                       " characters. " +
+                       (tl.empty() ? "Assign each member its piece with team_assign (member id or copy)."
+                                   : "Give the team's task to its team lead with team_assign member=" + tl + ".") +
+                       "\n";
+            }
+            out += "\nThe team as loaded (canonical map):\n";
+            for (auto & sp : specs) out += team_map_text(sp) + "\n";
+            if (!warnings.empty()) {
+                out += "Skipped map lines (fix them next time):\n";
+                for (auto & w : warnings) out += "- " + w + "\n";
+            }
+            return {true, out};
+        };
+        tools.add(create);
+
+        Tool assign;
+        assign.name = "team_assign";
+        assign.description = "Give a team member a complete, self-contained task (it starts, or continues if it already "
+                             "worked). member is a member id (picks a free copy) or a copy like reader.2.";
+        assign.parameters = {{"type", "object"},
+                             {"properties", {{"team", {{"type", "string"}}}, {"member", {{"type", "string"}}},
+                                             {"task", {{"type", "string"}}}}},
+                             {"required", {"member", "task"}}};
+        assign.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a || !team_access(*a).assign) return {false, "you cannot assign team work"};
+            std::string task = args.value("task", ""), want = args.value("member", "");
+            if (task.empty()) return {false, "task is empty"};
+            std::string copy, existing, team_name, cwd, role_name, model = "gpu", from;
+            std::vector<std::string> skills;
+            {
+                std::lock_guard lk(mu);
+                std::string err;
+                TeamRt * t = find_team(a->row.session, *a, args.value("team", ""), err);
+                if (!t) return {false, err};
+                if (t->disbanded) return {false, "team " + t->spec.name + " was disbanded"};
+                from = team_identity(*a, *t);
+                if (from.empty()) return {false, "you are not in team " + t->spec.name};
+                team_name = t->spec.name;
+                cwd = t->cwd;
+                // a member id with copies picks the first copy that is free (never started, or idle)
+                std::vector<std::string> cands;
+                if (const TeamMemberSpec * m = team_member(t->spec, want)) {
+                    cands = team_copies(*m);
+                } else if (!team_member_of(t->spec, want).empty()) {
+                    cands = {want};
+                } else {
+                    std::string all;
+                    for (auto & c : team_all_copies(t->spec)) all += " " + c;
+                    return {false, "no member '" + want + "' in team " + team_name + " (copies:" + all + ")"};
+                }
+                for (auto & c : cands) {
+                    auto it = t->agents.find(c);
+                    if (it == t->agents.end()) { copy = c; break; }
+                    auto ag = agents.find(it->second);
+                    if (ag != agents.end() && !ag->second->running && ag->second->inbox.empty()) { copy = c; break; }
+                }
+                if (copy.empty()) copy = cands.front();   // all busy: queue it on the first copy
+                if (!edge_allows(t->spec, from, copy, "message")) {
+                    std::string tl = team_lead_of(t->spec);
+                    return {false, "no edge from " + from + " to " + copy +
+                                       (from == "lead" && !tl.empty() ? "; give the work to the team lead " + tl : "")};
+                }
+                const TeamMemberSpec * m = team_member(t->spec, team_member_of(t->spec, copy));
+                role_name = m->role == "lead" ? "team-lead" : m->role;
+                model = m->model;
+                skills = m->skills;
+                if (auto it = t->agents.find(copy); it != t->agents.end()) existing = it->second;
+            }
+            if (!existing.empty()) {
+                Agent * c = find(existing);
+                if (!c) return {false, "member agent is gone"};
+                {
+                    std::lock_guard lk(mu);
+                    c->cancel = false;
+                    c->pause_req = false;
+                    c->inbox.push_back(task);
+                    a->delivered.erase(c->row.id);   // its next report is new
+                }
+                emit(event(*c, "team", {{"action", "assigned"}, {"team", team_name}, {"copy", copy}, {"agent", c->row.id},
+                                        {"from", from}, {"to", copy}}));
+                start_turn(c);
+                return {true, json({{"agent", c->row.id}, {"copy", copy}, {"status", "assigned (continues)"}}).dump()};
+            }
+            if (std::string why = spawn_denied(*a, role_name); !why.empty()) return {false, why};
+            Engine * eng = nullptr;
+            bool fallback = false;
+            if (model == "cpu") {
+                eng = remote_engine();
+                fallback = eng == nullptr;
+            }
+            Agent * c = create_agent(ctx.session, a->row.id, role_name, task, cwd, a->depth + 1);
+            {
+                std::lock_guard lk(mu);
+                c->team = team_name;
+                c->copy = copy;
+                c->model = model;
+                c->eng = eng;
+                c->cpu_fallback = fallback;
+                auto & t = sessions[ctx.session].teams[team_name];
+                c->member = team_member_of(t.spec, copy);
+                t.agents[copy] = c->row.id;
+            }
+            if (eng) {
+                EngineState st = eng->state();
+                if (st.ctx_total > 0) c->ctx_cap_override = st.ctx_total / std::max(1, st.max_agents);
+            }
+            std::string sk;
+            for (auto & n : skills)
+                if (auto s = skills_lookup(ctx.session, n)) sk += "# skill: " + s->name + "\n" + truncate_output(s->body, 4000) + "\n\n";
+            if (!sk.empty()) c->messages.push_back({"system", "Skills for your role:\n\n" + sk});
+            sync_team(c);
+            {
+                std::lock_guard lk(mu);
+                c->inbox.push_back(task);
+            }
+            emit(event(*c, "spawned", {{"task", task}, {"role", c->row.role}, {"team", team_name}, {"member", c->member},
+                                       {"copy", copy}, {"model", model}}));
+            emit(event(*c, "team", {{"action", "assigned"}, {"team", team_name}, {"copy", copy}, {"agent", c->row.id},
+                                    {"from", from}, {"to", copy}}));
+            start_turn(c);
+            json out = {{"agent", c->row.id}, {"copy", copy}, {"status", "running"}};
+            if (fallback) out["note"] = "the CPU swarm is off or down, so this cpu member runs on the main model";
+            return {true, out.dump()};
+        };
+        tools.add(assign);
+
+        Tool wait;
+        wait.name = "team_wait";
+        wait.description = "Wait until the team members you assigned finish, and get their reports.";
+        wait.parameters = {{"type", "object"},
+                           {"properties", {{"team", {{"type", "string"}}},
+                                           {"timeout_s", {{"type", "integer"}, {"description", "default 1800"}}}}}};
+        wait.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * self = find(ctx.agent);
+            if (!self || !team_access(*self).assign) return {false, "you cannot wait on a team"};
+            int timeout = std::clamp(args.value("timeout_s", 1800), 1, 7200);
+            std::string tname = args.value("team", "");
+            set_activity(self, "waiting");
+            std::unique_lock lk(mu);
+            auto mine = [&](const Agent & c) {
+                return c.row.parent == self->row.id && !c.team.empty() && (tname.empty() || c.team == tname);
+            };
+            bool ok = cv.wait_for(lk, std::chrono::seconds(timeout), [&] {
+                if (stopping || self->cancel) return true;
+                for (auto & [id, c] : agents)
+                    if (mine(*c) && (c->running || !c->inbox.empty())) return false;
+                return true;
+            });
+            json out = json::array();
+            for (auto & [id, c] : agents) {
+                if (!mine(*c)) continue;
+                bool live = c->running || !c->inbox.empty();
+                if (!live && self->delivered.count(id)) continue;
+                if (!live) self->delivered.insert(id);
+                out.push_back({{"copy", c->copy}, {"team", c->team}, {"agent", id},
+                               {"status", live ? "running" : c->row.status}, {"report", live ? "" : c->row.result}});
+            }
+            lk.unlock();
+            if (out.empty()) return {true, "no new reports (nothing assigned, or all reports were already delivered)"};
+            return {ok, ok ? out.dump(2) : "timeout; partial: " + out.dump(2)};
+        };
+        tools.add(wait);
+
+        Tool status;
+        status.name = "team_status";
+        status.description = "Show the session's teams: each member copy, its status and the start of its latest output.";
+        status.parameters = {{"type", "object"}, {"properties", {{"team", {{"type", "string"}}}}}};
+        status.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a) return {false, "no agent"};
+            auto ph = engine_phases();
+            std::lock_guard lk(mu);
+            auto s = sessions.find(ctx.session);
+            if (s == sessions.end() || s->second.teams.empty()) return {true, "no teams yet"};
+            std::string want = args.value("team", "");
+            json out = json::array();
+            for (auto & [n, t] : s->second.teams) {
+                if (!want.empty() && n != want) continue;
+                if (!a->team.empty() && n != a->team) continue;
+                json ms = json::array();
+                for (auto & c : team_all_copies(t.spec)) {
+                    auto it = t.agents.find(c);
+                    if (it == t.agents.end()) {
+                        ms.push_back({{"copy", c}, {"status", "not started"}});
+                        continue;
+                    }
+                    auto ag = agents.find(it->second);
+                    if (ag == agents.end()) continue;
+                    json live = agent_live(*ag->second, ph);
+                    std::string head = ag->second->last_text.substr(0, 200);
+                    ms.push_back({{"copy", c}, {"agent", it->second}, {"status", live["activity"]},
+                                  {"tokens", ag->second->row.prompt_tokens + ag->second->row.completion_tokens},
+                                  {"latest", head}});
+                }
+                out.push_back({{"team", n}, {"disbanded", t.disbanded}, {"members", ms}});
+            }
+            return {true, out.dump(2)};
+        };
+        tools.add(status);
+
+        Tool msg;
+        msg.name = "team_message";
+        msg.description = "Send a short note to a teammate along an edge (to: a copy id, or lead). It reaches them at "
+                          "their next step, or starts them if they are idle.";
+        msg.parameters = {{"type", "object"},
+                          {"properties", {{"team", {{"type", "string"}}}, {"to", {{"type", "string"}}},
+                                          {"message", {{"type", "string"}}}}},
+                          {"required", {"to", "message"}}};
+        msg.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a) return {false, "no agent"};
+            std::string to = args.value("to", ""), text = args.value("message", "");
+            if (text.empty()) return {false, "message is empty"};
+            if (text.size() > 4000) text = text.substr(0, 4000) + " [cut]";
+            Agent * target = nullptr;
+            bool start = false;
+            std::string from, team_name;
+            {
+                std::lock_guard lk(mu);
+                std::string err;
+                TeamRt * t = find_team(a->row.session, *a, args.value("team", ""), err);
+                if (!t) return {false, err};
+                from = team_identity(*a, *t);
+                if (from.empty()) return {false, "you are not in team " + t->spec.name};
+                if (!edge_allows(t->spec, from, to, "message")) return {false, "no message edge from " + from + " to " + to};
+                team_name = t->spec.name;
+                std::string tid = to == "lead" ? t->owner : (t->agents.count(to) ? t->agents[to] : "");
+                if (tid.empty()) return {false, to + " has not started; give it work with team_assign"};
+                auto it = agents.find(tid);
+                if (it == agents.end()) return {false, to + " is gone"};
+                target = it->second.get();
+                std::string note = "[team " + team_name + "] message from " + from + ": " + text;
+                if (target->running || to == "lead") {
+                    target->mail.push_back(note);   // a lead's idle turn is not restarted by its members
+                } else {
+                    target->cancel = false;
+                    target->inbox.push_back(note);
+                    start = true;
+                }
+            }
+            emit(event(*a, "team", {{"action", "message"}, {"team", team_name}, {"from", from}, {"to", to}}));
+            if (start) start_turn(target);
+            return {true, "delivered to " + to};
+        };
+        tools.add(msg);
+
+        Tool read;
+        read.name = "team_read";
+        read.description = "Read the latest output of a teammate you may observe (its tail, bounded).";
+        read.parameters = {{"type", "object"},
+                           {"properties", {{"team", {{"type", "string"}}}, {"agent", {{"type", "string"}, {"description", "copy id"}}},
+                                           {"max_chars", {{"type", "integer"}, {"description", "default 4000"}}}}},
+                           {"required", {"agent"}}};
+        read.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a) return {false, "no agent"};
+            std::string who = args.value("agent", "");
+            size_t cap = (size_t) std::clamp(args.value("max_chars", 4000), 200, std::max(200, cfg.teams.read_max_chars));
+            std::lock_guard lk(mu);
+            std::string err;
+            TeamRt * t = find_team(a->row.session, *a, args.value("team", ""), err);
+            if (!t) return {false, err};
+            std::string from = team_identity(*a, *t);
+            if (from.empty()) return {false, "you are not in team " + t->spec.name};
+            if (!edge_allows(t->spec, from, who, "observe")) return {false, "no observe edge from " + from + " to " + who};
+            auto it = t->agents.find(who);
+            if (it == t->agents.end()) return {true, who + " has not started"};
+            auto ag = agents.find(it->second);
+            if (ag == agents.end()) return {false, who + " is gone"};
+            const Agent & c = *ag->second;
+            std::string body = !c.running && !c.row.result.empty() ? c.row.result : c.last_text;
+            bool cut = body.size() > cap;
+            if (cut) {
+                body = body.substr(body.size() - cap);
+                while (!body.empty() && ((unsigned char) body[0] & 0xC0) == 0x80) body.erase(0, 1);
+            }
+            return {true, "[" + who + ", " + team_status_merge(c.activity, "") + (cut ? ", tail" : "") + "]\n" + body};
+        };
+        tools.add(read);
+
+        Tool disband;
+        disband.name = "team_disband";
+        disband.description = "Stop a team: cancels its members and closes it.";
+        disband.parameters = {{"type", "object"}, {"properties", {{"team", {{"type", "string"}}}}}, {"required", {"team"}}};
+        disband.run = [this](const json & args, ToolContext & ctx) -> ToolResult {
+            Agent * a = find(ctx.agent);
+            if (!a || !team_access(*a).create) return {false, "only the session lead can disband a team"};
+            std::string name = args.value("team", "");
+            {
+                std::lock_guard lk(mu);
+                auto s = sessions.find(ctx.session);
+                if (s == sessions.end() || !s->second.teams.count(name)) return {false, "no team named '" + name + "'"};
+                TeamRt & t = s->second.teams[name];
+                if (t.disbanded) return {true, "already disbanded"};
+                t.disbanded = true;
+                s->second.team_copies = std::max(0, s->second.team_copies - (int) team_all_copies(t.spec).size());
+                for (auto & [copy, id] : t.agents)
+                    if (auto it = agents.find(id); it != agents.end()) {
+                        it->second->cancel = true;
+                        it->second->inbox.clear();
+                        // members of a team lead belong to the team too (same team name)
+                    }
+            }
+            cv.notify_all();
+            emit(event(*a, "team", {{"action", "disbanded"}, {"team", name}}));
+            return {true, "team " + name + " disbanded"};
+        };
+        tools.add(disband);
+    }
+
+    std::optional<Skill> skills_lookup(const std::string & sid, const std::string & name) {
+        auto ps = session_skills(sid);
+        return ps ? ps->by_name(name) : skills.by_name(name);
     }
 
     // Rebuild a lead agent from the store after a restart.
@@ -1400,6 +2153,7 @@ std::string AgentManager::submit(const std::string & session_id, const std::stri
         auto & s = I.sessions[sid];
         s.lead = lead->row.id;
         s.busy = true;
+        s.request = user_message;
         // a new message clears an earlier cancel for the whole session, workers included
         for (auto & [id, ag] : I.agents)
             if (ag->row.session == sid) ag->cancel = false;
@@ -1500,6 +2254,83 @@ bool AgentManager::resume(const std::string & session_id, const std::string & cw
     I.emit(I.event(*lead, "spawned", {{"task", msg}, {"role", "lead"}, {"resume", true}}));
     I.start_turn(lead);
     return true;
+}
+
+json AgentManager::team_view(const std::string & session) const {
+    auto & I = *impl_;
+    auto ph = I.engine_phases();
+    std::lock_guard lk(I.mu);
+    json teams = json::array(), ags = json::array(), lead = nullptr;
+    auto s = I.sessions.find(session);
+    if (s != I.sessions.end()) {
+        for (auto & [n, t] : s->second.teams) {
+            json members = json::array(), edges = json::array(), copies = json::array();
+            for (auto & m : t.spec.members)
+                members.push_back({{"id", m.id}, {"role", m.role}, {"count", m.count}, {"model", m.model}, {"skills", m.skills}});
+            for (auto & e : t.spec.edges) edges.push_back({{"from", e.from}, {"to", e.to}, {"kind", e.kind}});
+            for (auto & c : team_all_copies(t.spec)) {
+                auto it = t.agents.find(c);
+                copies.push_back({{"copy", c}, {"member", team_member_of(t.spec, c)}, {"agent", it == t.agents.end() ? "" : it->second}});
+            }
+            teams.push_back({{"name", n}, {"brief", t.spec.brief}, {"rules", t.spec.rules}, {"lead_member", team_lead_of(t.spec)},
+                             {"owner", t.owner}, {"disbanded", t.disbanded}, {"members", members}, {"edges", edges},
+                             {"copies", copies}, {"place", t.spec.place}, {"map", team_map_text(t.spec)},
+                             {"warnings", t.warnings}});
+        }
+    }
+    for (auto & [id, a] : I.agents) {
+        if (a->row.session != session || a->review) continue;
+        json j = I.agent_live(*a, ph);
+        if (s != I.sessions.end() && id == s->second.lead) lead = j;
+        ags.push_back(j);
+    }
+    return {{"session", session}, {"lead", lead}, {"teams", teams}, {"agents", ags}};
+}
+
+bool AgentManager::cancel_agent(const std::string & session, const std::string & agent) {
+    auto & I = *impl_;
+    std::lock_guard lk(I.mu);
+    auto it = I.agents.find(agent);
+    if (it == I.agents.end() || it->second->row.session != session) return false;
+    it->second->pause_req = false;
+    it->second->cancel = true;
+    it->second->inbox.clear();
+    I.cv.notify_all();
+    return true;
+}
+
+bool AgentManager::pause_agent(const std::string & session, const std::string & agent) {
+    auto & I = *impl_;
+    std::lock_guard lk(I.mu);
+    auto it = I.agents.find(agent);
+    if (it == I.agents.end() || it->second->row.session != session) return false;
+    it->second->pause_req = true;
+    it->second->cancel = true;   // the inbox stays: resume continues with it
+    I.cv.notify_all();
+    return true;
+}
+
+bool AgentManager::resume_agent(const std::string & session, const std::string & agent) {
+    auto & I = *impl_;
+    Impl::Agent * a = nullptr;
+    {
+        std::lock_guard lk(I.mu);
+        auto it = I.agents.find(agent);
+        if (it == I.agents.end() || it->second->row.session != session || it->second->running) return false;
+        a = it->second.get();
+        if (a->row.status != "paused" && a->row.status != "killed") return false;
+        a->cancel = false;
+        a->pause_req = false;
+        a->inbox.push_back("Continue your task where you stopped. Do not start over; finish with done.");
+    }
+    I.start_turn(a);
+    return true;
+}
+
+void AgentManager::set_remote_engine_factory(std::function<std::unique_ptr<Engine>(const std::string &)> f) {
+    std::lock_guard lk(impl_->remote_mu);
+    impl_->remote_factory = std::move(f);
+    impl_->remote.reset();
 }
 
 int AgentManager::add_listener(AgentListener fn) {

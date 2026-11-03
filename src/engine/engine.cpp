@@ -1303,9 +1303,9 @@ private:
 // ---------- remote engine (OpenAI-compatible upstream) ----------
 // One request at a time (the upstream may serve one sequence); agents wait in a priority queue (lead first, FIFO within
 // a priority) and a request cancelled while queued leaves without ever reaching the upstream. Streams SSE through.
-class RemoteEngine : public Engine {
+class RemoteModelEngine : public Engine {
 public:
-    explicit RemoteEngine(const Config & cfg) : m_(cfg.active_model()), name_(cfg.engine.model) {
+    explicit RemoteModelEngine(const Config & cfg) : m_(cfg.active_model()), name_(cfg.engine.model) {
         auto u = m_.url;
         auto p = u.find("://");
         if (p != std::string::npos) u = u.substr(p + 3);
@@ -1491,7 +1491,7 @@ private:
 
 std::unique_ptr<Engine> Engine::create(const Config & cfg) {
     const auto & m = cfg.active_model();
-    if (!m.url.empty()) return std::make_unique<RemoteEngine>(cfg);
+    if (!m.url.empty()) return std::make_unique<RemoteModelEngine>(cfg);
     // a local model needs the GPU: stop any remote model's unit first so its VRAM is freed
     for (const auto & [k, other] : cfg.models)
         if (!other.unit.empty()) std::system(("systemctl --user stop " + other.unit + " 2>/dev/null").c_str());

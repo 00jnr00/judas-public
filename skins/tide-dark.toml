@@ -1,0 +1,23 @@
+name = "tide-dark"
+label = "Tide Dark"
+dark = true
+
+[tokens]
+radius = '8px'
+radius_sm = '4px'
+
+[colors]
+bg = "#0A0E14"
+surface = "#10151C"
+surface2 = "#1D2229"
+border = "#3A4452"
+title = "#F7FAFC"
+accent = "#4ECDC4"
+text = "#C8D0DA"
+dim = "#7F8996"
+ok = "#6FA56F"
+warn = "#C9A554"
+error = "#D0675E"
+thinking = "#626A76"
+added = "#26382D"
+removed = "#45292A"

@@ -1,0 +1,23 @@
+name = "graphite-dark"
+label = "Graphite Dark"
+dark = true
+
+[tokens]
+radius = '4px'
+radius_sm = '2px'
+
+[colors]
+bg = "#121315"
+surface = "#1B1D21"
+surface2 = "#282A2E"
+border = "#4A5058"
+title = "#EEF1F4"
+accent = "#5890EA"
+text = "#D3D7DC"
+dim = "#8A9199"
+ok = "#7FB685"
+warn = "#E0A84A"
+error = "#D9564E"
+thinking = "#6C7278"
+added = "#314134"
+removed = "#4E2726"

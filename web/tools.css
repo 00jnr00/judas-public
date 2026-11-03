@@ -2,7 +2,7 @@
 #screen-tools{display:none;flex-direction:column}
 #screen-tools.active{display:flex}
 .tools-bar{display:flex;gap:var(--s2);flex-wrap:wrap;padding:var(--s3) var(--s5) 0;border-bottom:1px solid var(--border);flex:none}
-.tools-tab{background:transparent;border:1px solid var(--border);border-bottom:none;border-radius:8px 8px 0 0;padding:.4em 1em;color:var(--dim)}
+.tools-tab{background:transparent;border:1px solid var(--border);border-bottom:none;border-radius:var(--radius,8px) var(--radius,8px) 0 0;padding:.4em 1em;color:var(--dim)}
 .tools-tab.active{background:var(--surface2);color:var(--title);border-color:var(--accent)}
 .tools-body{flex:1;min-height:0;display:flex}
 .tools-wrap{flex:1;min-width:0;display:flex}

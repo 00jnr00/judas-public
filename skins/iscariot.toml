@@ -1,0 +1,13 @@
+name = "iscariot"
+label = "Iscariot (warm silver)"
+dark = true
+[colors]
+bg = "#0c0a0b"
+surface = "#191315"
+surface2 = "#241b1e"
+border = "#5a4a4e"
+title = "#f0e6e2"
+accent = "#cdb4b0"
+text = "#ded3cf"
+dim = "#908183"
+error = "#c23b3b"

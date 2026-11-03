@@ -45,6 +45,16 @@ add_custom_command(
     DEPENDS ${WEB_FILES} ${CMAKE_SOURCE_DIR}/cmake/embed_assets.cmake
     COMMENT "Embedding web/ assets")
 
+# Embed skins/ (built-in themes) the same way.
+file(GLOB SKIN_FILES CONFIGURE_DEPENDS skins/*.toml)
+set(SKINS_CPP ${CMAKE_BINARY_DIR}/skins_generated.cpp)
+add_custom_command(
+    OUTPUT ${SKINS_CPP}
+    COMMAND ${CMAKE_COMMAND} -DIN_DIR=${CMAKE_SOURCE_DIR}/skins -DOUT=${SKINS_CPP}
+            -P ${CMAKE_SOURCE_DIR}/cmake/embed_skins.cmake
+    DEPENDS ${SKIN_FILES} ${CMAKE_SOURCE_DIR}/cmake/embed_skins.cmake
+    COMMENT "Embedding skins/ themes")
+
 # One static library for all of src/ except main.cpp (the TUI is raw ANSI + termios, no extra dependency).
 file(GLOB_RECURSE JUDAS_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 list(REMOVE_ITEM JUDAS_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
@@ -64,7 +74,7 @@ option(JUDAS_STRATA "Build the Strata inference backend into judas (needs ROCm a
 if(NOT JUDAS_STRATA)
     list(REMOVE_ITEM JUDAS_SOURCES ${CMAKE_SOURCE_DIR}/src/engine/strata_engine.cpp)
 endif()
-add_library(judas_core STATIC ${JUDAS_SOURCES} ${ASSETS_CPP})
+add_library(judas_core STATIC ${JUDAS_SOURCES} ${ASSETS_CPP} ${SKINS_CPP})
 target_include_directories(judas_core PUBLIC src)
 target_link_libraries(judas_core PUBLIC llama_deps judas_sha256 SQLite3::SQLite3)
 if(JUDAS_MACH12)
@@ -84,7 +94,7 @@ enable_testing()
 set(JUDAS_TEST_TMP "/tmp/judas-tests" CACHE STRING "Scratch directory the tests write under")
 file(GLOB JUDAS_TESTS CONFIGURE_DEPENDS tests/test_*.cpp)
 if(NOT JUDAS_MACH12)
-    list(FILTER JUDAS_TESTS EXCLUDE REGEX "test_mach12\\.cpp$")
+    list(FILTER JUDAS_TESTS EXCLUDE REGEX "test_mach12.*\\.cpp$")
 endif()
 foreach(t ${JUDAS_TESTS})
     get_filename_component(name ${t} NAME_WE)
@@ -94,6 +104,12 @@ foreach(t ${JUDAS_TESTS})
     target_compile_definitions(${name} PRIVATE JUDAS_TESTS_DIR="${CMAKE_SOURCE_DIR}/tests" JUDAS_TEST_TMP="${JUDAS_TEST_TMP}")
     add_test(NAME ${name} COMMAND ${name})
 endforeach()
+
+# Every shipped theme must pass the WCAG contrast thresholds (tools/skin-contrast.py).
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME skin_contrast COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/skin-contrast.py ${CMAKE_SOURCE_DIR}/skins)
+endif()
 
 # Strata tokenizer check: CPU only (vocab-only model), skips itself when the Strata GGUF is absent.
 if(JUDAS_STRATA)

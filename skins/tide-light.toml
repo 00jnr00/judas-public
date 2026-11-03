@@ -1,0 +1,23 @@
+name = "tide-light"
+label = "Tide Light"
+dark = false
+
+[tokens]
+radius = '8px'
+radius_sm = '4px'
+
+[colors]
+bg = "#EEF4F5"
+surface = "#E0EBED"
+surface2 = "#D5DFE1"
+border = "#A7BFC4"
+title = "#081318"
+accent = "#0C6D68"
+text = "#16262B"
+dim = "#4C666C"
+ok = "#2F7A3A"
+warn = "#80600A"
+error = "#B2382F"
+thinking = "#748A8E"
+added = "#B9D2C1"
+removed = "#DCBCBA"

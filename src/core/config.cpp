@@ -447,6 +447,17 @@ void apply_file(Config & c, const std::string & file) {
                 }
                 else unknown_key(r, full, sv);
             }
+        } else if (key == "teams") {
+            for (auto && [tk, tv] : as_table(r, key, v)) {
+                std::string t(tk.str()), full = key + "." + t;
+                if (t == "enabled") c.teams.enabled = get_bool(r, full, tv);
+                else if (t == "dir") c.teams.dir = get_str(r, full, tv);
+                else if (t == "max_members") c.teams.max_members = get_int(r, full, tv);
+                else if (t == "house_rules") c.teams.house_rules = get_str_array(r, full, tv);
+                else if (t == "request_max_chars") c.teams.request_max_chars = get_int(r, full, tv);
+                else if (t == "read_max_chars") c.teams.read_max_chars = get_int(r, full, tv);
+                else unknown_key(r, full, tv);
+            }
         } else if (key == "hooks") {
             for (auto && [hk, hv] : as_table(r, key, v)) {
                 std::string h(hk.str()), full = key + "." + h;
@@ -601,7 +612,9 @@ void apply_file(Config & c, const std::string & file) {
             for (auto && [mk, mv] : as_table(r, key, v)) {
                 std::string m(mk.str()), full = key + "." + m;
                 if (m == "enabled") c.mach12.enabled = get_bool(r, full, mv);
+                else if (m == "tools") c.mach12.tools = get_bool(r, full, mv);
                 else if (m == "data_dir") c.mach12.data_dir = get_str(r, full, mv);
+                else if (m == "merge_cmd") c.mach12.merge_cmd = get_str(r, full, mv);
                 else unknown_key(r, full, mv);
             }
         } else if (key == "mcp") {
@@ -1139,7 +1152,9 @@ std::string dump_config(const Config & c) {
       << "unit = " << q(c.swarm.unit) << "\n";
     o << "\n[mach12]\n"
       << "enabled = " << (c.mach12.enabled ? "true" : "false") << "\n"
-      << "data_dir = " << q(c.mach12.data_dir) << "\n";
+      << "tools = " << (c.mach12.tools ? "true" : "false") << "\n"
+      << "data_dir = " << q(c.mach12.data_dir) << "\n"
+      << "merge_cmd = " << q(c.mach12.merge_cmd) << "\n";
     for (auto & tb : c.tools.tabs) {
         o << "\n[[tools.tabs]]\n"
           << "name = " << q(tb.name) << "\n"

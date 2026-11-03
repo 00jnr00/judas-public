@@ -92,3 +92,36 @@ pinned ggml. Strata is used under the MIT License:
     SOFTWARE.
 
 The Strata model files (Qwen3.8-Flash-Next, Apache-2.0) keep their own licenses.
+
+## OpenRig (Swarm screen: Map, Table, motion)
+
+Parts of the Swarm screen are ported or adapted from OpenRig (https://github.com/mvschwarz/openrig), Copyright 2026
+Mike Schwarz, used under the Apache License 2.0 (full text in LICENSES/Apache-2.0.txt). The code was translated from
+React, Tailwind and React Flow into vanilla JavaScript and plain CSS and changed to use Judas skin variables and
+Judas agent activities, so it is modified from the original. What was taken, and where it lives:
+
+- Activity motion keyframes and their timings (activity-ring-*, activity-card-*, activity-pulse-running, hot-potato-flow,
+  node-enter, edge-draw-in) from packages/ui/src/globals.css: web/app.css, "Motion" block.
+- Hot-potato edge (a packet travelling a hand-off edge by SVG animateMotion, plus the marching dashed overlay) from
+  packages/ui/src/components/topology/HotPotatoEdge.tsx: `tmHot` in web/app.js, `.tm-packet` and `.tm-flow` in web/app.css.
+- Agent card anatomy (header bar, inverted header for lead roles, activity dot, runtime, context percent colored by band,
+  token total), rig frame with counts and dashed pod frames, ActivityRing: from HybridTopologyNodes.tsx, RigGroupNode.tsx
+  and ActivityRing.tsx: `tmMapCard`, `tmUpdateCard`, `tmBuildMap` in web/app.js, `.tmc-*` and `.tm-rig`, `.tm-pod` in web/app.css.
+- Layout rule (pods as columns, members stacked and delegation read top to bottom) and the four glyph vocabulary with
+  edge colors by kind, from packages/tui/src/topology/layout.ts and glyphs.ts: `tmLayout`, `tmRows`, `tmGlyph`.
+- View mode tabs (Map, Panes, Table, File) from TopologyViewModeTabs.tsx: `tmRenderViewTabs`, `.tm-vtab`.
+- Table view, sortable columns and the active-row shimmer from TopologyTableView.tsx and topology-table-shimmer.css:
+  `tmRenderTable`, `.tm-table`, `.tm-shimmer`.
+- Smoked glass output preview from TerminalPreviewPopover.tsx (static text only): `tmShowPop`, `.tm-pop`.
+
+## herdr (Swarm screen: Panes)
+
+The Panes view follows the layout of herdr (https://github.com/herdrdev/herdr), used under the Apache License 2.0
+(LICENSES/Apache-2.0.txt). herdr is a Rust terminal application; nothing was compiled or copied as code. The visual
+design was adapted into HTML and CSS from src/ui/sidebar.rs, src/ui/panes.rs, src/pane/agent_detection.rs and
+assets/screenshot.png, so it is modified from the original:
+
+- Agent list with a status glyph, the name, and the state word right-aligned (working, waiting, blocked, idle, done),
+  blocked and failed sorted to the top and highlighted: `tmRenderSide`, `.tms-*` in web/app.css.
+- Large panes with a bright accent border on the focused pane and a dim border on the others: `.tpane`, `.tpane.focused`.
+- The status line under each pane (folder > model > context bar and percent > tok/s > tokens): `tmPaneStatus`, `.tp-status`.

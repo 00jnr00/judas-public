@@ -1,0 +1,24 @@
+name = "phosphor-dark"
+label = "Phosphor Dark"
+dark = true
+
+[tokens]
+radius = '2px'
+radius_sm = '1px'
+font_ui = 'ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace'
+
+[colors]
+bg = "#050A07"
+surface = "#0C140F"
+surface2 = "#19231D"
+border = "#37533F"
+title = "#E6FFF0"
+accent = "#2CE98F"
+text = "#C6E6D2"
+dim = "#6E9480"
+ok = "#7BD86B"
+warn = "#DDBF4E"
+error = "#E4605A"
+thinking = "#547262"
+added = "#264423"
+removed = "#482420"

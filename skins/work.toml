@@ -1,0 +1,15 @@
+name = "work"
+label = "Work (graphite + blue)"
+dark = true
+[colors]
+bg = "#0d0f12"
+surface = "#161a1f"
+surface2 = "#1e242b"
+border = "#3a4654"
+title = "#e6edf3"
+accent = "#5aa0e0"
+text = "#cdd6df"
+dim = "#818b94"
+error = "#e05a5a"
+added = "#24503a"
+removed = "#53262c"

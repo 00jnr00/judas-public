@@ -194,8 +194,8 @@
       desc: "A tutor that starts from what you already know. It reads your goals and notes, asks a few questions to find where your understanding stops, plans the shortest route to your goal, and teaches one small step at a time.",
       when: "Use it when you want to understand something, not just get an answer. Answer in your own words; it adapts to your reasoning. Your goals and notes files are read only, and your progress per topic is kept in Judas's data folder." },
     swarm: { label: "Swarm", mode: true,
-      desc: "Hand the model a bulk job over many files or items. It plans and checks; a swarm of small fast models on the CPU does the repetitive part in parallel.",
-      when: "Use it to summarize, extract from or classify dozens or hundreds of files or snippets. Pick the folder that holds them. Small models are good at extraction, summaries and tagging, not at coding or long reasoning. It needs the swarm instance running (docs/SWARM.md)." },
+      desc: "Hand the lead a big job. It organizes teams of agents, runs them and reports back; you watch every agent live above the composer. Wide, shallow reading can go to a swarm of small fast models on the CPU.",
+      when: "Use it for research over many sources, big documents, jobs over many files, triage and long builds. Pick the working folder. You only talk to the lead; agent panes are read-only, with pause, cancel and transcript per agent. CPU members need the swarm instance running (docs/SWARM.md, docs/SWARM-TEAMS.md)." },
     agents: { label: "Agents",
       desc: "Judas runs one model shared by many agents at once. A lead agent can spawn worker agents that each take on part of a job and run at the same time on that one model. This board shows every agent in the current session: the lead on top, its workers nested under it, each with its status and token count. It is how you see parallel work happening.",
       when: "Open it while a job is running to see who is doing what.",
@@ -451,7 +451,7 @@
     chat: { title: "Chat", send: "Send", ph: "Ask anything. Enter sends, Shift+Enter for a new line.", cwd: "" },
     cowork: { title: "Cowork", send: "Delegate", ph: "Describe the larger job. Enter sends, Shift+Enter for a new line.", cwd: "Working folder (optional)" },
     learn: { title: "Learn", send: "Send", ph: "Say what you want to understand. Enter sends, Shift+Enter for a new line.", cwd: "" },
-    swarm: { title: "Swarm", send: "Run", ph: "Describe the bulk job, for example: summarize every .md file in this folder in two lines each. Enter sends, Shift+Enter for a new line.", cwd: "Folder with the files (required)" },
+    swarm: { title: "Swarm", send: "Run", ph: "Describe the job for the lead, for example: research these sources and write a merged report. Enter sends, Shift+Enter for a new line.", cwd: "Working folder (required)" },
     code: { title: "Code", send: "Send", ph: "Tell Judas what to read or change in this project. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (required)" }
   };
   var EMPTY_HINT = {
@@ -459,7 +459,7 @@
     cowork: "Describe the job below. The lead agent plans it and may spawn workers; watch them on the agent board.",
     learn: "Say what you want to understand. Judas reads your goals first, then asks a few questions before teaching.",
     code: "Enter a project folder above, then tell Judas what to read or change. Every edit becomes a snapshot.",
-    swarm: "Enter the folder that holds the files, then describe the bulk job. The lead plans it and sends the items to the swarm; progress shows in the strip above."
+    swarm: "Enter the working folder, then describe the job. The lead plans it, builds teams and runs them; every agent shows up in the panes above."
   };
   var STARTERS = [
     { t: "Summarize a document", d: "Attach a PDF or Word file", file: true,
@@ -522,7 +522,8 @@
     pt.textContent = (sideHidden ? "Show " : "Hide ") + (m === "code" ? "changes" : "agents");
     renderRecent(); renderSessions(); renderChanges(); renderBoard();
     $("#swarm-strip").hidden = m !== "swarm";
-    if (m === "swarm") pollSwarm();
+    $("#team-area").hidden = m !== "swarm";
+    if (m === "swarm") { pollSwarm(); tmEnter(); } else tmLeave();
     if (m === "learn") loadLearnVisual(); else showLearnVisual(false);
   }
 
@@ -543,6 +544,16 @@
   function loadLearnVisual() {
     getJSON("/api/learn/visual").then(function (r) { lv = r; lvRender(); }, function () { lv = null; lvRender(); });
   }
+  /* The visual tutor has no postMessage hook (its code is not ours); it does have an appearance setting, so the server
+     maps the Judas theme onto its mode + background (POST /api/learn/visual/theme). Resolves either way. */
+  function mapLearnTheme(name) {
+    return postJSON("/api/learn/visual/theme", { name: name || "current" }).then(function (r) { return !!(r && r.ok); }, function () { return false; });
+  }
+  function reloadLearnFrame() {
+    var fr = $("#lv-frame");
+    if (!fr || !fr.getAttribute("src") || !lvOn) return;
+    try { fr.contentWindow.location.reload(); } catch (e) { fr.setAttribute("src", fr.getAttribute("src")); }
+  }
   function showLearnVisual(on) {
     lvOn = !!on;
     var box = $("#learn-visual"), fr = $("#lv-frame");
@@ -551,7 +562,13 @@
     $("#composer").hidden = lvOn;
     // the visual tutor gets the full width: no Changes / Agent board panel, no folder bar
     $("#screen-work").classList.toggle("lv-full", lvOn);
-    if (lvOn && lv && lv.up && fr.getAttribute("src") !== lv.url) fr.setAttribute("src", lv.url);
+    if (lvOn && lv && lv.up && fr.dataset.base !== lv.url) {
+      fr.dataset.base = lv.url;
+      mapLearnTheme(lsGet("judas.skin")).then(function () {  // theme first, so the tutor opens already themed
+        fr.setAttribute("src", window.JudasTheme ? window.JudasTheme.decorate(lv.url) : lv.url);
+        if (window.JudasTheme) window.JudasTheme.track(fr);
+      });
+    }
     if (lv) lvRender();
   }
   function openLearnVisual() {
@@ -806,6 +823,7 @@
     showEmpty();
     $("#chat-title").textContent = "New session";
     syncSessionActions();
+    tmReset("");
     $("#cwd").value = (m === "code" || m === "swarm") ? (recents()[0] || "") : "";
     renderSessions(); renderBoard(); renderChanges();
   }
@@ -841,6 +859,7 @@
       renderHistory(msgs);
       renderBoard();
       loadSessionSnaps();
+      if (curMode === "swarm") tmOpen(id, msgs);
       attachLive(id, t.running ? t.event_floor : t.events_head);
     }, function (e) { addNote("Could not load session: " + e.message, true); });
   }
@@ -1008,12 +1027,12 @@
       pre.textContent = t ? t : "(no text was read from this file)";
     }
   }, true);
-  function addThink(text, open) {
+  function addThink(text, open, into) {
     var d = el("details", "think");
     if (open) d.open = true;
     d.appendChild(el("summary", null, "thinking"));
     d.appendChild(el("div", "body", text));
-    logEl.appendChild(d);
+    (into || logEl).appendChild(d);
     return d;
   }
   function shortArgs(args) {
@@ -1029,7 +1048,7 @@
     }
     return String(o);
   }
-  function addToolCall(name, args) {
+  function addToolCall(name, args, into) {
     var d = el("details", "tool");
     var sm = el("summary");
     sm.appendChild(el("span", "st", "▸"));
@@ -1038,10 +1057,10 @@
     d.appendChild(sm);
     var full = typeof args === "string" ? args : JSON.stringify(args, null, 2);
     d.appendChild(el("pre", null, full));
-    logEl.appendChild(d);
+    (into || logEl).appendChild(d);
     return d;
   }
-  function addToolResult(name, ok, output, checkpoint) {
+  function addToolResult(name, ok, output, checkpoint, into) {
     var d = el("details", "tool" + (ok === false ? " bad" : ""));
     var sm = el("summary");
     sm.appendChild(el("span", "st", ok === false ? "✗" : "✓"));
@@ -1055,7 +1074,7 @@
     }
     d.appendChild(sm);
     d.appendChild(el("pre", null, out.length > 6000 ? out.slice(0, 6000) + "\n[truncated]" : out));
-    logEl.appendChild(d);
+    (into || logEl).appendChild(d);
     return d;
   }
 
@@ -1294,6 +1313,7 @@
 
   function handleEvent(ev) {
     if (!live) return;
+    if (curMode === "swarm" && tm.sid === live.sid) tmEvent(ev);
     var d = ev.data || {}, lead = !ev.parent, a;
     if (ev.type === "gap") return; // the ring dropped older events; the history reload on turn end repairs the log
     if (ev.type === "review") { // hidden background review: one muted line, no board entry, no turn state
@@ -2113,6 +2133,996 @@
     });
   }
 
+  /* ---------- Swarm teams: org view and read-only agent panes (docs/SWARM-TEAMS.md) ---------- */
+  var tm = { sid: "", data: null, agents: {}, panes: {}, view: "map", sel: "", focus: "", sort: { key: "team", dir: 1 }, map: null, mapKey: "", cards: {}, edgeEls: {}, nodeAgent: {}, canvas: null, pop: null, fetchT: null, orgT: null, pollT: null, overlay: null };
+  (function () {
+    var v = lsGet("judas.swarm.view"), q = "";
+    try { q = new URLSearchParams(location.search).get("tab") || ""; } catch (e) { q = ""; }
+    v = q || v;
+    if (v === "map" || v === "panes" || v === "table" || v === "file") tm.view = v;
+  })();
+  var TM_ACTIVE = { queued: 1, prefilling: 1, generating: 1, tool: 1, waiting: 1, blocked: 1 };
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function sv(tag, cls, attrs) {
+    var e = document.createElementNS(SVGNS, tag);
+    if (cls) e.setAttribute("class", cls);
+    if (attrs) Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    return e;
+  }
+  function tmAgent(id) {
+    if (!tm.agents[id]) tm.agents[id] = { id: id, role: "", status: "running", activity: "idle", tool: "", team: "", member: "", copy: "", model: "gpu", tok_s: 0, prompt_tokens: 0, completion_tokens: 0, parent: "" };
+    return tm.agents[id];
+  }
+  function tmAct(a) {
+    if (a.status === "paused") return "paused";
+    if (a.status === "killed") return "cancelled";
+    return a.activity || "idle";
+  }
+  function tmLeadId() { return tm.data && tm.data.lead ? tm.data.lead.id : ""; }
+  function tmLabel(a) {
+    if (a.id === tmLeadId() || (!a.parent && !a.team)) return "lead";
+    return a.copy || a.member || a.id;
+  }
+
+  function tmReset(sid) {
+    clearTimeout(tm.fetchT); clearTimeout(tm.orgT); clearInterval(tm.pollT);
+    Object.keys(tm.panes).forEach(function (k) { clearTimeout(tm.panes[k].flushT); });
+    tm.sid = sid; tm.data = null; tm.agents = {}; tm.panes = {}; tm.sel = ""; tm.focus = ""; tm.pollT = null; tm.orgT = null; tm.userScrolled = false;
+    tm.map = null; tm.mapKey = ""; tm.cards = {}; tm.edgeEls = {}; tm.nodeAgent = {}; tm.canvas = null; tmHidePop();
+    tmCloseOverlay();
+    var g = $("#team-grid");
+    if (g) {
+      g.textContent = ""; g.classList.remove("has-focus");
+      $("#team-map").textContent = ""; $("#team-side").textContent = ""; $("#team-table").textContent = ""; $("#team-file").textContent = ""; $("#team-sub").textContent = "";
+    }
+  }
+  function tmEnter() {
+    if (cur.id && tm.sid !== cur.id) { tmReset(cur.id); tmFetch(); }
+    tmStartPoll();
+  }
+  function tmLeave() { clearInterval(tm.pollT); tm.pollT = null; }
+  function tmOpen(id, msgs) {
+    tmReset(id);
+    tmFetch(function () { tmHistory(msgs); });
+    tmStartPoll();
+  }
+  // while a turn runs, refresh the merged view now and then (prefilling vs queued, tok/s)
+  function tmStartPoll() {
+    if (tm.pollT) return;
+    tm.pollT = setInterval(function () {
+      if (curMode !== "swarm" || !tm.sid || document.hidden) return;
+      var busy = (live && live.inTurn) || Object.keys(tm.agents).some(function (k) { return TM_ACTIVE[tm.agents[k].activity]; });
+      if (busy) tmFetch();
+    }, 2000);
+  }
+  function tmFetchSoon() {
+    clearTimeout(tm.fetchT);
+    tm.fetchT = setTimeout(function () { tmFetch(); }, 300);
+  }
+  function tmFetch(done) {
+    var sid = tm.sid;
+    if (!sid) return;
+    getJSON("/api/sessions/" + encodeURIComponent(sid) + "/team").then(function (r) {
+      if (tm.sid !== sid) return;
+      tm.data = r;
+      var rows = (r.agents || []).slice();
+      if (r.lead) rows.unshift(r.lead);
+      rows.forEach(function (row) {
+        var a = tmAgent(row.id);
+        Object.keys(row).forEach(function (k) {
+          if (k === "prompt_tokens" || k === "completion_tokens") a[k] = Math.max(a[k] || 0, row[k] || 0);
+          else a[k] = row[k];
+        });
+      });
+      (r.teams || []).forEach(function (t) {
+        (t.copies || []).forEach(function (c) {
+          if (!c.agent) return;
+          var a = tmAgent(c.agent);
+          a.copy = c.copy; a.member = a.member || c.member; a.team = a.team || t.name;
+        });
+      });
+      rows.forEach(function (row) { tmPane(row.id); });
+      tmRender();
+      if (done) done();
+    }, function () { if (done) done(); });
+  }
+  function tmRender() {
+    tmRenderViewTabs();
+    if (!tm.sel && tm.panes[tmLeadId()]) tm.sel = tmLeadId();
+    tmRenderView();
+    Object.keys(tm.panes).forEach(function (k) { tmPaneHead(tm.panes[k]); });
+    var n = Object.keys(tm.panes).length, nt = tm.data && tm.data.teams ? tm.data.teams.length : 0;
+    $("#team-sub").textContent = n + (n === 1 ? " agent" : " agents") + (nt ? " in " + nt + (nt === 1 ? " team" : " teams") : "");
+  }
+  function tmOrgSoon() {
+    if (tm.orgT) return;
+    tm.orgT = setTimeout(function () { tm.orgT = null; tmRenderView(); }, 120);
+  }
+
+  /* ----- shared visual vocabulary -----
+     Glyphs and the four-way state split follow OpenRig packages/tui/src/topology/glyphs.ts (Apache-2.0,
+     LICENSES/Apache-2.0.txt, modified: mapped onto Judas activities). The state words follow herdr's agent list
+     (working, waiting, blocked, idle, done), see THIRD_PARTY.md. */
+  var TM_WORD = { generating: "working", prefilling: "working", tool: "working", waiting: "waiting", blocked: "blocked", queued: "queued", idle: "idle", done: "done", failed: "failed", paused: "paused", cancelled: "stopped" };
+  var TM_WORKING = { generating: 1, prefilling: 1, tool: 1 };
+  var TM_RM = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  function tmWord(act) { return TM_WORD[act] || act; }
+  function tmGlyph(act) {
+    if (TM_WORKING[act] || act === "done") return "●";
+    if (act === "waiting" || act === "blocked" || act === "paused") return "◐";
+    if (act === "failed") return "✕";
+    return "○";
+  }
+  // ring state: active = green, needs input = amber, failed = red (OpenRig ActivityRing)
+  function tmRing(act) {
+    if (TM_WORKING[act]) return "active";
+    if (act === "waiting" || act === "blocked" || act === "paused") return "needs";
+    if (act === "failed") return "failed";
+    return "";
+  }
+  function tmCtxClass(p) { return p == null ? "" : p < 60 ? "ok" : p <= 80 ? "warn" : "bad"; }
+  function tmTok(a) { return (a.prompt_tokens || 0) + (a.completion_tokens || 0); }
+  function tmRank(act) {
+    if (act === "failed" || act === "blocked") return 0;
+    if (TM_WORKING[act]) return 1;
+    if (act === "waiting" || act === "paused") return 2;
+    if (act === "done") return 4;
+    return 3;
+  }
+  function tmNodeAgent(key) {
+    if (key === "__lead") return tmLeadId();
+    return tm.nodeAgent[key] || "";
+  }
+
+  /* ----- views: Map, Panes, Table, File ----- */
+  var TM_VIEWS = [["map", "Map"], ["panes", "Panes"], ["table", "Table"], ["file", "File"]];
+  function tmRenderViewTabs() {
+    var box = $("#team-views");
+    if (box.childNodes.length === TM_VIEWS.length) {
+      Array.prototype.forEach.call(box.children, function (b, i) { b.setAttribute("aria-selected", tm.view === TM_VIEWS[i][0] ? "true" : "false"); });
+      return;
+    }
+    box.textContent = "";
+    TM_VIEWS.forEach(function (v) {
+      var b = el("button", "tm-vtab", v[1]);
+      b.type = "button"; b.setAttribute("role", "tab"); b.setAttribute("aria-selected", tm.view === v[0] ? "true" : "false");
+      b.onclick = function () { tmSetView(v[0]); };
+      box.appendChild(b);
+    });
+  }
+  function tmSetView(v) {
+    tm.view = v; lsSet("judas.swarm.view", v);
+    tmRenderViewTabs();
+    ["map", "panes", "table", "file"].forEach(function (k) { $("#team-v-" + k).hidden = k !== v; });
+    tmHidePop();
+    tmRenderView();
+  }
+  function tmRenderView() {
+    ["map", "panes", "table", "file"].forEach(function (k) { var n = $("#team-v-" + k); if (n.hidden !== (k !== tm.view)) n.hidden = k !== tm.view; });
+    if (tm.view === "map") tmRenderMap();
+    else if (tm.view === "panes") { tmRenderSide(); tmApplyView(); }
+    else if (tm.view === "table") tmRenderTable();
+    else tmRenderFile();
+  }
+  function tmLeadMember(team) {
+    var r = "";
+    ((tm.data && tm.data.teams) || []).forEach(function (t) { if (t.name === team) r = t.lead_member || ""; });
+    return r;
+  }
+  function tmOrder() {
+    var ids = Object.keys(tm.panes), lead = tmLeadId(), teamIdx = {};
+    ((tm.data && tm.data.teams) || []).forEach(function (t, i) { teamIdx[t.name] = i; });
+    function key(id) {
+      var a = tm.agents[id];
+      if (id === lead) return 0;
+      var k = 1 + (teamIdx[a.team] == null ? 99 : teamIdx[a.team]) * 2;
+      return a.member && a.member === tmLeadMember(a.team) ? k : k + 1;
+    }
+    ids.sort(function (x, y) {
+      var d = key(x) - key(y);
+      return d ? d : String(tmLabel(tm.agents[x])).localeCompare(String(tmLabel(tm.agents[y])), undefined, { numeric: true });
+    });
+    return ids;
+  }
+
+  /* ----- Map: the rig graph -----
+     Layout idea (a rig frame holding one dashed pod frame per team, agent cards inside, edges between them) and the
+     card anatomy (header bar, activity dot, runtime, context %, token total) are ported from OpenRig
+     packages/ui/src/components/topology/HybridTopologyNodes.tsx, RigGroupNode.tsx and
+     packages/tui/src/topology/layout.ts (Apache-2.0, LICENSES/Apache-2.0.txt), modified: plain DOM and SVG
+     instead of React Flow, Judas skin variables, Judas activities. */
+  var MP = { cw: 156, ch: 104, gx: 12, gy: 46, pad: 14, head: 34, podgap: 22, rig: 20, rigHead: 44, cols: 4 };
+  function tmTeamCopies(t) {
+    var out = [];
+    if (t.copies && t.copies.length) {
+      t.copies.forEach(function (c) {
+        var mem = null;
+        (t.members || []).forEach(function (m) { if (m.id === c.member) mem = m; });
+        out.push({ copy: c.copy, member: c.member, agent: c.agent || "", role: mem ? mem.role : "worker", model: mem ? mem.model : "gpu" });
+      });
+      return out;
+    }
+    (t.members || []).forEach(function (m) {
+      var n = m.count || 1;
+      for (var i = 1; i <= n; i++) out.push({ copy: n > 1 ? m.id + "." + i : m.id, member: m.id, agent: "", role: m.role, model: m.model });
+    });
+    return out;
+  }
+  // rows of copies: the pinned `place` rows when given, else team lead on row 1 and the members after
+  function tmRows(t, copies) {
+    var by = {}, rows = [], used = {};
+    copies.forEach(function (c) { by[c.copy] = c; });
+    (t.place || []).forEach(function (r) {
+      var row = [];
+      (r || []).forEach(function (n) { if (by[n] && !used[n]) { row.push(by[n]); used[n] = 1; } });
+      if (row.length) rows.push(row);
+    });
+    if (rows.length) {
+      var rest = copies.filter(function (c) { return !used[c.copy]; });
+      if (rest.length) rows.push(rest);
+      return rows;
+    }
+    var lc = [], others = [];
+    copies.forEach(function (c) { if (t.lead_member && c.member === t.lead_member) lc.push(c); else others.push(c); });
+    if (lc.length) rows.push(lc);
+    for (var i = 0; i < others.length; i += MP.cols) rows.push(others.slice(i, i + MP.cols));
+    return rows;
+  }
+  function tmLayout() {
+    var d = tm.data || {}, teams = d.teams || [], lead = d.lead;
+    var L = { pods: [], nodes: {}, key: "" };
+    var x = 0, maxH = 0;
+    teams.forEach(function (t) {
+      var copies = tmTeamCopies(t), rows = tmRows(t, copies), cols = 1;
+      rows.forEach(function (r) { cols = Math.max(cols, r.length); });
+      var w = MP.pad * 2 + cols * MP.cw + (cols - 1) * MP.gx;
+      w = Math.max(w, 150);
+      var h = MP.head + rows.length * MP.ch + Math.max(0, rows.length - 1) * MP.gy + MP.pad + 18;
+      L.pods.push({ t: t, rows: rows, copies: copies, x: x, w: w, h: h });
+      x += w + MP.podgap;
+      maxH = Math.max(maxH, h);
+    });
+    var innerW = Math.max(x - MP.podgap, MP.cw);
+    var leadY = MP.rigHead, podsY = MP.rigHead + (lead ? MP.ch + MP.gy : 0);
+    L.w = innerW + MP.rig * 2; L.h = podsY + maxH + MP.rig;
+    L.hasLead = !!lead;
+    if (lead) L.nodes.__lead = { x: MP.rig + (innerW - MP.cw) / 2, y: leadY, w: MP.cw, h: MP.ch };
+    L.pods.forEach(function (P) {
+      P.x += MP.rig; P.y = podsY;
+      P.cards = [];
+      P.rows.forEach(function (row, ri) {
+        var rw = row.length * MP.cw + (row.length - 1) * MP.gx, rx = P.x + (P.w - rw) / 2;
+        var ry = P.y + MP.head + ri * (MP.ch + MP.gy);
+        row.forEach(function (c, ci) {
+          var n = { x: rx + ci * (MP.cw + MP.gx), y: ry, w: MP.cw, h: MP.ch, row: ri, copy: c };
+          L.nodes[c.copy] = n; P.cards.push(c.copy);
+        });
+      });
+      L.key += "|" + P.t.name + (P.t.disbanded ? "!" : "") + ":" + P.rows.map(function (r) { return r.map(function (c) { return c.copy + "/" + c.role + "/" + c.model; }).join(","); }).join(";");
+    });
+    L.key = (lead ? "L" : "") + L.key;
+    return L;
+  }
+  // an edge runs bottom to top (a above b), top to bottom (a below b) or as an arc under one row
+  function tmPath(a, b) {
+    var ax = a.x + a.w / 2, bx = b.x + b.w / 2;
+    if (Math.abs(a.y - b.y) < 2) {
+      var span = Math.abs(ax - bx) / (MP.cw + MP.gx), cy = a.y + a.h + 8 + 10 * span;
+      return "M" + ax + " " + (a.y + a.h) + " C" + ax + " " + cy + " " + bx + " " + cy + " " + bx + " " + (b.y + b.h);
+    }
+    if (a.y < b.y) {
+      var ym = (a.y + a.h + b.y) / 2;
+      return "M" + ax + " " + (a.y + a.h) + " C" + ax + " " + ym + " " + bx + " " + ym + " " + bx + " " + b.y;
+    }
+    var yu = (a.y + b.y + b.h) / 2;
+    return "M" + ax + " " + a.y + " C" + ax + " " + yu + " " + bx + " " + yu + " " + bx + " " + (b.y + b.h);
+  }
+  function tmEdgeList(L) {
+    var list = [], seen = {};
+    function add(f, t, kind) {
+      if (f === t || !L.nodes[f] || !L.nodes[t] || seen[f + ">" + t]) return;
+      seen[f + ">" + t] = 1; list.push({ from: f, to: t, kind: kind });
+    }
+    L.pods.forEach(function (P) {
+      var byMember = {}, leadC = "";
+      P.copies.forEach(function (c) {
+        (byMember[c.member] = byMember[c.member] || []).push(c.copy);
+        if (P.t.lead_member && c.member === P.t.lead_member && !leadC) leadC = c.copy;
+      });
+      if (leadC) {
+        add("__lead", leadC, "delegates");
+        P.copies.forEach(function (c) { if (c.copy !== leadC) add(leadC, c.copy, "delegates"); });
+      } else P.copies.forEach(function (c) { add("__lead", c.copy, "delegates"); });
+      (P.t.edges || []).forEach(function (e) {
+        var kind = e.kind === "observe" ? "observe" : "message";
+        var fs = byMember[e.from] || (L.nodes[e.from] ? [e.from] : []);
+        var ts = byMember[e.to] || (L.nodes[e.to] ? [e.to] : []);
+        fs.forEach(function (f, i) {
+          ts.forEach(function (t, j) {
+            if (e.from === e.to && j <= i) return;
+            add(f, t, kind);
+          });
+        });
+      });
+    });
+    return list;
+  }
+  function tmMapCard(key) {
+    var root = el("div", "tmc"), ring = el("span", "tmc-ring");
+    ring.setAttribute("aria-hidden", "true");
+    var card = el("div", "tmc-card");
+    var hd = el("div", "tmc-hd");
+    var id = el("span", "tmc-id"), dot = el("span", "tmc-dot");
+    hd.appendChild(id); hd.appendChild(dot);
+    var b1 = el("div", "tmc-role dim"), nums = el("div", "tmc-nums"), st = el("div", "tmc-st");
+    var ctx = el("span", "tmc-ctx"), tok = el("span", "tmc-tok");
+    nums.appendChild(ctx); nums.appendChild(tok);
+    var g = el("span", "tmc-glyph"), w = el("span", "tmc-word"), dt = el("span", "tmc-detail dim");
+    st.appendChild(g); st.appendChild(w); st.appendChild(dt);
+    card.appendChild(hd); card.appendChild(b1); card.appendChild(nums); card.appendChild(st);
+    root.appendChild(ring); root.appendChild(card);
+    root.tabIndex = 0; root.setAttribute("role", "button");
+    var c = { key: key, root: root, ring: ring, card: card, hd: hd, id: id, dot: dot, role: b1, ctx: ctx, tok: tok, g: g, w: w, dt: dt };
+    root.onclick = function () { var ag = tmNodeAgent(key); if (ag) { tmHidePop(); tmOpenPane(ag); } };
+    root.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); root.onclick(); } };
+    root.onmouseenter = function () { tmShowPop(key); };
+    root.onmouseleave = tmHidePop;
+    root.onfocus = function () { tmShowPop(key); };
+    root.onblur = tmHidePop;
+    return c;
+  }
+  function tmUpdateCard(c) {
+    var n = tm.map.nodes[c.key], ag = tmNodeAgent(c.key), a = ag ? tm.agents[ag] : null;
+    var act = a ? tmAct(a) : "idle", isLead = c.key === "__lead";
+    var copy = n && n.copy ? n.copy : null;
+    var teamLead = copy && copy.role === "lead";
+    c.id.textContent = isLead ? "lead" : c.key;
+    c.hd.className = "tmc-hd" + (isLead || teamLead ? " core" : "");
+    var role = isLead ? "session lead" : (copy ? copy.role : (a && a.role) || "agent");
+    var model = (a && a.model) || (copy && copy.model) || "gpu";
+    c.role.textContent = "";
+    c.role.appendChild(document.createTextNode(role + " "));
+    c.role.appendChild(el("span", "tmc-mark " + model, model));
+    var pct = a && a.ctx_pct != null ? Math.round(a.ctx_pct) : null;
+    c.ctx.textContent = pct == null ? "--" : pct + "%";
+    c.ctx.className = "tmc-ctx " + tmCtxClass(pct);
+    c.ctx.title = pct == null ? "Context use unknown" : "Context: " + pct + "% of this agent's cap";
+    var tk = a ? tmTok(a) : 0;
+    c.tok.textContent = tk ? kfmt(tk) : "--";
+    c.tok.title = a ? "in " + (a.prompt_tokens || 0) + " out " + (a.completion_tokens || 0) : "";
+    c.g.textContent = tmGlyph(act);
+    c.w.textContent = tmWord(act);
+    c.dt.textContent = act === "tool" && a && a.tool ? a.tool : (TM_WORKING[act] ? act : "");
+    c.card.className = "tmc-card act-" + act + (ag ? "" : " nopane");
+    c.dot.className = "tmc-dot act-" + act;
+    var ring = tmRing(act);
+    c.ring.className = "tmc-ring" + (ring ? " ring-" + ring : "");
+    c.root.className = "tmc" + (ag ? "" : " nopane") + (c.flash ? " flash-" + c.flash : "");
+    c.root.setAttribute("aria-label", c.id.textContent + ", " + tmWord(act));
+  }
+  function tmRenderMap() {
+    var box = $("#team-map"), d = tm.data || {};
+    if (!d.lead && !(d.teams || []).length) {
+      box.textContent = ""; tm.mapKey = ""; tm.cards = {};
+      box.appendChild(el("p", "dim small team-empty", "No teams yet. The lead creates them when a job needs help."));
+      return;
+    }
+    var L = tmLayout();
+    tm.nodeAgent = {};
+    (d.teams || []).forEach(function (t) { (t.copies || []).forEach(function (c) { if (c.agent) tm.nodeAgent[c.copy] = c.agent; }); });
+    tm.map = L;
+    if (L.key !== tm.mapKey || !tm.canvas) {
+      tm.mapKey = L.key;
+      tmBuildMap(box, L);
+    } else {
+      tmEdgeStates();
+    }
+    Object.keys(tm.cards).forEach(function (k) { tmUpdateCard(tm.cards[k]); });
+    tmFitMap();
+    var rig = tm.canvas.querySelector(".tm-rig-counts");
+    if (rig) {
+      var na = 0, nn = 0;
+      Object.keys(tm.cards).forEach(function (k) { nn++; var ag = tmNodeAgent(k); if (ag && tm.agents[ag] && TM_WORKING[tmAct(tm.agents[ag])]) na++; });
+      rig.textContent = L.pods.length + (L.pods.length === 1 ? " pod" : " pods") + " / " + nn + (nn === 1 ? " agent" : " agents") + " / " + na + " active";
+    }
+  }
+  function tmBuildMap(box, L) {
+    box.textContent = "";
+    tm.cards = {}; tm.edgeEls = {};
+    var scale = el("div", "tm-scale"), cv = el("div", "tm-canvas");
+    cv.style.width = L.w + "px"; cv.style.height = L.h + "px";
+    var rig = el("div", "tm-rig");
+    rig.style.cssText = "left:0;top:0;width:" + L.w + "px;height:" + L.h + "px";
+    var rl = el("div", "tm-rig-label");
+    rl.appendChild(el("b", null, (cur.session && cur.session.title) || "swarm"));
+    rl.appendChild(el("span", "tm-rig-counts dim"));
+    rig.appendChild(rl);
+    cv.appendChild(rig);
+    L.pods.forEach(function (P) {
+      var f = el("div", "tm-pod" + (P.t.disbanded ? " disbanded" : ""));
+      f.style.cssText = "left:" + P.x + "px;top:" + P.y + "px;width:" + P.w + "px;height:" + P.h + "px";
+      var h = el("div", "tm-pod-head");
+      h.appendChild(el("b", null, P.t.name + (P.t.disbanded ? " (disbanded)" : "")));
+      h.appendChild(el("span", "dim", P.copies.length + (P.copies.length === 1 ? " member" : " members")));
+      f.appendChild(h);
+      cv.appendChild(f);
+    });
+    // edges sit between the frames and the cards
+    var svg = sv("svg", "tm-edges", { width: L.w, height: L.h, viewBox: "0 0 " + L.w + " " + L.h });
+    svg.setAttribute("aria-hidden", "true");
+    var defs = sv("defs");
+    ["delegates", "message", "observe"].forEach(function (k) {
+      var m = sv("marker", "tm-mk " + k, { id: "tm-mk-" + k, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto" });
+      m.appendChild(sv("path", null, { d: "M0 1 L9 5 L0 9 z" }));
+      defs.appendChild(m);
+    });
+    svg.appendChild(defs);
+    var gE = sv("g", "tm-edge-layer"), gP = sv("g", "tm-pkt-layer");
+    svg.appendChild(gE); svg.appendChild(gP);
+    tm.pktLayer = gP;
+    tmEdgeList(L).forEach(function (e, i) {
+      var p = sv("path", "tm-edge " + e.kind + (TM_RM ? "" : " edge-draw-in"), { d: tmPath(L.nodes[e.from], L.nodes[e.to]), "marker-end": "url(#tm-mk-" + e.kind + ")" });
+      if (!TM_RM) p.style.animationDelay = (i * 40) + "ms";
+      gE.appendChild(p);
+      tm.edgeEls[e.from + ">" + e.to] = p;
+    });
+    cv.appendChild(svg);
+    Object.keys(L.nodes).forEach(function (k) {
+      var n = L.nodes[k], c = tmMapCard(k);
+      c.root.style.cssText = "left:" + n.x + "px;top:" + n.y + "px;width:" + n.w + "px;height:" + n.h + "px";
+      if (!TM_RM) c.root.classList.add("node-enter");
+      cv.appendChild(c.root);
+      tm.cards[k] = c;
+    });
+    scale.appendChild(cv);
+    box.appendChild(scale);
+    tm.canvas = cv; tm.scaleEl = scale;
+    tm.fitW = 0;
+  }
+  function tmEdgeStates() { /* edges are structural; their look does not depend on live state */ }
+  // on a wide box the map shrinks to fit; on a phone it keeps its size and scrolls inside its own box
+  function tmFitMap() {
+    var box = $("#team-map");
+    if (!tm.canvas || !tm.map || box.hidden || !box.clientWidth) return;
+    var cw = box.clientWidth, w = tm.map.w, h = tm.map.h, s = 1;
+    if (cw >= 700 && w > cw) s = Math.max(0.8, cw / w);   // shrink to fit, never into unreadable text
+    tm.scale = s;
+    tm.canvas.style.transform = s < 1 ? "scale(" + s + ")" : "";
+    tm.scaleEl.style.width = Math.ceil(w * s) + "px"; tm.scaleEl.style.height = Math.ceil(h * s) + "px";
+    // keep the session lead in view while the map is wider than its box, until the user scrolls it themselves
+    if (w * s > cw && !tm.userScrolled) {
+      var ln = tm.map.nodes.__lead || tm.map.nodes[Object.keys(tm.map.nodes)[0]];
+      if (ln) box.scrollLeft = Math.max(0, (ln.x + ln.w / 2) * s - cw / 2);
+    }
+    // only real input counts as the user taking over the view (a rebuild also fires scroll events)
+    if (!box.tmScrollHooked) {
+      box.tmScrollHooked = true;
+      ["wheel", "touchstart", "pointerdown", "keydown"].forEach(function (ev) {
+        box.addEventListener(ev, function () { tm.userScrolled = true; }, { passive: true });
+      });
+    }
+  }
+  window.addEventListener("resize", function () { clearTimeout(tm.fitT); tm.fitT = setTimeout(function () { if (curMode === "swarm" && tm.view === "map") tmFitMap(); }, 120); });
+
+  /* ----- hot potato: a packet travels the edge of a hand-off -----
+     Ported from OpenRig packages/ui/src/components/topology/HotPotatoEdge.tsx and the hot-potato-*, activity-card-*
+     rules in packages/ui/src/globals.css (Apache-2.0, LICENSES/Apache-2.0.txt), modified: vanilla SVG, skin
+     variables, one packet per team event. */
+  function tmHot(from, to) {
+    var fk = from === "lead" ? "__lead" : from, tk = to === "lead" ? "__lead" : to;
+    var m = tm.map, a = m && m.nodes[fk], b = m && m.nodes[tk];
+    if (!a || !b || !tm.pktLayer) return;
+    var dur = 900, d = tmPath(a, b), g = tm.pktLayer, parts = [];
+    var edge = tm.edgeEls[fk + ">" + tk] || tm.edgeEls[tk + ">" + fk];
+    if (edge) { edge.classList.add("hot"); parts.push(edge); }
+    var pk;
+    if (TM_RM) {
+      pk = sv("circle", "tm-packet", { cx: b.x + b.w / 2, cy: a.y < b.y ? b.y : b.y + b.h, r: 6.5 });
+      g.appendChild(pk); parts.push(pk);
+    } else {
+      var flow = sv("path", "tm-flow", { d: d });
+      g.appendChild(flow); parts.push(flow);
+      pk = sv("circle", "tm-packet", { r: 6.5 });
+      var am = sv("animateMotion", null, { dur: dur + "ms", path: d, fill: "freeze", calcMode: "spline", keyTimes: "0;1", keySplines: "0.2 0 0 1", begin: "indefinite" });
+      pk.appendChild(am); g.appendChild(pk); parts.push(pk);
+      if (am.beginElement) try { am.beginElement(); } catch (e) { /* ignore */ }
+    }
+    tmFlash(fk, "source", 760);
+    setTimeout(function () { tmFlash(tk, "target", 900); }, TM_RM ? 0 : dur - 200);
+    setTimeout(function () {
+      parts.forEach(function (p) { if (p === edge) p.classList.remove("hot"); else if (p.parentNode) p.parentNode.removeChild(p); });
+    }, dur + 700);
+  }
+  function tmFlash(key, kind, ms) {
+    var c = tm.cards[key];
+    if (!c) return;
+    c.flash = kind;
+    c.root.className = c.root.className.replace(/ flash-\w+/, "") + " flash-" + kind;
+    c.ring.className = c.ring.className.replace(/ flash-\w+/, "") + " flash-" + kind;
+    setTimeout(function () {
+      if (c.flash !== kind) return;
+      c.flash = "";
+      c.root.className = c.root.className.replace(/ flash-\w+/, "");
+      c.ring.className = c.ring.className.replace(/ flash-\w+/, "");
+    }, ms + 40);
+  }
+
+  /* ----- preview popover: the last lines of an agent's output, a static mirror -----
+     Ported in spirit from OpenRig packages/ui/src/components/topology/TerminalPreviewPopover.tsx (Apache-2.0,
+     LICENSES/Apache-2.0.txt), modified: reads the text the page already streamed, no terminal session. */
+  function tmShowPop(key) {
+    var ag = tmNodeAgent(key), a = ag ? tm.agents[ag] : null, c = tm.cards[key];
+    if (!c) return;
+    tmHidePop();
+    var pop = el("div", "tm-pop");
+    pop.setAttribute("role", "tooltip");
+    var act = a ? tmAct(a) : "idle";
+    var hd = el("div", "tm-pop-hd");
+    hd.appendChild(el("b", null, key === "__lead" ? "lead" : key));
+    hd.appendChild(el("span", "dim", tmGlyph(act) + " " + tmWord(act)));
+    pop.appendChild(hd);
+    var text = a ? (a.tail || a.last_output || "") : "";
+    var lines = String(text).replace(/\s+$/, "").split("\n").slice(-12);
+    var pre = el("pre", "tm-pop-body", text ? lines.join("\n") : "No output yet.");
+    pop.appendChild(pre);
+    document.body.appendChild(pop);
+    var r = c.root.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+    var x = r.right + 10, y = r.top;
+    if (x + pw > window.innerWidth - 8) x = Math.max(8, r.left - pw - 10);
+    if (x < 8 || x + pw > window.innerWidth - 8) { x = Math.max(8, Math.min(window.innerWidth - pw - 8, r.left)); y = r.bottom + 8; }
+    if (y + ph > window.innerHeight - 8) y = Math.max(8, window.innerHeight - ph - 8);
+    pop.style.left = x + "px"; pop.style.top = y + "px";
+    tm.pop = pop;
+  }
+  function tmHidePop() { if (tm.pop) { tm.pop.remove(); tm.pop = null; } }
+
+  /* ----- Panes: herdr-style agent list and big panes -----
+     The agent list (status glyph, name, state word right-aligned, blocked first), the bright border on the focused
+     pane and the status line under each pane follow herdr's layout (src/ui/sidebar.rs, src/ui/panes.rs,
+     assets/screenshot.png; Apache-2.0, LICENSES/Apache-2.0.txt), modified: HTML and CSS, Judas states. */
+  function tmRenderSide() {
+    var box = $("#team-side"), ids = tmOrder(), order = {};
+    ids.forEach(function (id, i) { order[id] = i; });
+    ids = ids.slice().sort(function (x, y) {
+      var d = tmRank(tmAct(tm.agents[x])) - tmRank(tmAct(tm.agents[y]));
+      return d ? d : order[x] - order[y];
+    });
+    box.textContent = "";
+    box.appendChild(el("div", "tms-cap", "agents"));
+    var list = el("div", "tms-list");
+    ids.forEach(function (id) {
+      var a = tm.agents[id], act = tmAct(a);
+      var b = el("button", "tms-row act-" + act + (tm.sel === id ? " sel" : "") + (tmRank(act) === 0 ? " alert" : ""));
+      b.type = "button"; b.setAttribute("aria-label", tmLabel(a) + ", " + tmWord(act));
+      b.appendChild(el("span", "tms-glyph", tmGlyph(act)));
+      b.appendChild(el("span", "tms-id mono", tmLabel(a)));
+      b.appendChild(el("span", "tms-team dim", a.team || (id === tmLeadId() ? "" : "")));
+      b.appendChild(el("span", "tms-state", tmWord(act)));
+      b.onclick = function () { tmSelect(id, true); };
+      list.appendChild(b);
+    });
+    if (!ids.length) list.appendChild(el("p", "dim small", "No agents yet."));
+    box.appendChild(list);
+  }
+  function tmApplyView() {
+    var grid = $("#team-grid"), order = tmOrder();
+    order.forEach(function (id, i) {
+      var p = tm.panes[id], at = grid.children[i];
+      if (at !== p.root) { grid.insertBefore(p.root, at || null); p.restore = true; }
+    });
+    grid.classList.toggle("has-focus", !!tm.focus);
+    order.forEach(function (id) {
+      var p = tm.panes[id];
+      var show = tm.focus ? id === tm.focus : true;
+      var was = p.root.hidden;
+      p.root.hidden = !show;
+      p.root.classList.toggle("focused", tm.sel === id);
+      p.btnFocus.textContent = tm.focus === id ? "Back" : "Focus";
+      if (show && (was || p.restore)) { p.restore = false; p.body.scrollTop = p.stick ? p.body.scrollHeight : p.top; }
+    });
+  }
+  function tmSelect(id, scroll) {
+    var p = tm.panes[id];
+    if (!p) return;
+    tm.sel = id;
+    if (tm.focus && tm.focus !== id) tm.focus = id;
+    tmRenderSide(); tmApplyView();
+    if (scroll) p.root.scrollIntoView({ block: "nearest", behavior: TM_RM ? "auto" : "smooth" });
+  }
+  // from the map or the table: open this agent's pane, selected
+  function tmOpenPane(id) {
+    if (!tm.panes[id]) return;
+    tm.sel = id;
+    if (tm.view !== "panes") tmSetView("panes"); else { tmRenderSide(); tmApplyView(); }
+    tm.panes[id].root.scrollIntoView({ block: "nearest" });
+  }
+  function tmToggleFocus(id) {
+    tm.focus = tm.focus === id ? "" : id;
+    if (tm.focus) tm.sel = id;
+    tmRenderSide(); tmApplyView();
+    if (tm.focus) tm.panes[id].root.scrollIntoView({ block: "nearest" });
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    tmHidePop();
+    if (tm.overlay) { tmCloseOverlay(); return; }
+    if (tm.focus && curMode === "swarm") { tm.focus = ""; tmApplyView(); }
+  });
+
+  /* ----- Table -----
+     One row per agent, sortable headers, a shimmer on the state word of working rows. Ported from OpenRig
+     packages/ui/src/components/topology/TopologyTableView.tsx and topology-table-shimmer.css (Apache-2.0,
+     LICENSES/Apache-2.0.txt), modified: vanilla DOM, Judas columns and skin variables. */
+  var TM_COLS = [
+    ["", "glyph", false], ["copy", "copy"], ["team", "team"], ["role", "role"], ["model", "model"], ["activity", "act"],
+    ["ctx", "ctx", true], ["tokens", "tok", true], ["tok/s", "toks", true], ["last output", "last"]
+  ];
+  function tmColVal(a, key) {
+    switch (key) {
+      case "copy": return tmLabel(a);
+      case "team": return a.team || "";
+      case "role": return a.id === tmLeadId() ? "session lead" : (a.role || "");
+      case "model": return a.model || "";
+      case "act": return tmRank(tmAct(a)) + " " + tmAct(a);
+      case "ctx": return a.ctx_pct == null ? -1 : a.ctx_pct;
+      case "tok": return tmTok(a);
+      case "toks": return a.tok_s || 0;
+      case "last": return a.tail || a.last_output || "";
+      default: return "";
+    }
+  }
+  function tmLastHead(a) {
+    var s = String(a.last_output || "").replace(/\s+/g, " ").trim();
+    if (!s) {
+      var ls = String(a.tail || "").split("\n").filter(function (l) { return l.trim(); });
+      s = ls.length ? ls[ls.length - 1].trim() : "";
+    }
+    return s;
+  }
+  function tmRenderTable() {
+    var box = $("#team-table"), ids = tmOrder(), s = tm.sort;
+    var orderIdx = {};
+    ids.forEach(function (id, i) { orderIdx[id] = i; });
+    ids.sort(function (x, y) {
+      var vx = tmColVal(tm.agents[x], s.key), vy = tmColVal(tm.agents[y], s.key), d;
+      if (typeof vx === "number") d = vx - vy; else d = String(vx).localeCompare(String(vy), undefined, { numeric: true });
+      return d ? d * s.dir : orderIdx[x] - orderIdx[y];
+    });
+    box.textContent = "";
+    var tb = el("table", "tm-table"), th = el("thead"), hr = el("tr");
+    TM_COLS.forEach(function (c) {
+      var h = el("th", c[2] === true || c[3] ? "num" : null);
+      if (c[1] === "glyph") { h.setAttribute("aria-label", "state"); hr.appendChild(h); return; }
+      var b = el("button", "tm-sort" + (s.key === c[1] ? " on" : ""), c[0] + (s.key === c[1] ? (s.dir > 0 ? " ▲" : " ▼") : ""));
+      b.type = "button";
+      b.onclick = function () { tm.sort = { key: c[1], dir: s.key === c[1] ? -s.dir : 1 }; tmRenderTable(); };
+      h.appendChild(b);
+      h.setAttribute("aria-sort", s.key === c[1] ? (s.dir > 0 ? "ascending" : "descending") : "none");
+      hr.appendChild(h);
+    });
+    th.appendChild(hr); tb.appendChild(th);
+    var body = el("tbody");
+    ids.forEach(function (id) {
+      var a = tm.agents[id], act = tmAct(a), tr = el("tr", "act-" + act);
+      tr.tabIndex = 0;
+      tr.onclick = function () { tmOpenPane(id); };
+      tr.onkeydown = function (e) { if (e.key === "Enter") tmOpenPane(id); };
+      function td(text, cls) { var c = el("td", cls || null, text); tr.appendChild(c); return c; }
+      td(tmGlyph(act), "tmt-glyph");
+      td(tmLabel(a), "mono tmt-id");
+      td(a.team || "");
+      td(a.id === tmLeadId() ? "session lead" : (a.role || ""));
+      td(a.model || "");
+      var ac = td("", "tmt-act");
+      ac.appendChild(el("span", TM_WORKING[act] ? "tm-shimmer" : null, tmWord(act) + (act === "tool" && a.tool ? " " + a.tool : "")));
+      var pct = a.ctx_pct == null ? null : Math.round(a.ctx_pct);
+      td(pct == null ? "--" : pct + "%", "num tmt-ctx " + tmCtxClass(pct));
+      td(tmTok(a) ? kfmt(tmTok(a)) : "--", "num");
+      td(a.tok_s > 0 && TM_WORKING[act] ? a.tok_s.toFixed(1) : "--", "num");
+      td(tmLastHead(a), "tmt-last dim");
+      body.appendChild(tr);
+    });
+    tb.appendChild(body);
+    var wrap = el("div", "tm-table-wrap");
+    wrap.appendChild(tb);
+    box.appendChild(wrap);
+    if (!ids.length) box.appendChild(el("p", "dim small team-empty", "No agents yet."));
+  }
+
+  /* ----- File: the canonical map text of each team, read only ----- */
+  function tmCopyText(text, btn) {
+    function done(ok) { btn.textContent = ok ? "Copied" : "Copy failed"; setTimeout(function () { btn.textContent = "Copy"; }, 1500); }
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); }); return; }
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove(); done(ok);
+  }
+  function tmRenderFile() {
+    var box = $("#team-file"), teams = (tm.data && tm.data.teams) || [];
+    box.textContent = "";
+    if (!teams.length) { box.appendChild(el("p", "dim small team-empty", "No teams yet. A team's map text shows here once the lead creates it.")); return; }
+    teams.forEach(function (t) {
+      var sec = el("section", "tmf");
+      var hd = el("div", "tmf-hd");
+      hd.appendChild(el("b", null, t.name + ".map"));
+      var text = t.map || "";
+      var cb = el("button", "btn small ghost", "Copy"); cb.type = "button";
+      cb.onclick = function () { tmCopyText(text, cb); };
+      cb.disabled = !text;
+      hd.appendChild(cb);
+      sec.appendChild(hd);
+      sec.appendChild(el("pre", "tmf-text", text || "The daemon sent no map text for this team."));
+      if ((t.warnings || []).length) {
+        var ul = el("ul", "tmf-warn");
+        t.warnings.forEach(function (w) { ul.appendChild(el("li", null, w)); });
+        sec.appendChild(el("div", "tmf-warn-cap", "Skipped lines"));
+        sec.appendChild(ul);
+      }
+      box.appendChild(sec);
+    });
+  }
+
+  /* ----- panes ----- */
+  function tmPane(id) {
+    var p = tm.panes[id];
+    if (p) return p;
+    tmAgent(id);
+    p = { id: id, stats: newTurnStats(), bubble: null, bubbleText: "", think: null, thinkText: "", thinkBody: null, stick: true, top: 0, flushT: 0, restore: false };
+    var root = el("section", "tpane act-idle");
+    root.setAttribute("data-agent", id);
+    var hd = el("header", "tp-head");
+    var l1 = el("div", "tp-l1");
+    p.glyph = el("span", "tp-glyph"); l1.appendChild(p.glyph);
+    p.idEl = el("span", "tp-id mono"); l1.appendChild(p.idEl);
+    p.chip = el("span", "tp-chip"); l1.appendChild(p.chip);
+    hd.appendChild(l1);
+    p.meta = el("div", "tp-meta dim small"); hd.appendChild(p.meta);
+    var bt = el("div", "tp-btns");
+    function btn(label, fn, cls) { var b = el("button", "btn small ghost" + (cls ? " " + cls : ""), label); b.type = "button"; b.onclick = fn; bt.appendChild(b); return b; }
+    p.btnFocus = btn("Focus", function () { tmToggleFocus(id); });
+    p.btnPause = btn("Pause", function () { tmAgentCall(p, "pause"); });
+    p.btnResume = btn("Resume", function () { tmAgentCall(p, "resume"); });
+    p.btnCancel = btn("Cancel", function () {
+      if (window.confirm("Cancel " + tmLabel(tm.agents[id]) + "? Its turn stops and its queued input is dropped.")) tmAgentCall(p, "cancel");
+    }, "danger");
+    btn("Transcript", function () { tmTranscript(id); });
+    hd.appendChild(bt);
+    root.appendChild(hd);
+    p.body = el("div", "tp-body");
+    p.body.onscroll = function () {
+      p.top = p.body.scrollTop;
+      p.stick = p.body.scrollHeight - p.body.scrollTop - p.body.clientHeight < 28;
+    };
+    root.appendChild(p.body);
+    // herdr-style status line: folder > model > ctx bar % > tok/s > tokens
+    p.status = el("footer", "tp-status mono");
+    root.appendChild(p.status);
+    p.root = root;
+    tm.panes[id] = p;
+    $("#team-grid").appendChild(root);
+    tmPaneHead(p);
+    return p;
+  }
+  function tmPaneHead(p) {
+    var a = tm.agents[p.id], act = tmAct(a);
+    var keep = tm.sel === p.id ? " focused" : "";
+    p.root.className = "tpane act-" + act + keep;
+    p.glyph.textContent = tmGlyph(act);
+    p.glyph.className = "tp-glyph act-" + act;
+    tmPaneStatus(p, a, act);
+    p.idEl.textContent = tmLabel(a);
+    p.chip.textContent = act === "tool" && a.tool ? "tool: " + a.tool : tmWord(act);
+    p.chip.className = "tp-chip act-" + act;
+    var bits = [a.id === tmLeadId() ? "session lead" : (a.role || "agent")];
+    if (a.team) bits.push(a.team);
+    if (a.model) bits.push(a.model);
+    bits.push("in " + kfmt(a.prompt_tokens || 0) + " out " + kfmt(a.completion_tokens || 0));
+    if (a.tok_s > 0 && TM_ACTIVE[act]) bits.push(a.tok_s.toFixed(1) + " tok/s");
+    p.meta.textContent = bits.join(" · ");
+    var ended = act === "done" || act === "failed" || act === "cancelled" || act === "idle";
+    p.btnPause.hidden = ended || act === "paused";
+    p.btnResume.hidden = !(act === "paused" || act === "cancelled");
+    p.btnCancel.hidden = act === "cancelled" || act === "done" || act === "failed";
+  }
+  function tmFolder() {
+    var c = (cur.session && cur.session.cwd) || "";
+    if (!c) return "~";
+    var parts = c.replace(/\/+$/, "").split("/").filter(Boolean);
+    return parts.length > 2 ? "\u2026/" + parts.slice(-2).join("/") : c;
+  }
+  function tmPaneStatus(p, a, act) {
+    var st = p.status;
+    st.textContent = "";
+    function seg(text, cls) { var s = el("span", "tps-seg" + (cls ? " " + cls : ""), text); st.appendChild(s); return s; }
+    function sep() { st.appendChild(el("span", "tps-sep dim", ">")); }
+    seg(tmFolder(), "tps-dir");
+    sep();
+    var model = a.model_name || (a.model === "cpu" ? "cpu" : ((cur.session && cur.session.model) || (lastState && lastState.model) || "gpu"));
+    seg(model, "tps-model");
+    sep();
+    var pct = a.ctx_pct == null ? null : Math.round(a.ctx_pct);
+    seg("ctx", "dim");
+    var bar = el("span", "tps-bar " + tmCtxClass(pct)), fill = el("span", "tps-fill");
+    fill.style.width = (pct == null ? 0 : Math.min(100, pct)) + "%";
+    bar.appendChild(fill); st.appendChild(bar);
+    seg(pct == null ? "--" : pct + "%", "tps-pct " + tmCtxClass(pct));
+    sep();
+    seg(a.tok_s > 0 && TM_WORKING[act] ? a.tok_s.toFixed(1) + " tok/s" : "-- tok/s");
+    sep();
+    seg(tmTok(a) ? kfmt(tmTok(a)) + " tok" : "-- tok");
+  }
+  function tmAgentCall(p, what) {
+    var btn = what === "pause" ? p.btnPause : what === "resume" ? p.btnResume : p.btnCancel;
+    btn.disabled = true;
+    postJSON("/api/sessions/" + encodeURIComponent(tm.sid) + "/agents/" + encodeURIComponent(p.id) + "/" + what).then(function () {
+      btn.disabled = false; tmFetchSoon();
+    }, function (e) {
+      btn.disabled = false;
+      p.body.appendChild(el("div", "tp-note bad", "Could not " + what + ": " + e.message)); tmStick(p);
+    });
+  }
+  function tmStick(p) { if (p.stick && !p.root.hidden) p.body.scrollTop = p.body.scrollHeight; }
+  function tmFlush(p) {
+    clearTimeout(p.flushT); p.flushT = 0;
+    if (p.bubble) p.bubble.innerHTML = md(p.bubbleText);
+    if (p.thinkBody) p.thinkBody.textContent = p.thinkText;
+    tmStick(p);
+  }
+  function tmSchedule(p) { if (!p.flushT) p.flushT = setTimeout(function () { tmFlush(p); }, 60); }
+  function tmEndBlock(p) {
+    tmFlush(p);
+    if (p.think) p.think.open = false;
+    p.bubble = null; p.think = null; p.thinkBody = null;
+  }
+
+  /* ----- live events, routed to the pane of ev.agent ----- */
+  function tmTail(a, text) {
+    a.tail = ((a.tail || "") + text).slice(-2400);
+  }
+  function tmEvent(ev) {
+    if (ev.type === "team") {
+      var td = ev.data || {};
+      if (td.from && td.to && (td.action === "assigned" || td.action === "message" || td.action === "report")) tmHot(td.from, td.to);
+      tmFetchSoon();
+      return;
+    }
+    if (!ev.agent) return;
+    var d = ev.data || {}, a = tmAgent(ev.agent), p = tmPane(ev.agent);
+    switch (ev.type) {
+      case "spawned":
+        a.parent = ev.parent || ""; a.role = d.role || ev.role || a.role; a.status = "running";
+        if (d.team) a.team = d.team;
+        if (d.member) a.member = d.member;
+        if (d.model) a.model = d.model;
+        if (d.task) a.task = d.task;
+        p.stats = newTurnStats();
+        tmFetchSoon();
+        break;
+      case "activity":
+        a.activity = d.activity || a.activity; a.tool = d.tool || "";
+        if (TM_ACTIVE[a.activity] && (a.status === "done" || a.status === "failed")) a.status = "running";
+        break;
+      case "delta":
+        if (p.think) tmEndBlock(p);
+        if (!p.bubble) { p.bubble = el("div", "msg assistant"); p.bubbleText = ""; p.body.appendChild(p.bubble); }
+        p.bubbleText += d.text || "";
+        tmTail(a, d.text || "");
+        tmSchedule(p);
+        break;
+      case "reasoning":
+        if (!p.think) { p.think = addThink("", true, p.body); p.thinkText = ""; p.thinkBody = p.think.lastChild; }
+        p.thinkText += d.text || "";
+        tmSchedule(p);
+        break;
+      case "tool_call":
+        tmEndBlock(p);
+        addToolCall(d.name || "tool", d.args, p.body); tmStick(p);
+        tmTail(a, "\n$ " + (d.name || "tool") + " " + String(typeof d.args === "string" ? d.args : JSON.stringify(d.args || {})).slice(0, 90) + "\n");
+        break;
+      case "tool_result":
+        tmEndBlock(p);
+        addToolResult(d.name, d.ok, d.output, null, p.body); tmStick(p);
+        tmTail(a, (d.ok === false ? "error: " : "") + String(d.output || "").split("\n").slice(0, 3).join("\n") + "\n");
+        break;
+      case "message":
+        if (d.usage) {
+          a.prompt_tokens = (a.prompt_tokens || 0) + (d.usage.prompt || 0);
+          a.completion_tokens = (a.completion_tokens || 0) + (d.usage.completion || 0);
+          addTurnStats(p.stats, d.usage, ((d.message || {}).tool_calls || []).length);
+        }
+        tmFlush(p);
+        if (p.bubble) {   // same as the chat: the footer follows the newest reply bubble of the turn
+          Array.prototype.forEach.call(p.body.querySelectorAll(".msg-stats.live"), function (n) { n.remove(); });
+          setStatsFooter(p.bubble, p.stats);
+          var lf = p.bubble.querySelector(":scope > .msg-stats"); if (lf) lf.classList.add("live");
+        }
+        tmEndBlock(p);
+        break;
+      case "status":
+        if (d.error) {
+          a.status = "failed"; a.activity = "failed";
+          p.body.appendChild(el("div", "tp-note bad", "Error: " + d.error)); tmStick(p);
+        } else if (d.status) a.status = d.status;
+        break;
+      case "done":
+        tmEndBlock(p);
+        a.status = d.status || "done";
+        a.activity = d.status === "failed" ? "failed" : (d.status === "killed" || d.status === "paused") ? a.activity : "done";
+        a.tool = "";
+        p.stats = newTurnStats();
+        tmFetchSoon();
+        break;
+      default: return;
+    }
+    tmPaneHead(p);
+    tmOrgSoon();
+  }
+
+  /* ----- stored messages: pane history and the transcript overlay ----- */
+  function tmRenderMsgs(into, msgs) {
+    var names = {}, ts = newTurnStats(), lastA = null;
+    function flush() { setStatsFooter(lastA, ts); ts = newTurnStats(); lastA = null; }
+    msgs.forEach(function (m) {
+      var b = m.body || {};
+      if (b.role === "user") { flush(); into.appendChild(el("div", "msg user", contentText(b.content))); return; }
+      if (b.role === "assistant") {
+        if (b.reasoning_content) addThink(b.reasoning_content, false, into);
+        if (b.content) { lastA = el("div", "msg assistant"); lastA.innerHTML = md(contentText(b.content)); into.appendChild(lastA); }
+        addTurnStats(ts, b.judas_stats, (b.tool_calls || []).length);
+        (b.tool_calls || []).forEach(function (tc) {
+          var f = tc.function || {};
+          names[tc.id] = f.name;
+          addToolCall(f.name || "tool", f.arguments, into);
+        });
+        return;
+      }
+      if (b.role === "tool") {
+        var c = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
+        addToolResult(names[b.tool_call_id], !/^error/i.test(c), c, null, into);
+      }
+    });
+    flush();
+  }
+  function tmHistory(msgs) {
+    var by = {};
+    (msgs || []).forEach(function (m) { if (m.agent) (by[m.agent] = by[m.agent] || []).push(m); });
+    Object.keys(by).forEach(function (id) {
+      var p = tmPane(id);
+      if (p.body.childNodes.length) return;
+      tmRenderMsgs(p.body, by[id]);
+      p.body.scrollTop = p.body.scrollHeight;
+    });
+    tmRender();
+  }
+  function tmCloseOverlay() {
+    if (tm.overlay) { tm.overlay.remove(); tm.overlay = null; }
+  }
+  function tmTranscript(id) {
+    tmCloseOverlay();
+    var a = tm.agents[id];
+    var ov = el("div", "tm-overlay"), panel = el("div", "tm-panel");
+    var hd = el("div", "tm-ov-head");
+    hd.appendChild(el("b", null, "Transcript: " + tmLabel(a)));
+    var x = el("button", "btn small", "Close"); x.type = "button"; x.onclick = tmCloseOverlay; hd.appendChild(x);
+    panel.appendChild(hd);
+    var body = el("div", "tm-ov-body", "Loading...");
+    panel.appendChild(body);
+    ov.appendChild(panel);
+    ov.onclick = function (e) { if (e.target === ov) tmCloseOverlay(); };
+    document.body.appendChild(ov);
+    tm.overlay = ov;
+    getJSON("/api/sessions/" + encodeURIComponent(tm.sid)).then(function (r) {
+      if (tm.overlay !== ov) return;
+      var mine = (r.messages || []).filter(function (m) { return m.agent === id; });
+      body.textContent = "";
+      if (!mine.length) body.appendChild(el("p", "dim", "No stored messages for this agent yet."));
+      else tmRenderMsgs(body, mine);
+    }, function (e) { body.textContent = "Could not load: " + e.message; });
+  }
+
   /* ---------- tasks ---------- */
   var tasks = [], runMsgs = {}, prefillTask = null;
   function fmtInterval(s) {
@@ -2704,6 +3714,9 @@
   function setSkin(name) {
     $("#skin-link").setAttribute("href", name ? "/skin.css?name=" + encodeURIComponent(name) : "/skin.css");
     if (name) lsSet("judas.skin", name);
+    if (window.JudasTheme) window.JudasTheme.set(name);
+    var lf = $("#lv-frame");
+    if (lf && lf.getAttribute("src") && lv && lv.up) mapLearnTheme(name).then(function (ok) { if (ok) reloadLearnFrame(); });
     renderDaemon();
   }
   function renderModels() {

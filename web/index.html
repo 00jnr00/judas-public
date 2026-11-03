@@ -29,7 +29,7 @@
       <button type="button" data-screen="cowork"><i aria-hidden="true">&#10070;</i><span class="rl"><b>Cowork</b><small>Delegate bigger jobs</small></span></button>
       <button type="button" data-screen="code"><i aria-hidden="true">{ }</i><span class="rl"><b>Code</b><small>Work in a project</small></span></button>
       <button type="button" data-screen="learn"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Learn</b><small>Understand something</small></span></button>
-      <button type="button" data-screen="swarm"><i aria-hidden="true">&#8756;</i><span class="rl"><b>Swarm</b><small>Bulk jobs on small models</small></span></button>
+      <button type="button" data-screen="swarm"><i aria-hidden="true">&#8756;</i><span class="rl"><b>Swarm</b><small>Teams of agents, live</small></span></button>
     </div>
     <div class="rail-group rail-tools" id="rail-tools">
       <div class="rail-cap">Tools</div>
@@ -107,6 +107,19 @@
         </div>
         <div class="work-body">
           <div class="conv">
+            <div id="team-area" class="team-area" hidden>
+              <div class="team-bar">
+                <div id="team-views" class="team-views" role="tablist" aria-label="Swarm views"></div>
+                <span id="team-sub" class="dim small"></span>
+              </div>
+              <div id="team-v-map" class="tm-view"><div id="team-map" class="tm-map-box"></div></div>
+              <div id="team-v-panes" class="tm-view tp-split" hidden>
+                <aside id="team-side" class="team-side" aria-label="Agents"></aside>
+                <div id="team-grid" class="team-grid"></div>
+              </div>
+              <div id="team-v-table" class="tm-view" hidden><div id="team-table" class="tm-table-box"></div></div>
+              <div id="team-v-file" class="tm-view" hidden><div id="team-file" class="tm-file-box"></div></div>
+            </div>
             <div id="log" class="log"></div>
             <div id="learn-visual" class="learn-visual" hidden>
               <iframe id="lv-frame" title="Visual tutor" referrerpolicy="no-referrer"></iframe>
@@ -267,6 +280,7 @@
 </div>
 <script src="/vendor/katex/katex.min.js"></script>
 <script src="/companion.js"></script>
+<script src="/theme.js"></script>
 <script src="/app.js"></script>
 <script src="/tools.js"></script>
 </body>

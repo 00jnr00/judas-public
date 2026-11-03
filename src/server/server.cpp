@@ -467,6 +467,18 @@ struct Server::Impl {
         bind_addrs = binds;
 #ifdef JUDAS_MACH12
         planner = std::make_unique<mach12::Planner>(cfg.mach12.data_dir);
+        planner->set_merge_cmd(cfg.mach12.merge_cmd);
+        // mach12 inside Judas wears the Judas themes: the same skins the app offers, and the active one by default.
+        planner->set_theme_source(
+            [] {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto & s : load_skins()) arr.push_back(skin_to_json(s));
+                return nlohmann::json{{"themes", arr}};
+            },
+            [] {
+                const char * env = std::getenv("JUDAS_SKIN");
+                return std::string(env && *env ? env : "judas");
+            });
         if (cfg.mach12.enabled) { mach12_on = true; planner->start_background(); }
 #endif
         for (size_t i = 0; i < binds.size(); i++) {
@@ -1241,6 +1253,19 @@ void Server::Impl::setup(httplib::Server & svr) {
     svr.Get(R"(/api/sessions/([^/]+)/events)",
             [this](const httplib::Request & req, httplib::Response & res) { events(req, res); });
     svr.Get("/api/events", [this](const httplib::Request & req, httplib::Response & res) { global_events(req, res); });
+    svr.Get(R"(/api/sessions/([^/]+)/team)", [this](const httplib::Request & req, httplib::Response & res) {
+        if (!store.get_session(req.matches[1])) return send_json(res, error_json("no such session", "not_found"), 404);
+        send_json(res, agents.team_view(req.matches[1]));
+    });
+    svr.Post(R"(/api/sessions/([^/]+)/agents/([^/]+)/(cancel|pause|resume))",
+             [this](const httplib::Request & req, httplib::Response & res) {
+                 std::string sid = req.matches[1], aid = req.matches[2], op = req.matches[3];
+                 bool ok = op == "cancel" ? agents.cancel_agent(sid, aid)
+                         : op == "pause"  ? agents.pause_agent(sid, aid)
+                                          : agents.resume_agent(sid, aid);
+                 if (!ok) return send_json(res, error_json("no such agent here, or it cannot " + op + " now", "conflict"), 409);
+                 send_json(res, {{"ok", true}});
+             });
     svr.Post(R"(/api/sessions/([^/]+)/cancel)", [this](const httplib::Request & req, httplib::Response & res) {
         agents.cancel(req.matches[1]);
         send_json(res, {{"ok", true}});
@@ -1541,6 +1566,32 @@ void Server::Impl::setup(httplib::Server & svr) {
             return send_json(res, error_json("systemctl could not switch " + unit, "internal_error"), 500);
         send_json(res, visual_json());
     });
+    // Map a Judas theme onto the visual tutor's own appearance settings (mode + background only; its other
+    // appearance fields are read back and sent unchanged, because its PUT replaces the whole section).
+    svr.Post("/api/learn/visual/theme", [this](const httplib::Request & req, httplib::Response & res) {
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object() || !b.contains("name") || !b["name"].is_string())
+            return send_json(res, error_json("body needs string name", "invalid_request_error"), 400);
+        const std::string origin = url_origin(cfg.learn.visual_url);
+        if (origin.rfind("http://", 0) != 0)
+            return send_json(res, error_json("[learn] visual_url is not set or not http", "invalid_request_error"), 400);
+        Skin sk = skin_by_name(b["name"].get<std::string>());
+        httplib::Client c(origin);
+        c.set_connection_timeout(1, 0);
+        c.set_read_timeout(3, 0);
+        auto g = c.Get("/api/settings");
+        if (!g || g->status != 200) return send_json(res, {{"ok", false}, {"error", "visual tutor settings not reachable"}}, 502);
+        json cur = json::parse(g->body, nullptr, false);
+        json app = json::object();
+        if (cur.is_object() && cur.contains("settings") && cur["settings"].is_object() &&
+            cur["settings"].contains("appearance") && cur["settings"]["appearance"].is_object())
+            app = cur["settings"]["appearance"];
+        app["mode"] = sk.dark ? "dark" : "light";
+        app["background"] = sk.color("bg");
+        auto p = c.Put("/api/settings/appearance", app.dump(), "application/json");
+        if (!p || p->status != 200) return send_json(res, {{"ok", false}, {"error", "visual tutor rejected the theme"}}, 502);
+        send_json(res, {{"ok", true}, {"mode", app["mode"]}, {"background", app["background"]}});
+    });
     // On/off switch: persists [swarm] enabled, registers or removes swarm_map live, starts or stops the unit.
     auto power_json = [this] {
         return json{{"enabled", swarm_is_on(cfg)}, {"up", swarm_unit_active(cfg)}, {"unit", cfg.swarm.unit}};
@@ -1708,9 +1759,25 @@ void Server::Impl::setup(httplib::Server & svr) {
         for (const auto & s : load_skins()) {
             json c = json::object();
             for (const auto & [k, v] : s.colors) c[k] = v;
-            arr.push_back({{"name", s.name}, {"label", s.label}, {"dark", s.dark}, {"colors", c}});
+            json tk = json::object();
+            for (const auto & [k, v] : s.tokens) tk[k] = v;
+            arr.push_back({{"name", s.name}, {"label", s.label}, {"dark", s.dark}, {"colors", c}, {"tokens", tk}});
         }
         res.set_content(json({{"skins", arr}}).dump(), "application/json");
+    });
+    // One theme as {name,label,dark,vars:{"--bg":...}}: what the web app posts to framed tools (docs/THEMES.md).
+    svr.Get(R"(/api/skins/([^/]+))", [](const httplib::Request & req, httplib::Response & res) {
+        std::string name = req.matches[1];
+        if (name == "current") {  // the server's active skin (JUDAS_SKIN, else judas)
+            const char * env = std::getenv("JUDAS_SKIN");
+            name = env ? env : "judas";
+        }
+        for (const auto & s : load_skins()) {
+            if (s.name != name) continue;
+            res.set_content(skin_to_json(s).dump(), "application/json");
+            return;
+        }
+        send_json(res, error_json("no such theme", "not_found"), 404);
     });
     // Tools tab: the configured sub-tabs. A tab named "mach12" points at the built-in planner when it is on.
     svr.Get("/api/tools/tabs", [this](const httplib::Request &, httplib::Response & res) {

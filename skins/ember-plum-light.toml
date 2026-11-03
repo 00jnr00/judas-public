@@ -1,0 +1,23 @@
+name = "ember-plum-light"
+label = "Ember Plum Light"
+dark = false
+
+[tokens]
+radius = '12px'
+radius_sm = '6px'
+
+[colors]
+bg = "#F6F1FA"
+surface = "#EBE3F2"
+surface2 = "#DFD8E6"
+border = "#B9ACCB"
+title = "#17111F"
+accent = "#AB390B"
+text = "#2A2136"
+dim = "#665B7A"
+ok = "#2E7D32"
+warn = "#8A5A00"
+error = "#C0392B"
+thinking = "#8A809A"
+added = "#BED1C2"
+removed = "#E6BABC"

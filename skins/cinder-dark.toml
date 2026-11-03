@@ -1,0 +1,23 @@
+name = "cinder-dark"
+label = "Cinder Dark"
+dark = true
+
+[tokens]
+radius = '6px'
+radius_sm = '3px'
+
+[colors]
+bg = "#0A0B0C"
+surface = "#1C1E20"
+surface2 = "#2B2D2E"
+border = "#3F4447"
+title = "#FFFFFF"
+accent = "#EA6B6F"
+text = "#F2F1EE"
+dim = "#90949A"
+ok = "#4E9A62"
+warn = "#D9A441"
+error = "#E5484D"
+thinking = "#6E7276"
+added = "#1D3324"
+removed = "#4C1D1F"
