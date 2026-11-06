@@ -124,11 +124,14 @@ struct AgentsConfig {
     int loop_pause_after = 2;     // loop warnings (close together) before the turn pauses
     int read_streak_nudge = 8;    // code/cowork: read-only calls in a row before a "write now" harness message (0 = off)
     int read_streak_force = 14;   // read-only calls in a row after which further reads are refused until a write/build (0 = off)
+    int turn_wall_s = 0;          // wall-clock budget per agent turn in seconds; past it the agent is told to wrap up (0 = off)
     int delegate_after_edits = 8; // lead: edits in a row, with 2+ open plan items, before a delegate reminder (0 = off)
     std::vector<std::string> role_dirs = {"~/.config/judas/roles"};  // plus built-in roles
     bool auto_resume = false;     // resume paused lead turns by itself (a session can override it)
     int auto_resume_max = 20;     // auto-resumes per session per day
     int auto_resume_delay_s = 30; // wait this long after a pause before resuming
+    int url_retry_cap = 2;        // failures per URL (web_fetch, or curl/wget in the shell) before the agent is told to give up on it (0 = off)
+    int empty_turn_limit = 2;     // Swarm lead: empty replies in a row before it is told to write the report now (0 = off)
 };
 
 // git-per-change: inside a git repo, each agent step's file changes also land as a commit on a task branch,
@@ -155,7 +158,8 @@ struct LearningConfig {
     bool review = true;
     int review_tool_steps = 10;    // tool-calling steps since the last review (skill nudge)
     int review_memory_turns = 10;  // lead turns since the last review (memory nudge)
-    int review_max_steps = 12;     // model steps the review agent may take
+    int review_max_steps = 12;     // model steps the review agent may take (compaction calls count)
+    int review_max_wall_s = 300;   // wall-clock cap per review run, seconds; 0 = no cap
     bool curator = true;                     // master switch for the skills curator
     int curator_interval_hours = 168;        // min hours between automatic runs (a week)
     int curator_min_idle_minutes = 30;       // no active agent for this long before a run may start
@@ -221,9 +225,15 @@ struct LearnConfig {
     int max_context_tokens = 3000;            // cap on the digest in the lead's prompt (~4 bytes per token)
     // Optional visual tutor (a separate web app, e.g. LearnHarness) shown inside the Learn screen. The web app
     // embeds visual_url; visual_unit, when set, is the systemd user unit Judas starts on demand.
+    // Off by default: the Learn screen has its own question, plan and knowledge UI. Set show_visual = true to bring
+    // the Tutor chat / Visual tutor switch (and the frame permission and forwarder) back.
+    bool show_visual = false;
     std::string visual_url;
     std::string visual_label = "Visual tutor";
     std::string visual_unit;
+    // Remote clients cannot reach a localhost visual_url, so Judas also forwards it on a second port of its own
+    // (same bind addresses): -1 = visual_url port + 100, 0 = off, else that port. See docs/API.md.
+    int visual_proxy_port = -1;
 };
 
 // Coach: propose-only review of a past session. A variant (prompt overlay, skills, tool notes) is written as
@@ -304,6 +314,12 @@ struct AttachmentsConfig {
     bool ocr = true;                    // run tesseract on images when it is installed (text for non-vision models)
 };
 
+// The phone app's daily question notification (GET /api/daily-question); the Android wrapper reads these.
+struct DailyQuestionConfig {
+    bool enabled = true;
+    int hour = 10;                      // local hour 0 to 23 the notification fires
+};
+
 struct UiConfig {
     bool mascot = true;                 // pixel-art companions in the TUI and web UI
 };
@@ -346,10 +362,32 @@ struct Mach12Config {
     std::string merge_cmd = "mach12-merge";   // the plan-editing helper the mach12_* tools run (PATH lookup unless it has a slash)
 };
 
+// Judas Health Link: read-only pull of Health Connect answers from the phone over the tailnet. See docs/HEALTH.md.
+struct HealthConfig {
+    bool enabled = false;
+    std::string url = "http://moto-g-5g---2024:8765";
+    std::string token_env = "JUDAS_HEALTH_TOKEN";   // name of the env var that holds the bearer token (never the token itself)
+    int timeout_s = 8;
+    bool weekly_checkin = true;
+    std::string weekly_day = "sun";                 // mon..sun; "sat" is rejected (Saturday is rest day)
+    int weekly_hour = 19;                           // local hour 0..23
+};
+
+// "" if day is mon..sun in lower case and not "sat" (Saturday is rest day), else the error text.
+std::string health_weekly_day_error(const std::string & day);
+// Everything wrong with a [health] section (empty = fine). Checked only in depth when enabled.
+std::vector<std::string> health_config_problems(const HealthConfig & h);
+
+// Projects: a name + folder + instructions that sessions attach to. root = where "new project folder" projects are made.
+struct ProjectsConfig {
+    std::string root = "~/Judas/Projects";
+};
+
 struct Config {
     EngineConfig engine;
     AttachmentsConfig attachments;
     UiConfig ui;
+    DailyQuestionConfig daily_question;
     std::map<std::string, ModelConfig> models;
     ServerConfig server;
     PermissionsConfig permissions;
@@ -371,6 +409,8 @@ struct Config {
     TeamsConfig teams;
     ToolsConfig tools;
     Mach12Config mach12;
+    HealthConfig health;
+    ProjectsConfig projects;
     std::string data_dir = "~/.local/share/judas";  // sessions.db, snapshots/, logs/
     std::vector<std::string> sources;               // files actually loaded, for `judas config show`
 

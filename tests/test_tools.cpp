@@ -98,6 +98,30 @@ int main() {
     cfg.permissions.deny_paths = {(root / "work/locked").string()};
     r = reg.call("write_file", {{"path", "locked/deep/f.txt"}, {"content", "x"}}, ctx);
     CHECK(!r.ok);
+    // deny_paths also refuses reads, and keeps denied files out of list_dir, glob and grep results
+    put(root / "work/locked/inside.txt", "needle-in-locked");
+    put(root / "work/open.txt", "needle-in-open");
+    r = reg.call("read_file", {{"path", "locked/inside.txt"}}, ctx);
+    CHECK(!r.ok && r.output.find("deny_paths") != std::string::npos);
+    r = reg.call("list_dir", {{"path", "locked"}}, ctx);
+    CHECK(!r.ok);
+    r = reg.call("list_dir", {{"path", "."}}, ctx);
+    CHECK(r.ok && r.output.find("open.txt") != std::string::npos && r.output.find("locked") == std::string::npos);
+    r = reg.call("glob", {{"pattern", "**/*.txt"}}, ctx);
+    CHECK(r.ok && r.output.find("open.txt") != std::string::npos && r.output.find("inside.txt") == std::string::npos);
+    r = reg.call("grep", {{"pattern", "needle"}}, ctx);
+    CHECK(r.ok && r.output.find("needle-in-open") != std::string::npos && r.output.find("needle-in-locked") == std::string::npos);
+    // a symlink inside the tree must not carry a denied file past the filters
+    fs::create_symlink(root / "work/locked/inside.txt", root / "work/link.txt");
+    r = reg.call("read_file", {{"path", "link.txt"}}, ctx);
+    CHECK(!r.ok);
+    r = reg.call("glob", {{"pattern", "*.txt"}}, ctx);
+    CHECK(r.ok && r.output.find("link.txt") == std::string::npos);
+    fs::remove(root / "work/link.txt");
+    // a ':' in a denied file's name must not let grep hits through
+    put(root / "work/locked/a:1:b.txt", "needle-colon");
+    r = reg.call("grep", {{"pattern", "needle-colon"}}, ctx);
+    CHECK(r.ok && r.output.find("a:1:b.txt") == std::string::npos && r.output.find(":needle-colon") == std::string::npos);
     cfg.permissions.deny_paths.clear();
 
     // shell
@@ -179,7 +203,11 @@ int main() {
         close(fd);
         if (up) {
             r = reg.call("web_search", {{"query", "llama.cpp github"}, {"max_results", 3}}, ctx);
-            CHECK(r.ok && r.output.find("http") != std::string::npos);
+            // Network-dependent: SearXNG answers but its upstream engines can rate-limit and return nothing.
+            if (r.ok && r.output.rfind("no results", 0) == 0)
+                std::fprintf(stderr, "SearXNG returned no results (upstream limited), search check skipped\n");
+            else
+                CHECK(r.ok && r.output.find("http") != std::string::npos);
         } else {
             std::fprintf(stderr, "SearXNG down, web tests skipped\n");
         }

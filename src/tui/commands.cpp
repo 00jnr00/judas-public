@@ -21,7 +21,7 @@ const std::vector<Command> & commands() {
         {"sessions", "", "pick a session and switch to it"},
         {"resume", "[N|copy]", "resume a paused turn, or a paused team agent"},
         {"cancel", "", "cancel the running turn"},
-        {"mode", "chat|cowork|code|learn|swarm", "set the session mode", true},
+        {"mode", "chat|cowork|code|learn|swarm|engineering|design|research|write", "set the session mode", true},
         {"model", "[name]", "list models or switch (restarts the daemon)"},
         {"agents", "", "live agent list"},
         {"team", "[watch]", "Swarm team map; watch keeps a live status block until Esc"},
@@ -200,7 +200,7 @@ Menu compute_menu(const std::string & text, size_t cursor, const MenuContext & c
         return m;
     }
     std::vector<std::string> choices;
-    if (name == "mode") choices = {"chat", "cowork", "code", "learn", "swarm"};
+    if (name == "mode") choices = {"chat", "cowork", "code", "learn", "swarm", "engineering", "design", "research", "write"};
     else if (name == "auto-resume") choices = {"on", "off"};
     else if (name == "model") choices = ctx.models;
     else if (name == "team") choices = {"watch"};

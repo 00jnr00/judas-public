@@ -51,10 +51,12 @@
 
   /* ---------- markdown-ish renderer ---------- */
   function inline(s) {
-    s = esc(s);
-    s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    var codes = [], imgs = [];
+    s = esc(s).replace(/`([^`\n]+)`/g, function (m, c) { codes.push(c); return "\u0001c" + (codes.length - 1) + "\u0001"; });
+    if (window.JudasRich) s = JudasRich.liftImages(s, function (h) { imgs.push(h); return "\u0001i" + (imgs.length - 1) + "\u0001"; });
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-    return s;
+    return s.replace(/\u0001([ci])(\d+)\u0001/g, function (m, k, i) { return k === "c" ? "<code>" + codes[+i] + "</code>" : imgs[+i]; });
   }
   /* Rich messages: attachment chips, image thumbnails and math are lifted out into tokens before the markdown
      pass (so it cannot mangle them) and put back afterwards. Token chars: \u0001 inline, \u0002 own-line block. */
@@ -133,29 +135,56 @@
     var out = "";
     for (var i = 0; i < parts.length; i++) {
       if (i % 2 === 1) {
+        var lm = /^([^\n]*)\n/.exec(parts[i]);
+        var special = lm && window.JudasRich ? JudasRich.fence(lm[1].trim(), parts[i].slice(lm[0].length)) : null;
+        if (special) { out += special; continue; }
         var body = parts[i].replace(/^[^\n]*\n/, function (m) { return /^\s*[\w+-]*\s*\n$/.test(m) ? "" : m; });
         out += "<pre>" + (rich ? '<button type="button" class="code-copy">Copy</button>' : "") +
           "<code>" + esc(body.replace(/\n$/, "")) + "</code></pre>";
         continue;
       }
       var seg = rich ? mathText(parts[i], store) : parts[i];
-      var lines = seg.split("\n"), list = null, para = [];
-      var flushPara = function () { if (para.length) { out += "<p>" + para.join("<br>") + "</p>"; para = []; } };
-      var flushList = function () { if (list) { out += "</" + list + ">"; list = null; } };
+      var lines = seg.split("\n"), list = null, items = [], listHead = -1, para = [], headAt = -1;
+      var flushPara = function () { if (para.length) { out += "<p>" + para.join("<br>") + "</p>"; para = []; headAt = -1; } };
+      var flushList = function () {
+        if (!list) return;
+        var allTasks = list === "ul" && items.length && items.every(function (it) { return it.task; });
+        if (allTasks) {
+          var done = items.filter(function (it) { return it.task.checked; }).length, bar = "";
+          if (listHead >= 0) {   // a heading right above the list gets a done/total counter and a thin bar
+            out = out.slice(0, listHead) + JudasRich.taskCount(done, items.length) + out.slice(listHead);
+            bar = JudasRich.taskBar(done, items.length);
+          }
+          out += bar + '<ul class="rc-tasks">' + items.map(function (it) { return JudasRich.taskLi(it.html, it.task.checked, it.task.key); }).join("") + "</ul>";
+        } else {
+          out += "<" + list + ">" + items.map(function (it) { return "<li>" + (it.orig || it.html) + "</li>"; }).join("") + "</" + list + ">";
+        }
+        list = null; items = []; listHead = -1;
+      };
+      var addItem = function (kind, txt) {
+        flushPara();
+        if (list !== kind) { flushList(); list = kind; listHead = headAt; headAt = -1; }
+        var tk = kind === "ul" && window.JudasRich ? JudasRich.taskMatch(txt) : null;
+        items.push({ html: inline(tk ? tk.text : txt), orig: inline(txt), task: tk });
+      };
       for (var j = 0; j < lines.length; j++) {
-        var ln = lines[j], m;
-        if (/^\s*(\u0002\d+\u0002\s*)+$/.test(ln)) {
-          flushPara(); flushList(); out += ln;
+        var ln = lines[j], m, tb = window.JudasRich ? JudasRich.tableAt(lines, j, inline) : null;
+        if (tb) {
+          flushPara(); flushList(); out += tb.html; headAt = -1; j = tb.next - 1;
+        } else if (/^\s*(\u0002\d+\u0002\s*)+$/.test(ln)) {
+          flushPara(); flushList(); out += ln; headAt = -1;
+        } else if ((m = /^(#{1,4})\s+(.*)$/.exec(ln))) {
+          flushPara(); flushList();
+          var lv = Math.min(4, m[1].length + 1);   // chat headings start at h2 so they never outshout the UI
+          out += "<h" + lv + ">" + inline(m[2]); headAt = out.length; out += "</h" + lv + ">";
         } else if ((m = /^\s*[-*]\s+(.*)$/.exec(ln))) {
-          flushPara(); if (list !== "ul") { flushList(); out += "<ul>"; list = "ul"; }
-          out += "<li>" + inline(m[1]) + "</li>";
+          addItem("ul", m[1]);
         } else if ((m = /^\s*\d+[.)]\s+(.*)$/.exec(ln))) {
-          flushPara(); if (list !== "ol") { flushList(); out += "<ol>"; list = "ol"; }
-          out += "<li>" + inline(m[1]) + "</li>";
+          addItem("ol", m[1]);
         } else if (ln.trim() === "") {
           flushPara(); flushList();
         } else {
-          flushList(); para.push(inline(ln));
+          flushList(); headAt = -1; para.push(inline(ln));
         }
       }
       flushPara(); flushList();
@@ -163,6 +192,7 @@
     return rich ? fillTokens(out, store) : out;
   }
   /* A user message keeps its line breaks; only the attachment markers become chips and thumbnails. */
+  window.JudasMd = md;
   function userHTML(text) {
     var store = [], t = extractAtt(String(text), store);
     var segs = t.split(/([\u0001\u0002]\d+[\u0001\u0002])/), html = "";
@@ -196,6 +226,18 @@
     swarm: { label: "Swarm", mode: true,
       desc: "Hand the lead a big job. It organizes teams of agents, runs them and reports back; you watch every agent live above the composer. Wide, shallow reading can go to a swarm of small fast models on the CPU.",
       when: "Use it for research over many sources, big documents, jobs over many files, triage and long builds. Pick the working folder. You only talk to the lead; agent panes are read-only, with pause, cancel and transcript per agent. CPU members need the swarm instance running (docs/SWARM.md, docs/SWARM-TEAMS.md)." },
+    engineering: { label: "Engineering", mode: true,
+      desc: "Mechanical engineering work in a project folder: requirements, calculations with units, parametric CAD when a kernel is built in, and written design notes and reports.",
+      when: "Use it to have the lead model a part or work a design problem end to end. A project folder is required; results are written to its artifacts folder. CAD tools appear only when a CAD kernel is compiled into this build (docs/ENGINEERING-MODE.md)." },
+    design: { label: "Design", mode: true,
+      desc: "The loose mode: sketches, concept renders and quick iterations. The current design fills the page, every version sits in a filmstrip below it.",
+      when: "Use it to explore a shape or a layout fast. Every visible result is an artifact; new versions replace old ones in place, and you can compare any two. CAD is allowed as a sketch tool, with no precision promised." },
+    research: { label: "Research", mode: true,
+      desc: "Find and read sources, then keep one report current. Sources are numbered on the left, the report updates live in the middle.",
+      when: "Use it for questions that need reading: every source the model used is recorded, and the report cites them as [n]. It says what is still unknown." },
+    write: { label: "Write", mode: true,
+      desc: "Your document, your words. The model never rewrites your text; it leaves suggestions in the margin and you accept or dismiss each one.",
+      when: "Open a file in the project or start a new document and type. Spelling fixes and notes appear beside the text they refer to. Nothing is applied until you press Accept." },
     agents: { label: "Agents",
       desc: "Judas runs one model shared by many agents at once. A lead agent can spawn worker agents that each take on part of a job and run at the same time on that one model. This board shows every agent in the current session: the lead on top, its workers nested under it, each with its status and token count. It is how you see parallel work happening.",
       when: "Open it while a job is running to see who is doing what.",
@@ -204,6 +246,9 @@
         "Status words: queued means waiting for a free slot on the model, running means generating now, waiting means paused for a worker or a tool, done means finished, failed means it hit an error, killed means it was cancelled.",
         "Tokens: in is the text the agent read, out is the text it wrote. Bigger numbers mean more work.",
         "If you only ever chat, you will see one card, the lead. That is normal."] },
+    artifacts: { label: "Artifacts",
+      desc: "Pages, documents, diagrams and 3D views Judas made for you. They are kept, every change is a new version, and you can open any of them here or on your phone.",
+      when: "Use it to find something Judas built earlier. Open one to switch between its versions, open it in its own tab, download it, or delete it. Pages run in a sandbox with no network, so they cannot reach your chats or files." },
     tasks: { label: "Tasks",
       desc: "Saved prompts that run on demand, once at a set time, or on a repeating schedule. Scheduled runs appear as new sessions automatically.",
       when: "Use it for things you repeat, like a nightly check, or for a job you want to start later." },
@@ -213,6 +258,9 @@
       more: [
         "A proposal never touches permissions, the sandbox, or the safety floor; such edits are discarded and listed.",
         "Adopting copies the skills into your skills folder and appends the rules to a coach overlay file that the agent prompt includes. To undo, delete the skill or the section in that file."] },
+    projects: { label: "Projects",
+      desc: "A project is a name, a folder and optional instructions. Pick one in any mode and the session works in that folder with those instructions added to its prompt.",
+      when: "Use it for work you come back to: a repo, a research folder, a book. Make a new folder with Judas or point at an existing one. Deleting a project never deletes its folder unless you tick that box and confirm twice." },
     memory: { label: "Memory",
       desc: "What Judas remembers: the shared memory file every assistant reads, the part of it that goes into every prompt, the facts Judas wrote itself, and the skills it has learned.",
       when: "Open it to check what Judas knows about you, spot a wrong fact it saved, and remove it. Only facts Judas wrote (tagged [judas]) can be removed here; edit the rest in the file itself.",
@@ -241,9 +289,11 @@
     guide: { label: "Guide",
       desc: "Plain-language help for every tab. Start with the three modes, then the tools." }
   };
-  var MODES = ["chat", "cowork", "code", "learn", "swarm"];
-  var SCREENS = ["chat", "cowork", "code", "learn", "swarm", "agents", "tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
-  var SCREEN_IDS = ["work", "agents", "tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings", "guide"];
+  var MODES = ["chat", "cowork", "code", "learn", "swarm", "engineering", "design", "research", "write"];
+  var COWORK_SUBS = [["cowork", "General"], ["engineering", "Engineering"], ["design", "Design"], ["research", "Research"], ["write", "Write"]];
+  function isCoworkSub(m) { return COWORK_SUBS.some(function (x) { return x[0] === m; }); }
+  var SCREENS = ["chat", "cowork", "code", "learn", "swarm", "engineering", "design", "research", "write", "agents", "tasks", "projects", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "artifacts", "tools", "settings", "guide"];
+  var SCREEN_IDS = ["work", "agents", "tasks", "projects", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "artifacts", "tools", "settings", "guide"];
   var curScreen = "chat", curMode = "chat", sideHidden = false;
 
   function pageHead(name) {
@@ -259,7 +309,7 @@
     SCREEN_IDS.forEach(function (s) { $("#screen-" + s).classList.toggle("active", s === id); });
     var inTools = false;
     Array.prototype.forEach.call(document.querySelectorAll("#rail button[data-screen]"), function (b) {
-      var on = b.dataset.screen === name;
+      var on = b.dataset.screen === (isCoworkSub(name) ? "cowork" : name);
       b.classList.toggle("active", on);
       if (on && MODES.indexOf(name) < 0) inTools = true;
     });
@@ -277,9 +327,10 @@
     if (MODES.indexOf(name) >= 0) enterMode(name, opts && opts.keep);
     markNav(name);
     if (name === "snapshots") loadSnapshots();
-    if (name === "agents" || name === "cowork" || name === "swarm") renderBoard();
+    if (name === "agents" || name === "swarm" || isCoworkSub(name)) renderBoard();
     if (name === "code") renderChanges();
     if (name === "tasks") { loadTasks(); applyTaskPrefill(); }
+    if (name === "projects" && window.JudasProjects) { JudasProjects.renderScreen($("#projects")); JudasProjects.load(); }
     if (name === "guide") renderGuide();
     if (name === "settings") renderSettings();
     if (name === "resources") renderResources();
@@ -288,11 +339,14 @@
     if (name === "memory") loadMemory();
     if (name === "coach") loadCoach();
     if (name === "tools" && window.JudasTools) window.JudasTools.open();
+    if (name === "artifacts" && window.JudasArtifacts) window.JudasArtifacts.open();
   }
+  window.JudasShow = show;
   $("#rail").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-screen]");
-    if (b) show(b.dataset.screen);
+    if (b) show(b.dataset.screen === "cowork" ? lastSub() : b.dataset.screen);
   });
+  function lastSub() { var v = lsGet("judas.coworkSub"); return isCoworkSub(v) ? v : "cowork"; }
   $("#rail-more").onclick = function () {
     var r = $("#rail"), open = !r.classList.contains("more-open");
     r.classList.toggle("more-open", open);
@@ -365,7 +419,7 @@
     box.textContent = "";
     box.hidden = !list.length;
     if (!list.length) return;
-    box.appendChild(el("div", "qb-cap dim small", list.length + " queued, sent one by one when this turn ends"));
+    box.appendChild(el("div", "qb-cap small", list.length === 1 ? "Queued: sends when this turn ends" : list.length + " queued: sent one by one when this turn ends"));
     list.forEach(function (q, i) {
       var row = el("div", "qb-item");
       row.appendChild(el("span", "qb-n dim small", String(i + 1)));
@@ -381,7 +435,18 @@
         api(queueURL(q.id), { method: "DELETE" }).then(function (t) { var r = t ? JSON.parse(t) : {}; setQueue(r.queue || cur.queued.filter(function (x) { return x.id !== q.id; })); },
           function (e) { addNote("Could not remove the queued message: " + e.message, true); loadQueue(); });
       };
-      row.appendChild(ed); row.appendChild(rm);
+      var now = el("button", "btn small", "Send now"); now.type = "button";
+      now.title = "Stop the current turn and send this message now (the rest stay queued)";
+      now.onclick = function () {
+        now.disabled = true;
+        api(queueURL(q.id) + "/send", { method: "POST" }).then(function (t) {
+          var r = t ? JSON.parse(t) : {};
+          setQueue(r.queue || cur.queued.filter(function (x) { return x.id !== q.id; }));
+          addUser(q.text || ""); if (live) live.echoed = true;
+          addNote("Interrupted: the current turn stops and this message goes next.");
+        }, function (e) { now.disabled = false; addNote("Could not send it now: " + e.message, true); loadQueue(); });
+      };
+      row.appendChild(now); row.appendChild(ed); row.appendChild(rm);
       box.appendChild(row);
     });
   }
@@ -534,6 +599,7 @@
   var sessionsMore = false; // the server has older sessions than the ones loaded
   var running = {};         // session id -> true while a turn is running (from the global event feed)
   var cur = mkCur(null);
+  if (window.JudasRich) JudasRich.sid = function () { return cur && cur.id || ""; };   // task ticks are kept per chat
   var live = null; // the open session's event stream and live turn state
   var lastUserText = "";
 
@@ -573,6 +639,92 @@
     lsSet("judas.recentDirs", JSON.stringify(r.slice(0, 8)));
     renderRecent();
   }
+  /* ---------- projects in the work header ---------- */
+  /* curProject: the project id the next message goes to ("" = no project, or just a folder in the modes that take one) */
+  var curProject = "";
+  var lastProject = lsGet("judas.lastProject") || "";
+  function projectName(id) { var p = window.JudasProjects && JudasProjects.byId(id); return p ? p.name : ""; }
+  function renderProjectBar() {
+    var P = window.JudasProjects, sel = $("#proj-select");
+    if (!P) return;
+    sel.textContent = "";
+    var none = el("option", null, curMode === "chat" ? "No project" : "Just a folder"); none.value = ""; sel.appendChild(none);
+    P.list().forEach(function (p) { var o = el("option", null, p.name); o.value = p.id; sel.appendChild(o); });
+    var nw = el("option", null, "New project..."); nw.value = "__new"; sel.appendChild(nw);
+    if (curProject && !P.byId(curProject) && P.list().length) curProject = "";   // deleted elsewhere
+    sel.value = curProject;
+    var p = curProject ? P.byId(curProject) : null;
+    var f = $("#proj-folder"); f.hidden = !p; f.textContent = p ? p.folder : ""; if (p) f.title = p.folder;
+    $("#proj-manage").hidden = !p;
+    $("#cwd-bar").classList.toggle("has-project", !!p);
+    $("#proj-label").textContent = curMode === "chat" ? "Project (optional)" : "Project";
+  }
+  function closeNewProject() { var box = $("#proj-new"); box.hidden = true; box.textContent = ""; }
+  function attachProject(id) {
+    /* a started session switches project at once; an unsent one just remembers the choice */
+    if (!cur.id) return Promise.resolve();
+    var sid = cur.id;
+    return JudasProjects.patchSession(sid, id).then(function (r) {
+      if (cur.id === sid) { cur.session = Object.assign(cur.session || {}, r); if (r.cwd) $("#cwd").value = r.cwd; }
+      loadSessions();
+    });
+  }
+  function chooseProject(id) {
+    var before = curProject;
+    curProject = id;
+    if (id) { lastProject = id; lsSet("judas.lastProject", id); }
+    renderProjectBar();
+    $("#cwd-err").hidden = true;
+    attachProject(id).catch(function (e) {
+      curProject = before; renderProjectBar();
+      addNote("Could not change the project: " + e.message, true);
+    });
+  }
+  $("#proj-select").addEventListener("change", function () {
+    var v = this.value;
+    if (v !== "__new") { closeNewProject(); chooseProject(v); return; }
+    this.value = curProject;
+    var box = $("#proj-new");
+    box.textContent = "";
+    var form = JudasProjects.buildForm({
+      idp: "wh",
+      onCreated: function (p) { closeNewProject(); chooseProject(p.id); },
+      onCancel: closeNewProject
+    });
+    box.appendChild(form); box.hidden = false; form.focusFirst();
+  });
+  if (window.JudasProjects) {
+    JudasProjects.host = {
+      openSession: function (id) { var m = modeOf(id); show(m, { keep: true }); openSession(id); syncNav(); },
+      newSession: function (m, pid) { show(m); newSession(m); chooseProject(pid); },
+      projectGone: function (id) { if (curProject === id) { curProject = ""; renderProjectBar(); } loadSessions(); }
+    };
+    JudasProjects.onChange(renderProjectBar);
+    JudasProjects.load().then(function () {
+      /* a new, unsent session in a folder mode starts on the project used last */
+      if (!cur.id && !curProject && (curMode === "code" || curMode === "swarm" || isCoworkSub(curMode)) && JudasProjects.byId(lastProject)) curProject = lastProject;
+      renderProjectBar(); renderSessions();
+    }, function () { /* banner */ });
+  }
+
+  /* the Cowork sub-tab layouts (web/cowork/cowork.js) read the session through this small host object */
+  if (window.JudasCowork) JudasCowork.init({
+    getJSON: getJSON, md: md, input: input,
+    sid: function () { return cur.id; },
+    mode: function () { return curMode; },
+    cwd: function () { return (cur.session && cur.session.cwd) || ($("#cwd").value || "").trim() || (curProject && JudasProjects.byId(curProject) ? JudasProjects.byId(curProject).folder : ""); },
+    ensureSession: function () {
+      if (cur.id) return Promise.resolve(cur.id);
+      var body = { mode: curMode };
+      if (curProject) body.project = curProject; else if ($("#cwd").value.trim()) body.cwd = $("#cwd").value.trim();
+      return postJSON("/api/sessions", body).then(function (r) {
+        var id = typeof r === "string" ? r : (r.session && r.session.id) || r.id;
+        if (!id) throw new Error("server returned no session");
+        return loadSessions().then(function () { openSession(id); return id; });
+      });
+    }
+  });
+
   function renderRecent() {
     var dl = $("#cwd-recent"), chips = $("#cwd-chips"), r = recents();
     dl.textContent = ""; chips.textContent = "";
@@ -589,53 +741,35 @@
     cowork: { title: "Cowork", send: "Delegate", ph: "Describe the larger job. Enter sends, Shift+Enter for a new line.", cwd: "Working folder (optional)" },
     learn: { title: "Learn", send: "Send", ph: "Say what you want to understand. Enter sends, Shift+Enter for a new line.", cwd: "" },
     swarm: { title: "Swarm", send: "Run", ph: "Describe the job for the lead, for example: research these sources and write a merged report. Enter sends, Shift+Enter for a new line.", cwd: "Working folder (required)" },
+    engineering: { title: "Engineering", send: "Send", ph: "Describe the part or design problem: loads, envelope, material, process. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (required)" },
+    design: { title: "Design", send: "Send", ph: "Describe what to sketch or change. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (optional)" },
+    research: { title: "Research", send: "Send", ph: "What should it find out? Enter sends, Shift+Enter for a new line.", cwd: "Project folder (optional)" },
+    write: { title: "Write", send: "Send", ph: "Ask for a read, a check or an outline. Your text is never rewritten. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (required)" },
     code: { title: "Code", send: "Send", ph: "Tell Judas what to read or change in this project. Enter sends, Shift+Enter for a new line.", cwd: "Project folder (required)" }
   };
   var EMPTY_HINT = {
     chat: "Ask anything below. Chat needs no project folder.",
     cowork: "Describe the job below. The lead agent plans it and may spawn workers; watch them on the agent board.",
     learn: "Say what you want to understand. Judas reads your goals first, then asks a few questions before teaching.",
-    code: "Enter a project folder above, then tell Judas what to read or change. Every edit becomes a snapshot.",
-    swarm: "Enter the working folder, then describe the job. The lead plans it, builds teams and runs them; every agent shows up in the panes above."
+    code: "Pick a project or enter a folder above, then tell Judas what to read or change. Every edit becomes a snapshot.",
+    swarm: "Pick a project or enter the working folder, then describe the job. The lead plans it, builds teams and runs them; every agent shows up in the panes above.",
+    engineering: "Pick a project or enter a folder, then describe the part or problem with numbers. Judas calculates, models when CAD is available, and saves notes to the artifacts folder.",
+    design: "Describe what to sketch. Every result lands on the canvas as an artifact, and each change adds a version to the filmstrip.",
+    research: "Ask a question. Sources fill in on the left as they are read, and the report grows in the middle.",
+    write: "Open a file or start a new document on the left, then write. Ask here for a read; suggestions appear in the margin."
   };
-  var STARTERS = [
-    { t: "Summarize a document", d: "Attach a PDF or Word file", file: true,
-      p: "Summarize the attached document in plain language. Give me the key points first, then anything I need to act on." },
-    { t: "Explain my homework step by step", d: "Type it or attach a photo", file: false,
-      p: "Explain this homework problem step by step, like a patient tutor. Do not just hand me the answer; help me understand each step.\n\n" },
-    { t: "Solve a math problem from a photo", d: "Snap it, attach it", file: true,
-      p: "Solve the math problem in the attached photo. Show every step and check the answer at the end." },
-    { t: "Proofread my writing", d: "Paste it or attach a file", file: false,
-      p: "Proofread the following. Fix spelling, grammar and clarity, keep my voice, and list what you changed.\n\n" },
-    { t: "Draft an email", d: "Tell me who and why", file: false,
-      p: "Help me write an email. I will tell you who it is to and what I need to say; ask me for anything you are missing, then write the draft.\n\n" },
-    { t: "Make a study guide or flashcards", d: "From notes or a chapter", file: true,
-      p: "Make a study guide and 15 flashcards (question on one side, answer on the other) from the attached material." },
-    { t: "Analyze a spreadsheet", d: "Attach an Excel or CSV file", file: true,
-      p: "Look at the attached spreadsheet. Tell me what it contains, point out anything that looks off, and summarize the main trends." },
-    { t: "Translate something", d: "Any language", file: false,
-      p: "Translate the following into English. Tell me which language it was written in first, and note anything that does not translate cleanly.\n\n" }
-  ];
+  var EMPTY_NO_SUGGEST = { swarm: true };
   function showEmpty() {
     var box = el("div", "empty");
+    var coin = el("span", "coin big", "Ag"); coin.setAttribute("aria-hidden", "true");
+    box.appendChild(coin);
+    box.appendChild(el("h1", "empty-title", MODE_UI[curMode].title));
     box.appendChild(el("p", "empty-hint", EMPTY_HINT[curMode]));
-    if (curMode === "chat") {
+    /* suggested prompts (web/suggestions.js): rotating chips that fill the composer */
+    if (window.Suggest && !EMPTY_NO_SUGGEST[curMode]) {
       box.classList.add("starter");
       box.appendChild(el("div", "starter-cap", "Or start with one of these"));
-      var grid = el("div", "starters");
-      STARTERS.forEach(function (st) {
-        var b = el("button", "starter-card"); b.type = "button";
-        b.appendChild(el("b", null, st.t));
-        b.appendChild(el("span", null, st.d));
-        b.onclick = function () {
-          input.value = st.p;
-          input.focus();
-          input.setSelectionRange(input.value.length, input.value.length);
-          if (st.file) openPicker();
-        };
-        grid.appendChild(b);
-      });
-      box.appendChild(grid);
+      Suggest.mount(box, { mode: curMode, input: input, count: 4, onPick: function (it) { if (it.file) openPicker(); } });
     }
     logEl.appendChild(box);
   }
@@ -655,18 +789,44 @@
     $("#cwd-err").hidden = true;
     $("#sched").hidden = m !== "cowork";
     var pt = $("#panel-toggle");
-    pt.hidden = m === "chat";
+    pt.hidden = m === "chat" || (isCoworkSub(m) && m !== "cowork");
     pt.textContent = (sideHidden ? "Show " : "Hide ") + (m === "code" ? "changes" : "agents");
-    renderRecent(); renderSessions(); renderChanges(); renderBoard(); renderQueue(); renderApprovals(); updateSend();
+    renderRecent(); renderProjectBar(); renderSessions(); renderChanges(); renderBoard(); renderQueue(); renderApprovals(); updateSend();
     $("#swarm-strip").hidden = m !== "swarm";
     $("#team-area").hidden = m !== "swarm";
     if (m === "swarm") { pollSwarm(); tmEnter(); } else tmLeave();
     if (m === "learn") loadLearnVisual(); else showLearnVisual(false);
     if (window.JudasAgentPane) JudasAgentPane.mode(m);
+    renderCoworkTabs(m);
+    if (window.JudasCowork) JudasCowork.mode(m);
+  }
+
+  /* ---------- Cowork sub-tabs: General, Engineering, Design, Research, Write ---------- */
+  function renderCoworkTabs(m) {
+    var box = $("#cw-tabs");
+    box.hidden = !isCoworkSub(m);
+    if (box.hidden) return;
+    if (m !== "cowork" || lsGet("judas.coworkSub") !== "cowork") lsSet("judas.coworkSub", m);
+    box.textContent = "";
+    COWORK_SUBS.forEach(function (x) {
+      var b = el("button", "cw-tab", x[1]); b.type = "button";
+      b.setAttribute("role", "tab"); b.setAttribute("aria-selected", x[0] === m ? "true" : "false");
+      b.dataset.sub = x[0];
+      b.onclick = function () { if (x[0] !== curMode) show(x[0]); };
+      box.appendChild(b);
+    });
   }
 
   /* ---------- Learn: optional visual tutor ([learn] visual_url), embedded beside the tutor chat ---------- */
   var lv = null, lvOn = false, lvStarting = false;
+  /* The tutor listens on the server's localhost, which is useless from another device: off the server machine use
+     the forwarder Judas runs on lv.proxy_port of the same host (see docs/API.md, Learn visual tutor). */
+  function lvUrl() {
+    if (!lv || !lv.url) return "";
+    var h = location.hostname;
+    if (lv.proxy_port > 0 && h && h !== "localhost" && h !== "127.0.0.1" && h !== "[::1]") return "http://" + h + ":" + lv.proxy_port + "/";
+    return lv.url;
+  }
   function lvRender(msg) {
     var strip = $("#learn-strip");
     strip.hidden = curMode !== "learn" || !lv || !lv.url;
@@ -677,7 +837,7 @@
     $("#lv-dot").className = "sw-dot " + (lv.up ? "up" : "down");
     $("#lv-text").textContent = msg || (lv.up ? (lv.label || "Visual tutor") + " is running." :
       lvStarting ? "starting..." : lv.unit ? "Not running; opening it starts it." : "Not running. Start it yourself, then reopen.");
-    var o = $("#lv-open"); o.hidden = !lv.up; o.href = lv.url;
+    var o = $("#lv-open"); o.hidden = !lv.up; o.href = lvUrl();
   }
   function loadLearnVisual() {
     getJSON("/api/learn/visual").then(function (r) { lv = r; lvRender(); }, function () { lv = null; lvRender(); });
@@ -700,10 +860,10 @@
     $("#composer").hidden = lvOn;
     // the visual tutor gets the full width: no Changes / Agent board panel, no folder bar
     $("#screen-work").classList.toggle("lv-full", lvOn);
-    if (lvOn && lv && lv.up && fr.dataset.base !== lv.url) {
-      fr.dataset.base = lv.url;
+    if (lvOn && lv && lv.up && fr.dataset.base !== lvUrl()) {
+      fr.dataset.base = lvUrl();
       mapLearnTheme(lsGet("judas.skin")).then(function () {  // theme first, so the tutor opens already themed
-        fr.setAttribute("src", window.JudasTheme ? window.JudasTheme.decorate(lv.url) : lv.url);
+        fr.setAttribute("src", window.JudasTheme ? window.JudasTheme.decorate(lvUrl()) : lvUrl());
         if (window.JudasTheme) window.JudasTheme.track(fr);
       });
     }
@@ -873,6 +1033,7 @@
         if (cur.id === ev.id) { newSession(curMode); }
       } else if (ev.type === "turn.started") {
         running[ev.session] = true; renderSessions();
+        if (!sessionById(ev.session)) loadSessions();   // the creation event was missed
       } else if (ev.type === "turn.finished") {
         delete running[ev.session]; renderSessions();
       } else if (ev.type === "approval.requested" || ev.type === "approval.resolved") {
@@ -883,6 +1044,8 @@
           approvalsBy[ev.session] = Math.max(0, (approvalsBy[ev.session] || 0) + (ev.type === "approval.requested" ? 1 : -1));
           renderSessions();
         }
+      } else if (ev.type === "artifact.render") {
+        if (window.JudasArtifactCapture) JudasArtifactCapture.onFeed(ev);
       } else if (ev.type === "gap") {
         loadSessions();
       }
@@ -918,6 +1081,8 @@
       var sub = el("span", "s");
       var m = modeOf(s.id);
       sub.appendChild(el("span", "tag mt m-" + m, MODE_UI[m].title));
+      var pn = s.project_name || (s.project_id ? projectName(s.project_id) : "");
+      if (pn) { var pt = el("span", "tag proj-tag", pn); pt.title = "Project: " + pn; sub.appendChild(pt); }
       if (s.turn_status === "paused") sub.appendChild(el("span", "tag paused", "paused"));
       else if (s.turn_status === "error") sub.appendChild(el("span", "tag failed", "failed"));
       sub.appendChild(document.createTextNode(fmtTime(s.updated_ms)));
@@ -964,8 +1129,14 @@
     syncSessionActions();
     tmReset("");
     if (window.JudasAgentPane) JudasAgentPane.reset("");
-    $("#cwd").value = (m === "code" || m === "swarm") ? (recents()[0] || "") : "";
+    closeNewProject();
+    var wantsFolder = m === "code" || m === "swarm" || m === "engineering" || m === "write";
+    /* modes that work in a folder start on the project used last (if it still exists), else the last folder */
+    curProject = (wantsFolder || isCoworkSub(m)) && window.JudasProjects && JudasProjects.byId(lastProject) ? lastProject : "";
+    $("#cwd").value = wantsFolder && !curProject ? (recents()[0] || "") : "";
+    renderProjectBar();
     renderSessions(); renderBoard(); renderChanges();
+    if (window.JudasCowork) JudasCowork.session("");
   }
   $("#new-session").onclick = function () { newSession(curMode); $("#sess-pane").classList.remove("open"); };
 
@@ -976,6 +1147,7 @@
     applyMode(modeOf(id));
     logEl.textContent = "";
     syncSessionActions();
+    if (window.JudasCowork) JudasCowork.session(id);
     return loadSession(id);
   }
   function openInMode(sid, m) {
@@ -992,6 +1164,8 @@
       cur.session = r.session; cur.agents = r.agents || [];
       $("#chat-title").textContent = (r.session && r.session.title) || id;
       $("#cwd").value = (r.session && r.session.cwd) || "";
+      curProject = (r.session && r.session.project_id) || "";
+      closeNewProject(); renderProjectBar();
       var t = r.turn || {}, msgs = r.messages || [];
       setTurnInfo(t);
       loadApprovals();
@@ -1034,6 +1208,7 @@
   function scrollDown(force) { if (force || nearBottom()) logEl.scrollTop = logEl.scrollHeight; }
   function addNote(text, bad) { var d = el("div", "msg assistant" + (bad ? " err" : ""), text); logEl.appendChild(d); scrollDown(true); return d; }
   function addUser(text) {
+    if (window.JudasLearn) JudasLearn.noteUser(logEl, text);
     lastUserText = stripAtt(text) || lastUserText;
     var d = el("div", "msg user");
     d.innerHTML = userHTML(text);
@@ -1192,6 +1367,7 @@
     return String(o);
   }
   function addToolCall(name, args, into) {
+    if (window.JudasLearn && /^learn_/.test(name || "")) { var lc = JudasLearn.toolCall(name, args, into || logEl); if (lc) return lc; }
     var d = el("details", "tool");
     var sm = el("summary");
     sm.appendChild(el("span", "st", "▸"));
@@ -1204,6 +1380,7 @@
     return d;
   }
   function addToolResult(name, ok, output, checkpoint, into) {
+    if (name === "learn_ask" && ok !== false) return el("span");   // the question card is the whole record
     var d = el("details", "tool" + (ok === false ? " bad" : ""));
     var sm = el("summary");
     sm.appendChild(el("span", "st", ok === false ? "✗" : "✓"));
@@ -1218,6 +1395,8 @@
     d.appendChild(sm);
     d.appendChild(el("pre", null, out.length > 6000 ? out.slice(0, 6000) + "\n[truncated]" : out));
     (into || logEl).appendChild(d);
+    if (ok !== false && window.JudasArtifacts && /\[\[artifact:/.test(out))
+      JudasArtifacts.cardsFor(out).forEach(function (c) { (into || logEl).appendChild(c); });
     return d;
   }
 
@@ -1340,6 +1519,7 @@
   function setRunning(on) {
     $("#turn-pill").hidden = !on;
     $("#cancel").hidden = !on;
+    $("#interrupt").hidden = !on;
     updateSend();
     if (!on && window.JudasCompanion) window.JudasCompanion.settle();
   }
@@ -1355,6 +1535,8 @@
     return "Working on it...";
   }
   function isRunning() { return !$("#cancel").hidden; }
+  var interruptNext = false;
+  $("#interrupt").onclick = function () { interruptNext = true; $("#composer").requestSubmit(); };
 
   function newAgentRec(id, parent, role, task) {
     return { id: id, parent: parent || "", role: role || "agent", task: task || "", status: "running", pt: 0, ct: 0, last: "", buf: "" };
@@ -1437,6 +1619,14 @@
     live.retry = setTimeout(connect, wait);
   }
 
+  /* working indicator: shown while the lead has produced no visible text yet (or between tool calls) */
+  function syncWork() {
+    if (!live || !window.JudasRich) return;
+    if (!live.work) live.work = JudasRich.work(logEl);
+    var st = live.wState;
+    if (!live.inTurn || !st || st === "text") live.work.hide();
+    else live.work.show(st === "wait" ? null : st);
+  }
   function ensureBubble() {
     if (!live.bubble) {
       live.bubble = el("div", "msg assistant");
@@ -1452,10 +1642,15 @@
     if (!live.echoed && task) addUser(task);
     live.echoed = false;
     resetTurnState();
+    live.wState = "wait"; syncWork();
   }
 
+  var COWORK_PINGS = { calcs: 1, sources: 1, suggestions: 1, cad: 1, artifact: 1 };
   function handleEvent(ev) {
+    if (window.JudasLearn) JudasLearn.onEvent(ev);
     if (!live) return;
+    if (window.JudasCowork) JudasCowork.event(ev);
+    if (COWORK_PINGS[ev.type]) return;   // layout refresh pings carry no chat content
     if (window.JudasAgentPane) JudasAgentPane.event(ev);
     if (curMode === "swarm" && tm.sid === live.sid) tmEvent(ev);
     var d = ev.data || {}, lead = !ev.parent, a;
@@ -1480,7 +1675,7 @@
         break;
       case "status":
         a = getAgent(ev.agent);
-        if (d.error) { a.status = "failed"; a.last = "error: " + d.error; if (lead) { addNote("Error: " + d.error, true); mascot("sad", "Hmm, that broke"); } }
+        if (d.error) { a.status = "failed"; a.last = "error: " + d.error; if (lead) { addNote("Error: " + d.error, true); mascot("sad", "Hmm, that broke"); live.wState = null; } }
         else if (lead && d.turn_status === "paused") a.status = "paused";
         else if (d.status) a.status = d.status;
         break;
@@ -1495,6 +1690,7 @@
           live.bubbleText += d.text || "";
           live.bubble.innerHTML = md(live.bubbleText, true);
           mascot("work", "Writing your answer...");
+          live.wState = "text";
           if (stick) scrollDown(true);
         }
         break;
@@ -1502,6 +1698,7 @@
         a = getAgent(ev.agent); a.status = "running";
         if (lead) {
           mascot("think", "Thinking it over...");
+          live.wState = "wait";
           if (!live.think) { live.think = addThink("", false); live.thinkText = ""; live.thinkBody = live.think.lastChild; }
           live.thinkText += d.text || "";
           live.thinkBody.textContent = live.thinkText;
@@ -1516,6 +1713,7 @@
           live.bubble = null; live.think = null;
           mascot("work", toolLine(d.name, d.args));
           addToolCall(d.name || "tool", d.args); scrollDown();
+          live.wState = window.JudasRich ? JudasRich.toolLabel(d.name) : "wait";
         }
         break;
       case "tool_result":
@@ -1528,6 +1726,7 @@
         if (lead) {
           live.bubble = null; live.think = null;
           addToolResult(d.name || live.calls[d.id], d.ok, d.output, d.checkpoint); scrollDown();
+          live.wState = "wait";
         }
         break;
       case "message":
@@ -1542,6 +1741,8 @@
             var lf = live.bubble.querySelector(":scope > .msg-stats"); if (lf) lf.classList.add("live");
           }
           live.bubble = null; live.think = null;
+          /* a reply with tool calls is followed by tool work; a final one stays quiet so the indicator does not flicker back */
+          if (((d.message || {}).tool_calls || []).length) live.wState = "wait";
         }
         break;
       case "done":
@@ -1560,6 +1761,7 @@
         if (cur.id === live.sid) newSession(curMode);
         return;
     }
+    syncWork();
     renderBoard();
   }
 
@@ -1569,6 +1771,7 @@
     var mine = live, sid = live.sid;
     mine.inTurn = false;
     mine.echoed = false;
+    if (mine.work) mine.work.hide();
     setRunning(false);
     resetTurnState();
     loadSessions();
@@ -1609,7 +1812,8 @@
   function updateSend() {
     $("#send").disabled = uploading();
     $("#send").textContent = isRunning() && cur.id ? "Queue" : MODE_UI[curMode].send;
-    $("#send").title = uploading() ? "Wait for the uploads to finish" : "";
+    $("#send").classList.toggle("is-queue", !!(isRunning() && cur.id));
+    $("#send").title = uploading() ? "Wait for the uploads to finish" : isRunning() && cur.id ? "Queue this message: it sends when the current turn ends (Ctrl+Enter interrupts instead)" : "";
   }
   function renderAtts() {
     var box = $("#att-chips");
@@ -1852,7 +2056,26 @@
 
   /* ---------- sending ---------- */
   var input = $("#input");
+  if (window.JudasLearn) JudasLearn.init({
+    md: function (t) { return md(t, true); },
+    send: function (t) { var keep = input.value; input.value = t; $("#composer").requestSubmit(); input.value = keep; }
+  });
+  if (window.JudasLearn) JudasLearn.mount({
+    top: $("#learn-top"),
+    mode: function () { return curMode; },
+    sid: function () { return cur && cur.id ? cur.id : null; },
+    practice: function (text) {
+      // Start the session through the API, then open it: no waiting on the composer.
+      if (isRunning() && !cur.id) return;
+      postJSON("/api/sessions/new/messages", { content: text, mode: "learn" }).then(function (r) {
+        var sid = typeof r.session === "string" ? r.session : ((r.session || {}).id || "");
+        if (!sid) throw new Error("server returned no session");
+        return loadSessions().then(function () { applyMode("learn"); openSession(sid); });
+      }).catch(function (err) { attHint("Could not start practice: " + err.message, true); });
+    }
+  });
   input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing && isRunning()) { e.preventDefault(); interruptNext = true; $("#composer").requestSubmit(); return; }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
   });
   $("#cwd").addEventListener("input", function () { $("#cwd-err").hidden = true; });
@@ -1873,24 +2096,39 @@
     if (atts.some(function (a) { return a.state === "err"; })) { attHint("Remove the file that failed (the x on it) to send.", true); return; }
     attHint("");
     var cwd = $("#cwd").value.trim(), mode = curMode;
-    if ((mode === "code" || mode === "swarm") && !cwd) { $("#cwd-err").hidden = false; $("#cwd").focus(); return; }
+    if ((mode === "code" || mode === "swarm" || mode === "engineering" || mode === "write") && !cwd && !curProject) { $("#cwd-err").hidden = false; $("#cwd").focus(); return; }
+    var proj = curProject;
     var body, url;
     if (/^\/learn(?:\s|$)/.test(text)) {
       // The server rewrites /learn to the shared prompt, so the TUI and the web chat send identical text.
       body = { request: text.slice(6).trim() };
       if (cur.id) body.session = cur.id;
-      if (mode !== "chat" && cwd) body.cwd = cwd;
+      if (proj) body.project = proj;
+      else if (mode !== "chat" && cwd) body.cwd = cwd;
       url = "/api/learn";
       ready = [];
     } else {
       body = { content: text };
       if (ready.length) body.attachments = ready.map(function (a) { return a.id; });
-      if (mode !== "chat" && cwd) body.cwd = cwd; // Chat sends no folder; the daemon uses its default
+      if (proj) body.project = proj; // the project's folder is the cwd
+      else if (mode !== "chat" && cwd) body.cwd = cwd; // Chat sends no folder; the daemon uses its default
       var id = cur.id || "new";
       body.mode = mode; // the server owns the mode; a new session is created with it
       url = "/api/sessions/" + encodeURIComponent(id) + "/messages";
     }
     if (busy && url === "/api/learn") { attHint("A /learn request cannot be queued; wait for the turn to end.", true); return; }
+    if (busy && interruptNext) {
+      // interrupt: stop the running turn (the queue stays) and send this one next
+      interruptNext = false;
+      body.interrupt = true;
+      input.value = "";
+      atts = atts.filter(function (a) { return ready.indexOf(a) < 0; }); renderAtts();
+      addUser(ready.length ? (text ? text + "\n" : "") + attMarkers(ready) : text);
+      if (live) live.echoed = true;
+      addNote("Interrupted: the current turn stops and this message goes next.");
+      postJSON(url, body).catch(function (err) { addNote("Could not interrupt: " + err.message, true); input.value = text; });
+      return;
+    }
     if (busy) {
       // the lead is mid-turn: the server queues it and starts it when the turn ends
       input.value = "";
@@ -1921,9 +2159,11 @@
       if (!sid) throw new Error("server returned no session");
       var fresh = !cur.id;
       cur.id = sid;
-      cur.session = { id: sid, title: title, cwd: cwd, mode: mode };
+      var pj = proj && JudasProjects.byId(proj);
+      cur.session = { id: sid, title: title, cwd: pj ? pj.folder : cwd, mode: mode, project_id: proj };
       syncSessionActions();
-      if (mode !== "chat" && cwd) pushRecent(cwd);
+      if (fresh && window.JudasCowork) JudasCowork.session(sid);
+      if (mode !== "chat" && cwd && !proj) pushRecent(cwd);
       $("#chat-title").textContent = cur.session.title;
       loadSessions();
       if (fresh || !live || live.sid !== sid) {
@@ -3430,6 +3670,7 @@
   }
   $("#t-kind").onchange = syncKind;
   $("#t-when").value = localDtValue(Date.now() + 3600 * 1000);
+  $("#t-start").value = localDtValue(Math.ceil(Date.now() / 3600000) * 3600000);
   function applyTaskPrefill() {
     if (!prefillTask) return;
     $("#t-prompt").value = prefillTask.prompt || "";
@@ -3438,16 +3679,43 @@
     prefillTask = null;
     $("#t-prompt").focus();
   }
+  var editingTask = null;
+  function editTask(t) {
+    editingTask = t.id;
+    $("#t-title").value = t.title || ""; $("#t-prompt").value = t.prompt || ""; $("#t-cwd").value = t.cwd || "";
+    $("#t-kind").value = t.kind || "manual"; syncKind();
+    if (t.kind === "once" && t.run_at_ms) $("#t-when").value = localDtValue(t.run_at_ms);
+    if (t.kind === "interval" && t.interval_s) {
+      var u = [86400, 3600, 60].filter(function (x) { return t.interval_s % x === 0; })[0] || 60;
+      $("#t-unit").value = String(u); $("#t-every").value = String(Math.round(t.interval_s / u));
+      if (t.next_ms) $("#t-start").value = localDtValue(t.next_ms);
+    }
+    $("#task-form").querySelector('button[type="submit"]').textContent = "Save changes";
+    $("#t-cancel-edit").hidden = false;
+    $("#task-new").open = true; taskErr("");
+    $("#task-new").scrollIntoView({ block: "start", behavior: "smooth" });
+    $("#t-prompt").focus();
+  }
+  function endEdit() {
+    editingTask = null;
+    $("#task-form").reset(); syncKind();
+    $("#t-when").value = localDtValue(Date.now() + 3600 * 1000);
+    $("#t-start").value = localDtValue(Math.ceil(Date.now() / 3600000) * 3600000);
+    $("#task-form").querySelector('button[type="submit"]').textContent = "Create task";
+    $("#t-cancel-edit").hidden = true;
+  }
+  $("#t-cancel-edit").onclick = function () { endEdit(); $("#task-new").open = false; };
   function taskErr(msg) { var e = $("#t-err"); e.textContent = msg || ""; e.hidden = !msg; }
   $("#task-form").addEventListener("submit", function (e) {
     e.preventDefault();
     taskErr("");
     var prompt = $("#t-prompt").value.trim(), kind = $("#t-kind").value;
     if (!prompt) { taskErr("Write a prompt: what should the model do?"); return; }
-    var body = { prompt: prompt, kind: kind, enabled: true };
+    var body = { prompt: prompt, kind: kind };
+    if (!editingTask) body.enabled = true;
     var title = $("#t-title").value.trim(), cwd = $("#t-cwd").value.trim();
-    if (title) body.title = title;
-    if (cwd) body.cwd = cwd;
+    if (title || editingTask) body.title = title;
+    if (cwd || editingTask) body.cwd = cwd;
     if (kind === "once") {
       var t = new Date($("#t-when").value).getTime();
       if (!t || isNaN(t)) { taskErr("Pick the date and time to run."); return; }
@@ -3457,13 +3725,17 @@
       var n = parseInt($("#t-every").value, 10);
       if (!n || n < 1) { taskErr("Enter how often to repeat, 1 or more."); return; }
       body.interval_s = n * parseInt($("#t-unit").value, 10);
+      var st = new Date($("#t-start").value).getTime();
+      if (st && !isNaN(st)) body.run_at_ms = st;
     }
-    postJSON("/api/tasks", body).then(function () {
-      $("#task-form").reset(); syncKind();
-      $("#t-when").value = localDtValue(Date.now() + 3600 * 1000);
+    var editing = editingTask;
+    var req = editing ? api("/api/tasks/" + encodeURIComponent(editing), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+                      : postJSON("/api/tasks", body);
+    req.then(function () {
+      endEdit();
       $("#task-new").open = false;
       loadTasks();
-    }, function (err) { taskErr("Could not create the task: " + err.message); });
+    }, function (err) { taskErr((editing ? "Could not save the task: " : "Could not create the task: ") + err.message); });
   });
   function loadTasks() {
     return getJSON("/api/tasks").then(function (r) {
@@ -3534,6 +3806,8 @@
         }, function (e) { run.disabled = false; window.alert("Run failed: " + e.message); });
       };
       acts.appendChild(run);
+      var ed = el("button", "btn", "Edit"); ed.type = "button"; ed.onclick = function () { editTask(t); };
+      acts.appendChild(ed);
       var del = el("button", "btn danger", "Delete"); del.type = "button";
       del.onclick = function () {
         if (!window.confirm("Delete the task \"" + (t.title || t.id) + "\"? Sessions it already created are kept.")) return;
@@ -3587,7 +3861,7 @@
     box.appendChild(el("h3", null, "Tools"));
     box.appendChild(guideCard("agents", true));
     var g2 = el("div", "ggrid");
-    ["tasks", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
+    ["tasks", "projects", "memory", "coach", "snapshots", "resources", "heartbeat", "stats", "tools", "settings"].forEach(function (n) { g2.appendChild(guideCard(n)); });
     box.appendChild(g2);
   }
 
@@ -4118,7 +4392,29 @@
     var pm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (pm) box.appendChild(el("p", "dim small", "Your system asks for reduced motion, so the companion shows a still picture."));
   }
+  function renderLocationSettings() {
+    var box = $("#location-settings"), L = window.JudasLocation;
+    if (!box || !L) return;
+    box.textContent = "";
+    var on = L.enabled();
+    var row = el("div", "cs-row"), sw = el("button", "switch"); sw.type = "button"; sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", on ? "true" : "false");
+    sw.appendChild(el("span", "trk")); sw.appendChild(el("span", null, "Share my location with Judas"));
+    var msg = el("span", "dim small"); row.appendChild(sw); row.appendChild(msg); box.appendChild(row);
+    var st = el("p", "dim small"); box.appendChild(st);
+    var err = el("div", "field-err"); err.hidden = true; box.appendChild(err);
+    function refresh() { L.status().then(function (s) { st.textContent = L.describe(s); }); }
+    sw.onclick = function () {
+      err.hidden = true; sw.disabled = true;
+      var turnOn = !L.enabled();
+      (turnOn ? L.enable() : L.disable()).then(function () {
+        sw.disabled = false; sw.setAttribute("aria-checked", L.enabled() ? "true" : "false"); refresh();
+      }, function (e) { sw.disabled = false; sw.setAttribute("aria-checked", "false"); err.textContent = e.message; err.hidden = false; });
+    };
+    refresh();
+  }
   function renderSettings() {
+    renderLocationSettings();
     renderCompanionSettings();
     renderDaemon();
     renderModels();

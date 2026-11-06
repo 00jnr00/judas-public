@@ -21,6 +21,11 @@
 
 namespace judas {
 
+// The rich-output block appended to the system prompt of chat and cowork sessions (swatch, cards, images).
+const char * rich_output_prompt();
+// The Engineering-mode block appended to every agent's system prompt in an engineering session.
+const char * engineering_prompt();
+
 struct Role {
     std::string name;                  // lead | worker | reviewer | custom
     std::string description;
@@ -52,7 +57,13 @@ public:
     // Block until the session's lead agent finishes its current turn; returns its final answer.
     std::string wait_session(const std::string & session_id);
     // Stops every agent of the session and drops its queued messages (a stop means stop; resend what you still want).
-    void cancel(const std::string & session_id);
+    // drop_queue=false stops the turn but keeps the queued messages (used by interrupt).
+    void cancel(const std::string & session_id, bool drop_queue = true);
+    // Interrupt: stop the session's current turn (queued messages are kept) and send `message` as the next turn
+    // once the lead has stopped. Returns at once with the session id; the new turn shows up through events.
+    std::string interrupt(const std::string & session_id, const std::string & message, const std::string & cwd);
+    // Send one queued message now: take it out of the queue and interrupt with it. False when it is not queued.
+    bool queue_send_now(const std::string & session_id, const std::string & qid, const std::string & cwd);
 
     // Messages sent while the lead is mid-turn wait here, FIFO, capped at kMaxQueued per session. When the lead's
     // turn ends (done or failed; not paused, not cancelled) the next one starts its own turn, one turn per message.
@@ -84,7 +95,13 @@ public:
     TurnInfo turn_info(const std::string & session_id) const;
     // Continue a paused turn: the lead gets the plan as context and a short "carry on" message. Returns false if
     // the session has no paused lead (nothing is started then).
-    bool resume(const std::string & session_id, const std::string & cwd = "");
+    // wrap_up: resume with a request to summarize what is done and left instead of carrying on.
+    bool resume(const std::string & session_id, const std::string & cwd = "", bool wrap_up = false);
+
+    // The session's project (or folder) changed: point its agents at `cwd` and rebuild their system prompts so the
+    // project instructions apply from the next turn. Returns false, changing nothing, while any agent of the session
+    // is running (the caller answers 409); true otherwise, also when no agent is loaded yet.
+    bool apply_project(const std::string & session_id, const std::string & cwd);
 
     int add_listener(AgentListener fn);   // returns handle
     void remove_listener(int handle);
@@ -107,6 +124,10 @@ public:
     ApprovalResult answer_approval(const std::string & session, const std::string & id, bool approve);
 
     std::vector<AgentRow> agents(const std::string & session) const;
+
+    // Hidden background reviews (docs/LEARNING.md): {queued: [...], running: [...], max_wall_s, max_steps}. A review
+    // waits in the queue until no user-facing agent is running; a user turn preempts a running one.
+    json review_state() const;
 
     // Per-session additions, used by coach probes. overlay is appended to the system prompt of every agent in
     // the session; skills_dir (optional) is an extra skill source for that session only (it wins over a skill of

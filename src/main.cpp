@@ -26,6 +26,7 @@
 #include "coach/probe.h"
 #include "learning/curator.h"
 #include "models/models.h"
+#include "server/assets.h"
 #include "server/server.h"
 #include "tui/tui.h"
 #include "skills/skills.h"
@@ -48,6 +49,7 @@ const char * USAGE = R"(judas, the betrayer harness
 
 usage:
   judas serve [--mode M]              run the daemon: model, agents, OpenAI-compatible /v1 and the Judas API
+  judas licenses [NAME]               third-party notices compiled into this binary (OpenCascade LGPL, GeoNames, ...)
   judas [chat] [options]              terminal UI (a client of the daemon; see docs/TUI.md)
       --session ID    open that session (id or unique prefix)
       --continue, -c  open the most recent session
@@ -1073,6 +1075,21 @@ int main(int argc, char ** argv) {
     try {
         if (cmd == "chat" || cmd == "tui") return cmd_tui(args);
         if (cmd == "serve") return cmd_serve(args);
+        if (cmd == "licenses") {
+            // Third-party notices compiled into the binary (web/licenses/), so a lone binary carries them.
+            size_t n = 0;
+            const Asset * t = assets_table(n);
+            std::string want = args.empty() ? "" : args[0];
+            for (size_t i = 0; i < n; i++) {
+                std::string p = t[i].path;
+                if (p.rfind("/licenses/", 0) != 0) continue;
+                if (want.empty()) { std::printf("%s\n", p.substr(10).c_str()); continue; }
+                if (p.substr(10) == want) { std::fwrite(t[i].data, 1, t[i].size, stdout); return 0; }
+            }
+            if (want.empty()) std::printf("\nPrint one with: judas licenses NAME (start with THIRD_PARTY.md). Also served at /licenses/.\n");
+            else { std::fprintf(stderr, "no license file %s (judas licenses lists them)\n", want.c_str()); return 1; }
+            return 0;
+        }
         if (cmd == "run") return cmd_run(args);
         if (cmd == "state") return cmd_get("/state");
         if (cmd == "sessions") return cmd_get("/api/sessions");

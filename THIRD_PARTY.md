@@ -61,6 +61,18 @@ fonts, served from the Judas binary, no network at runtime), used under the MIT 
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
+## Artifacts (viewer libraries and renderers)
+
+All compiled into or embedded in the Judas binary; license files sit next to the code. No network at runtime.
+
+- three.js 0.183.2 (MIT) with OrbitControls, STLLoader, GLTFLoader, BufferGeometryUtils and SkeletonUtils: `web/vendor/artifacts/three/`
+  (LICENSE, VERSION). From the npm tarball, integrity checked against the registry sha512.
+- html-to-image 1.11.13 (MIT): `web/vendor/artifacts/h2i/` (LICENSE, VERSION). From the npm tarball, integrity checked.
+- stb_image_write 1.16 (public domain or MIT, Sean Barrett): `src/third_party/stb/stb_image_write.h`, PNG encoding.
+  From github.com/nothings/stb at commit d14d46f6b44456eb88beac58cba833a4135d4c89.
+- nanosvg and nanosvgrast (zlib license, Mikko Mononen): `src/third_party/nanosvg/` (LICENSE), SVG rasterizing.
+  From github.com/memononen/nanosvg at commit 239e102ec2c691f2902e20ace2ed36ee4a35cfe6.
+
 ## Strata
 
 The optional Strata backend (`-DJUDAS_STRATA=ON`, `backend = "strata"`, see docs/STRATA-BACKEND.md) starts the
@@ -152,3 +164,14 @@ the fonts are not sold on their own and keep their names.
 | Source Code Pro | Adobe | OFL-1.1 | https://github.com/adobe-fonts/source-code-pro | @fontsource-variable/source-code-pro 5.3.1 | LICENSES/fonts/Source-Code-Pro.txt | web/fonts/source-code-pro*.woff2 |
 | Commit Mono | The Commit Mono Project Authors | OFL-1.1 | https://github.com/eigilnikolajsen/commit-mono | @fontsource/commit-mono 5.3.0 | LICENSES/fonts/Commit-Mono.txt | web/fonts/commit-mono-*.woff2 |
 | Space Mono | Colophon Foundry | OFL-1.1 | https://github.com/googlefonts/spacemono | @fontsource/space-mono 5.3.0 | LICENSES/fonts/Space-Mono.txt | web/fonts/space-mono-*.woff2 |
+
+## GeoNames cities data (compiled into the binary)
+
+The offline reverse geocoder behind `location_get` embeds GeoNames `cities15000` (with admin1 and country names),
+Creative Commons Attribution 4.0, https://www.geonames.org. Details and the attribution text: `LICENSES/GEONAMES.md`.
+
+## OpenCascade Technology (compiled into builds with JUDAS_CAD=ON)
+
+Engineering mode's CAD kernel. OCCT 7.9.3 is fetched from github.com/Open-Cascade-SAS/OCCT at build time and linked
+statically; it is not part of this repository. License: GNU LGPL 2.1 with the Open CASCADE exception
+(LICENSE_LGPL_21.txt and OCCT_LGPL_EXCEPTION.txt in the OCCT source). See "CAD kernel license" in docs/ENGINEERING-MODE.md.

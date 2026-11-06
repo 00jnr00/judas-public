@@ -6,7 +6,7 @@
    Agent controls use POST /api/sessions/<id>/agents/<agent>/pause|resume|cancel. Styles: agent-pane.css. */
 (function () {
   var ctx = null;                    // {getJSON, postJSON, openSwarm} from app.js
-  var PANE_MODES = { chat: 1, cowork: 1, code: 1, learn: 1 };
+  var PANE_MODES = { chat: 1, cowork: 1, code: 1, learn: 1, engineering: 1 };
   var ACTIVE = { queued: 1, prefilling: 1, generating: 1, tool: 1, waiting: 1, blocked: 1 };
   var WORKING = { generating: 1, prefilling: 1, tool: 1 };
   var WORD = { generating: "working", prefilling: "working", tool: "working", waiting: "waiting", blocked: "blocked", queued: "queued", idle: "idle", done: "done", failed: "failed", paused: "paused", cancelled: "stopped" };

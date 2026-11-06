@@ -11,6 +11,7 @@
 
 #include "core/config.h"
 #include "mcp/launch.h"
+#include "snap/journal.h"
 #include "tools/tools.h"
 #include "test.h"
 
@@ -144,6 +145,38 @@ int main() {
     // plain paths, with dotdot that never names a secret, still work
     CHECK(floor((root / "open" / "notes.txt").string()).empty());
     CHECK(floor("alpha/../open/notes.txt").empty());
+    // deny_paths: refused by the read floor, and hidden from a bwrap shell (a denied file reads as empty)
+    {
+        fs::create_directories(root / "den");
+        std::ofstream(root / "den" / "x.txt") << "denied-content";
+        std::ofstream(root / "single.txt") << "denied-file-content";
+        std::ofstream(root / "glob1.key") << "denied-glob-content";
+        Config c3;
+        c3.permissions.mode = "full-auto";
+        c3.permissions.allow_paths = {root.string()};
+        c3.permissions.deny_paths = {(root / "den").string(), (root / "single.txt").string(), (root / "*.key").string()};
+        ToolContext c3x;
+        c3x.cwd = root.string();
+        c3x.cfg = &c3;
+        CHECK(!judas::safety_floor_path(c3x, (root / "den" / "x.txt").string()).empty());
+        CHECK(!judas::safety_floor_path(c3x, (root / "single.txt").string()).empty());
+        CHECK(judas::safety_floor_path(c3x, (root / "open" / "notes.txt").string()).empty());
+        if (fs::exists("/usr/bin/bwrap")) {
+            c3.permissions.sandbox = "bwrap";
+            ToolRegistry reg;
+            register_builtin_tools(reg);
+            Journal j(root / "journal");
+            c3x.journal = &j;
+            c3x.checkpoint = j.begin("s", "a", "t");
+            auto probe = reg.call("shell", {{"command", "echo up"}}, c3x);
+            if (probe.ok && probe.output.find("up") != std::string::npos) {   // bwrap works here (user namespaces allowed)
+                auto r = reg.call("shell", {{"command", "cat " + (root / "den" / "x.txt").string() + " " + (root / "single.txt").string() + " " + (root / "glob1.key").string() + " 2>&1; echo done"}}, c3x);
+                CHECK(r.output.find("denied-content") == std::string::npos && r.output.find("denied-file-content") == std::string::npos &&
+                      r.output.find("denied-glob-content") == std::string::npos);
+            }
+            j.commit(c3x.checkpoint);
+        }
+    }
     fs::remove_all(root);
     TEST_MAIN_END();
 }

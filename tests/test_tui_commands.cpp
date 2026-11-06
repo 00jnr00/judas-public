@@ -45,7 +45,7 @@ int main() {
     REQUIRE(m.kind == Menu::Slash);
     CHECK(m.items[0].value == "/mode " && m.items[1].value == "/model");
     m = compute_menu("/mode ", 6, ctx);
-    CHECK(m.kind == Menu::Arg && m.items.size() == 5 && m.items[0].value == "/mode chat");
+    CHECK(m.kind == Menu::Arg && m.items.size() == 9 && m.items[0].value == "/mode chat");
     m = compute_menu("/mode cod", 9, ctx);
     CHECK(m.kind == Menu::Arg && m.items.size() == 1 && m.items[0].value == "/mode code" + std::string());
     CHECK(compute_menu("/mode code", 10, ctx).items.empty() || compute_menu("/mode code", 10, ctx).kind != Menu::Slash);

@@ -11,7 +11,8 @@ skill. The curator and `/learn` workstreams build on the same `[learning]` table
 review = true              # run a background review when a nudge counter reaches its threshold
 review_tool_steps = 10     # tool-calling steps since the last review (skill nudge)
 review_memory_turns = 10   # lead turns since the last review (memory nudge)
-review_max_steps = 12      # model steps the review agent may take
+review_max_steps = 12      # model steps the review agent may take (compaction calls count)
+review_max_wall_s = 300    # wall-clock cap per review run in seconds; 0 = no cap
 ```
 
 A threshold of `0` disables that nudge. `review = false` disables the whole feature. The values are parsed,
@@ -29,9 +30,39 @@ runs. A lead turn that finishes `done` increments `turns`. After that turn a rev
 - no new user message is already queued;
 - at least one nudge counter reached its threshold.
 
+A review that qualifies is queued, not started. See "Idle only" below.
+
 The memory prompt fires at the turn threshold; the skill prompt fires at the tool-step threshold. Both
 thresholds on the same turn produce the combined prompt. A review consumes only the nudge(s) it used, so the
-other dimension can fire on a later turn. A new user turn on the session cancels an in-flight review.
+other dimension can fire on a later turn.
+
+## Idle only
+
+The review never shares the model with real work. On a single-sequence engine every switch between agents
+throws away the KV cache, so a review that overlapped the next user turn made both slow.
+
+- A review waits in a queue (at most 4; the oldest is dropped past that) and starts only when no user-facing
+  agent (lead, worker, helper, team member, of any session) is running. One review runs at a time.
+- Any user-facing agent starting or taking a new message, in any session, preempts a running review: it is
+  cancelled and requeued from its saved prefix, and restarts the next time the daemon is idle. A review that has
+  already written memory or a skill is not replayed (it would write twice): it ends with what it saved. A review
+  preempted 3 times is dropped. A stop on the session drops its reviews instead of requeueing them.
+- `review_max_wall_s` caps one run of a review in wall-clock seconds. At the cap the review is cancelled
+  (anything it already wrote stays), its row ends `killed` with the result `stopped at the wall-clock cap`,
+  and it emits a `review` event with status `timeout`. A requeued review gets a fresh budget.
+- `review_max_steps` bounds model calls: its last allowed call is the final answer without tools. It counts every engine call the review makes, including the
+  compaction summary call. Before this, that call was outside the count, ran at the same priority as a helper
+  agent instead of the review priority, and could not be cancelled. Steps alone never bounded wall time: each
+  step is a 20 to 30K token prompt, and when it waited behind user work or lost its KV cache it took minutes,
+  so 12 steps could run for half an hour. The wall cap is what bounds time.
+
+`GET /api/state` has a `reviews` object:
+
+```json
+{"queued":  [{"id": "...", "session": "...", "queued_ms": 0, "requeues": 0}],
+ "running": [{"id": "...", "session": "...", "started_ms": 0, "wall_s_left": 281, "requeues": 0}],
+ "max_wall_s": 300, "max_steps": 12}
+```
 
 ## How a review runs
 

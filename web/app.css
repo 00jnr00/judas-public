@@ -128,7 +128,11 @@ input:focus,textarea:focus,select:focus,button:focus-visible,summary:focus-visib
 .cwd-bar label{color:var(--title);font-weight:600}
 .cwd{font-family:var(--font-mono,ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace);font-size:var(--fs-sm)}
 .cwd-bar .chips,.cwd-bar .field-err{grid-column:2}
-#screen-work[data-mode="chat"] .cwd-bar{display:none}
+#screen-work[data-mode="chat"] .cwd-folder,.cwd-bar.has-project .cwd-folder{display:none}
+.cwd-bar .proj-pick{display:flex;align-items:center;gap:var(--s2);min-width:0}
+.cwd-bar .proj-pick select{min-width:0;max-width:240px}
+.cwd-bar .proj-folder{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:var(--fs-sm)}
+.cwd-bar .proj-new-wrap{grid-column:1/-1}
 #screen-work[data-mode="code"] .cwd,#screen-work[data-mode="swarm"] .cwd{border-color:var(--accent);border-width:2px}
 .swarm-strip{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;margin:var(--s2) 0;padding:var(--s2) var(--s3);border:1px solid var(--border);border-radius:var(--radius,8px);background:var(--surface2);font-size:var(--fs-sm);max-width:820px}
 .learn-visual{flex:1;min-height:0;display:flex}
@@ -162,6 +166,9 @@ input:focus,textarea:focus,select:focus,button:focus-visible,summary:focus-visib
 .msg.err{border:1px solid var(--error);border-radius:var(--radius,8px);padding:var(--s3) var(--s4);color:var(--error)}
 .msg p{margin:0 0 .8em}
 .msg p:last-child{margin-bottom:0}
+.msg h2,.msg h3,.msg h4{margin:1em 0 .4em;line-height:1.25;color:var(--title)}
+.msg h2{font-size:1.25rem}.msg h3{font-size:1.1rem}.msg h4{font-size:1rem}
+.msg a{color:var(--accent);text-underline-offset:2px}
 .msg ul,.msg ol{margin:0 0 .8em;padding-left:1.5em}
 .msg li{margin-bottom:.25em}
 .msg code{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm,4px);padding:0 .3em;font-size:.9em}
@@ -397,6 +404,7 @@ details.think .body{white-space:pre-wrap;font-style:italic;max-height:14em;overf
   .work-head .desc{font-size:var(--fs-sm)}
   .cwd-bar{grid-template-columns:1fr}
   .cwd-bar .chips,.cwd-bar .field-err{grid-column:1}
+  .cwd-bar .proj-pick{flex-wrap:wrap}
   .log{padding:var(--s3)}
   .composer{padding:var(--s2) var(--s3)}
   .comp-row{flex-direction:column}

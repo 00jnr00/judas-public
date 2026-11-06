@@ -6,6 +6,7 @@
 
 namespace judas {
 
+constexpr int kAutoResumeWrapUpAfter = 2;  // no-progress resumes in a row after which the next resume is a wrap-up
 constexpr int kAutoResumeStallLimit = 3;   // resumes in a row with no progress before auto-resume gives up
 
 struct AutoResumeInput {
@@ -18,13 +19,15 @@ struct AutoResumeInput {
     int stalled = 0;               // consecutive auto-resumes that made no progress
 };
 
-enum class AutoResumeAction { None, Wait, Resume };   // None = do not resume (now or later); Wait = not yet
+enum class AutoResumeAction { None, Wait, Resume, WrapUp };   // None = do not resume (now or later); Wait = not yet
 
 inline AutoResumeAction decide_auto_resume(const AutoResumeInput & in) {
     if (!in.enabled || in.status != "paused") return AutoResumeAction::None;
     if (in.attempts_today >= in.max_per_day) return AutoResumeAction::None;
     if (in.stalled >= kAutoResumeStallLimit) return AutoResumeAction::None;
     if (in.paused_for_ms < (long long) in.delay_s * 1000) return AutoResumeAction::Wait;
+    // Two empty or no-progress stretches in a row: stop pushing the work, ask for a summary of what is done and left.
+    if (in.stalled >= kAutoResumeWrapUpAfter) return AutoResumeAction::WrapUp;
     return AutoResumeAction::Resume;
 }
 

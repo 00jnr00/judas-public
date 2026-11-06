@@ -7,49 +7,54 @@
 <meta name="color-scheme" content="dark light">
 <title>Judas</title>
 <link rel="stylesheet" href="/m/m.css">
+<link rel="stylesheet" href="/rich.css">
 <link rel="stylesheet" href="/skin.css" id="skin-link">
+<link rel="stylesheet" href="/learn/learn.css">
+<link rel="stylesheet" href="/cowork/cowork.css">
 </head>
 <body>
 <div id="app">
-  <!-- home -->
-  <section id="v-home" class="view" aria-label="Home">
-    <header class="bar">
-      <span class="coin" aria-hidden="true">Ag</span>
-      <h1 class="brand">Judas</h1>
-      <button type="button" id="status" class="status" aria-label="Server status"><span class="dot" id="dot"></span><span id="status-txt">...</span></button>
-      <button type="button" id="menu-btn" class="icon-btn" aria-label="Menu"></button>
-    </header>
-    <main class="scroll" id="home-scroll">
-      <p class="hint" id="home-hint"></p>
-      <ul class="cards" id="cards" aria-label="Recent sessions"></ul>
-      <button type="button" id="more-btn" class="more" hidden>Show more</button>
-    </main>
+  <header class="bar" id="bar">
+    <button type="button" id="drawer-btn" class="icon-btn" aria-label="Conversations" aria-haspopup="dialog"></button>
+    <div class="bar-mid" id="bar-mid"></div>
+    <button type="button" id="agents-chip" class="chip" hidden></button>
+    <button type="button" id="visual-chip" class="chip" hidden>Visual</button>
+    <div id="ctx-meter" class="ctx-meter" hidden role="img"><span></span></div>
+    <button type="button" id="menu-btn" class="icon-btn has-dot" aria-label="Menu" aria-haspopup="dialog"><span class="dot" id="dot"></span></button>
+  </header>
+
+  <div id="cw-sub" class="cw-subbar" hidden></div>
+  <!-- Cowork sub-tab stage (Engineering, Design, Research, Write panes) -->
+  <section id="v-cw" class="view" aria-label="Cowork view" hidden><div id="cw-stage" class="cw-stage"></div></section>
+  <!-- new conversation -->
+  <section id="v-home" class="view" aria-label="New conversation">
+    <div class="empty">
+      <span class="coin big" aria-hidden="true">Ag</span>
+      <h1 id="home-title">Chat</h1>
+      <p id="home-hint" class="hint"></p>
+      <div id="home-sg"></div>
+    </div>
+    <div id="learn-home" class="lrn-home" hidden></div>
   </section>
-  <!-- session -->
-  <section id="v-sess" class="view" aria-label="Session" hidden>
-    <header class="bar">
-      <button type="button" id="back-btn" class="icon-btn" aria-label="Back"></button>
-      <button type="button" id="sess-title" class="title" aria-label="Session options">Session</button>
-      <button type="button" id="agents-chip" class="chip" hidden></button>
-      <span class="dot" id="sess-dot" aria-hidden="true"></span>
-      <button type="button" id="sess-menu" class="icon-btn" aria-label="Session options"></button>
-    </header>
-    <div id="approvals" class="approvals" hidden></div>
+  <!-- conversation -->
+  <section id="v-sess" class="view" aria-label="Conversation" hidden>
+    <div id="learn-top" hidden></div>
     <main class="scroll" id="log" aria-live="polite"></main>
     <button type="button" id="jump" class="jump" hidden aria-label="Jump to latest"></button>
   </section>
   <!-- planner -->
   <section id="v-plan" class="view" aria-label="Planner" hidden>
-    <header class="bar">
-      <button type="button" id="plan-back" class="icon-btn" aria-label="Back"></button>
-      <h2 class="title static">Planner</h2>
-    </header>
     <iframe id="plan-frame" title="mach12 planner"></iframe>
   </section>
-  <!-- dock: composer -->
+  <!-- Learn: visual tutor -->
+  <section id="v-vis" class="view" aria-label="Visual tutor" hidden>
+    <div id="vis-msg" class="empty" hidden></div>
+    <iframe id="vis-frame" title="Visual tutor" hidden></iframe>
+  </section>
+
   <footer id="dock" class="dock">
+    <div id="approvals" class="approvals" hidden></div>
     <div id="queue" class="queue" hidden></div>
-    <div id="seg" class="seg" role="tablist" aria-label="Mode"></div>
     <div class="composer">
       <div id="atts" class="atts" hidden></div>
       <textarea id="input" rows="1" placeholder="Message Judas" aria-label="Message" enterkeyhint="enter" autocapitalize="sentences"></textarea>
@@ -57,11 +62,24 @@
         <button type="button" id="attach" class="tool" aria-label="Attach a file"></button>
         <button type="button" id="folder" class="tool wide" hidden></button>
         <span class="grow"></span>
+        <button type="button" id="interrupt" class="interrupt" hidden aria-label="Stop the current turn and send this now">Send now</button>
         <button type="button" id="send" class="send" aria-label="Send"></button>
       </div>
       <input type="file" id="file" multiple hidden>
     </div>
   </footer>
+  <nav id="tabbar" class="tabbar" aria-label="Sections"></nav>
+
+  <div id="drawer-bg" class="drawer-bg" hidden></div>
+  <aside id="drawer" class="drawer" aria-label="Conversations" hidden>
+    <button type="button" id="new-chat" class="new-chat"></button>
+    <div class="d-search"><input id="d-q" type="search" placeholder="Search chats" aria-label="Search conversations" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" id="d-clear" class="d-clear" aria-label="Clear search" hidden>&times;</button></div>
+    <select id="d-proj" class="d-proj" aria-label="Filter by project" hidden></select>
+    <div class="d-head" id="d-head"></div>
+    <div class="d-list" id="d-list"></div>
+    <button type="button" id="d-more" class="d-more" hidden>Show more</button>
+  </aside>
+
   <div id="sheet-bg" class="sheet-bg" hidden></div>
   <div id="sheet" class="sheet" role="dialog" aria-modal="true" hidden></div>
   <div id="offline" class="offline" hidden role="alert">
@@ -76,6 +94,12 @@
   <div id="toast" class="toast" role="status" hidden></div>
 </div>
 <script src="/theme.js"></script>
+<script src="/location.js"></script>
+<script src="/suggestions.js"></script>
+<script src="/rich.js"></script>
+<script src="/learn/learn.js"></script>
+<script src="/artifact-capture.js"></script>
+<script src="/cowork/cowork.js"></script>
 <script src="/m/m.js"></script>
 </body>
 </html>

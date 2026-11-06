@@ -4,6 +4,7 @@
 //
 // Threads: the main thread owns the terminal and all UI state. A follower thread reads the session's SSE
 // stream, a poller thread reads /state; both push into a queue and poke a pipe that wakes the main loop.
+#include "cowork/cowork.h"
 #include "tui/tui.h"
 
 #include <fcntl.h>
@@ -1150,8 +1151,8 @@ struct App {
             queued.clear();
             say("cancel requested");
         } else if (n == "mode") {
-            if (p.arg.empty()) { say("mode: " + mode + "  (/mode chat|cowork|code|learn|swarm)"); return; }
-            if (p.arg != "chat" && p.arg != "cowork" && p.arg != "code" && p.arg != "learn" && p.arg != "swarm") { say("mode must be chat, cowork, code, learn or swarm", 'w'); return; }
+            if (p.arg.empty()) { say("mode: " + mode + "  (/mode chat|cowork|code|learn|swarm|engineering)"); return; }
+            if (!cowork::valid_mode(p.arg)) { say(std::string("mode must be ") + cowork::kModeList, 'w'); return; }
             mode = p.arg;
             if (!sid.empty()) {
                 auto r = api.patch("/api/sessions/" + sid, {{"mode", mode}});

@@ -335,6 +335,58 @@ bool valid_attachment_id(const std::string & id) {
     return true;
 }
 
+std::string fix_reply_images(const std::string & text,
+                             const std::function<std::string(const std::string &, const std::string &)> & fetch,
+                             const std::function<bool(const std::string &)> & exists, int max_fetch) {
+    if (text.find("![") == std::string::npos) return text;
+    std::string out;
+    int fetched = 0;
+    std::map<std::string, std::string> done;   // url -> stored path ("" = failed), so a repeated image is fetched once
+    bool fenced = false;
+    size_t i = 0, n = text.size();
+    while (i < n) {
+        size_t eol = text.find('\n', i);
+        size_t end = eol == std::string::npos ? n : eol + 1;
+        std::string line = text.substr(i, end - i);
+        size_t ns = line.find_first_not_of(" \t");
+        if (ns != std::string::npos && line.compare(ns, 3, "```") == 0) fenced = !fenced;
+        if (fenced || line.find("![") == std::string::npos) { out += line; i = end; continue; }
+        size_t p = 0;
+        while (p < line.size()) {
+            size_t a = line.find("![", p);
+            if (a == std::string::npos) { out += line.substr(p); break; }
+            size_t cb = line.find("](", a + 2);
+            size_t cp = cb == std::string::npos ? cb : line.find(')', cb + 2);
+            std::string cap = cb == std::string::npos ? "" : line.substr(a + 2, cb - a - 2);
+            std::string url = cp == std::string::npos ? "" : line.substr(cb + 2, cp - cb - 2);
+            bool ok = cp != std::string::npos && cap.find(']') == std::string::npos && !url.empty() &&
+                      url.find_first_of(" \t") == std::string::npos;
+            if (!ok) { out += line.substr(p, a + 2 - p); p = a + 2; continue; }
+            out += line.substr(p, a - p);
+            const std::string pre = "/api/attachments/";
+            std::string repl = line.substr(a, cp + 1 - a);
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                auto it = done.find(url);
+                if (it == done.end() && fetched < max_fetch) {
+                    ++fetched;
+                    it = done.emplace(url, fetch(url, cap)).first;
+                }
+                // A URL that cannot be fetched (often one the model made up) becomes a plain link, not a dead image.
+                if (it != done.end())
+                    repl = it->second.empty() ? "[" + (cap.empty() ? url : cap) + "](" + url + ")"
+                                              : "![" + cap + "](" + it->second + ")";
+            } else if (url.rfind(pre, 0) == 0) {
+                std::string id = url.substr(pre.size());
+                if (!exists(id)) repl = cap;
+            }
+            out += repl;
+            p = cp + 1;
+        }
+        i = end;
+    }
+    return out;
+}
+
 std::string capture_screenshot(bool region, std::string & err) {
     err.clear();
     if (!tool_available("grim")) { err = "no-grim"; return ""; }

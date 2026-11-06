@@ -1,6 +1,8 @@
 // Learn mode helpers and tools. See tutor.h.
 #include "tutor/tutor.h"
 
+#include "tutor/learn_store.h"
+
 #include <fnmatch.h>
 
 #include <algorithm>
@@ -166,129 +168,65 @@ std::string learn_progress_path(const Config & cfg) {
     return (fs::path(expand_home(cfg.data_dir)) / "learn" / "progress.json").string();
 }
 
-namespace {
-
-json str_list(const json & v, size_t max_items = 40) {
-    json out = json::array();
-    if (v.is_array())
-        for (auto & x : v)
-            if (x.is_string() && out.size() < max_items) out.push_back(cut_utf8(x.get<std::string>(), 300));
-    return out;
-}
-
-std::string summarize(const std::string & topic, const json & t) {
-    std::ostringstream o;
-    o << "Topic: " << topic << "\n";
-    if (t.contains("goal")) o << "Goal: " << t["goal"].get<std::string>() << "\n";
-    if (t.contains("held")) {
-        o << "Held:";
-        for (auto & x : t["held"]) o << " [" << x.get<std::string>() << "]";
-        o << "\n";
-    }
-    if (t.contains("gaps")) {
-        o << "Gaps:";
-        for (auto & x : t["gaps"]) o << " [" << x.get<std::string>() << "]";
-        o << "\n";
-    }
-    if (t.contains("plan")) {
-        int i = 0;
-        for (auto & s : t["plan"]) {
-            o << ++i << ". [" << (s.value("done", false) ? "x" : " ") << "] " << s.value("step", "");
-            if (!s.value("note", "").empty()) o << " (" << s.value("note", "") << ")";
-            o << "\n";
+std::string learn_ask_check(const json & a, json * norm) {
+    if (!a.is_object()) return "arguments must be an object";
+    static const std::set<std::string> kinds = {"predict", "check", "probe", "practice"};
+    std::string kind = a.value("kind", "");
+    if (!kinds.count(kind)) return "kind must be predict, check, probe or practice";
+    if (!a.contains("prompt") || !a["prompt"].is_string()) return "prompt is required (markdown text)";
+    std::string prompt = a["prompt"].get<std::string>();
+    if (prompt.find_first_not_of(" \t\r\n") == std::string::npos) return "prompt is empty";
+    if (prompt.size() > 4000) return "prompt is too long (4000 characters at most); ask one thing";
+    json opts = json::array();
+    if (a.contains("options") && !a["options"].is_null()) {
+        if (!a["options"].is_array()) return "options must be an array of strings";
+        for (auto & o : a["options"]) {
+            if (!o.is_string() || o.get<std::string>().empty()) return "every option must be a non-empty string";
+            if (o.get<std::string>().size() > 200) return "an option is too long (200 characters at most)";
+            opts.push_back(o);
         }
+        if (opts.size() == 1) return "give at least two options, or none for a free answer";
+        if (opts.size() > 8) return "at most 8 options";
     }
-    if (t.contains("practice")) {
-        size_t n = t["practice"].size(), from = n > 5 ? n - 5 : 0;
-        for (size_t i = from; i < n; i++)
-            o << "Practice " << t["practice"][i].value("date", "") << ": " << t["practice"][i].value("problem", "") << " -> "
-              << t["practice"][i].value("result", "") << "\n";
+    for (const char * k : {"want_confidence", "want_thinking"})
+        if (a.contains(k) && !a[k].is_boolean() && !a[k].is_null()) return std::string(k) + " must be true or false";
+    if (norm) {
+        *norm = {{"kind", kind}, {"prompt", prompt}, {"options", opts},
+                 {"want_confidence", a.value("want_confidence", false)}, {"want_thinking", a.value("want_thinking", false)}};
     }
-    return o.str();
+    return "";
 }
 
-}  // namespace
-
-std::string learn_progress_apply(json & doc, const json & args, bool * ok, const std::string & today) {
-    *ok = true;
-    if (!doc.is_object()) doc = json::object();
-    if (!doc.contains("topics") || !doc["topics"].is_object()) doc["topics"] = json::object();
-    json & topics = doc["topics"];
-    std::string action = args.value("action", "show");
-    std::string topic = args.value("topic", "");
-    if (action == "show") {
-        if (topic.empty()) {
-            if (topics.empty()) return "no learning topics recorded yet";
-            std::string o = "Topics:\n";
-            for (auto it = topics.begin(); it != topics.end(); ++it)
-                o += "- " + it.key() + " (" + it.value().value("updated", "") + ")\n";
-            return o;
-        }
-        if (!topics.contains(topic)) { *ok = false; return "no topic '" + topic + "'"; }
-        return summarize(topic, topics[topic]);
-    }
-    if (topic.empty()) { *ok = false; return "topic is required for " + action; }
-    if (topics.size() >= 200 && !topics.contains(topic)) { *ok = false; return "too many topics (200)"; }
-    json & t = topics[topic];
-    if (!t.is_object()) t = json::object();
-    t["updated"] = today;
-    if (action == "set_goal") {
-        std::string g = args.value("goal", "");
-        if (g.empty()) { *ok = false; return "goal is empty"; }
-        t["goal"] = cut_utf8(g, 600);
-    } else if (action == "probe") {
-        t["held"] = str_list(args.value("held", json::array()));
-        t["gaps"] = str_list(args.value("gaps", json::array()));
-    } else if (action == "plan") {
-        json steps = str_list(args.value("steps", json::array()), 60);
-        if (steps.empty()) { *ok = false; return "steps is empty"; }
-        json plan = json::array();
-        for (auto & s : steps) plan.push_back({{"step", s}, {"done", false}});
-        t["plan"] = plan;
-    } else if (action == "step_done") {
-        if (!t.contains("plan")) { *ok = false; return "topic has no plan"; }
-        int idx = args.value("index", 0);
-        if (idx < 1 || idx > (int) t["plan"].size()) { *ok = false; return "index must be in 1.." + std::to_string(t["plan"].size()); }
-        t["plan"][idx - 1]["done"] = true;
-        std::string note = args.value("note", "");
-        if (!note.empty()) t["plan"][idx - 1]["note"] = cut_utf8(note, 300);
-    } else if (action == "practice") {
-        std::string pr = args.value("problem", ""), res = args.value("result", "");
-        if (pr.empty() || res.empty()) { *ok = false; return "practice needs problem and result"; }
-        if (!t.contains("practice")) t["practice"] = json::array();
-        t["practice"].push_back({{"date", today}, {"problem", cut_utf8(pr, 300)}, {"result", cut_utf8(res, 300)}});
-        while (t["practice"].size() > 50) t["practice"].erase(t["practice"].begin());
-    } else {
-        *ok = false;
-        return "unknown action '" + action + "' (show, set_goal, probe, plan, step_done, practice)";
-    }
-    return "saved\n" + summarize(topic, t);
-}
+bool learn_ends_turn(const std::string & tool) { return tool == "learn_ask"; }
 
 const char * learn_prompt() {
-    return R"(Mode: Learn. You are a tutor. The aim is understanding the learner can rebuild on their own, not facts they can recite.
+    return R"(Mode: Learn. You are a tutor. The aim is understanding the learner can rebuild alone. They are probably on a phone: keep every turn short.
 
-How a session goes:
-1. Orient. Find what the learner wants and why. Their goals, notes and plans are in the learner context below and reachable with learner_context; use them so you never ask for what they already wrote down. Check learn_progress for earlier work on the topic and pick up from it. Long-term facts about the learner are in memory (memory_search); save a durable fact there only when it will matter in later sessions.
-2. Probe. Ask a few short questions, one at a time, to find where their understanding stops. Ask for their reasoning, not only an answer. Record what they hold and what is missing with learn_progress (probe).
-3. Plan. Name the shortest chain of ideas from what they hold to the goal. Leave out what they already know and what does not lead to the goal. Show the plan in a few lines and store it with learn_progress (plan).
-4. Teach in small steps. Each step rests on something they already hold, adds one idea, and ends with one question that tests it. If the answer shows a gap, repair it before moving on. Mark steps done with learn_progress (step_done).
-5. Practice. Later, set problems that need the idea without naming it, and record the result (practice). Raise difficulty only when they succeed.
+Rules you always follow:
+1. Every question to the learner goes through learn_ask. Never end a message with a question in plain text. Write the teaching text first, call learn_ask last, then stop.
+2. Call learn_plan whenever the phase or the plan changes: when you start, when you move to the next phase, when you write or change the steps, when a step becomes now, done or repair. Use one topic name per subject.
+3. One idea per turn, one question per turn.
 
-Style: plain prose, short turns, one question at a time. Do not narrate your method. Say when you are unsure; use web_search to check facts you are not certain of before teaching them. Never write to the learner's context files; they belong to them. Keep each reply focused on the next step.)";
+Phases, in order:
+- measure: find what they already hold. Check the learner context below first (learner_context searches it) and never ask for what is written there. Ask 2 or 3 learn_ask questions, kind probe or predict, with want_confidence true.
+- plan: call learn_plan with phase plan and 3 to 7 steps (id, title, depends_on, status todo). Skip what they know. Then set phase teach and the first step to now.
+- teach: explain the step in a few sentences with one concrete example, then learn_ask kind check. A wrong or unsure answer: set that step to repair with learn_plan update, explain it another way, ask again. A good answer: mark it done and move on.
+- practice: learn_ask kind practice with a new problem that needs the idea but does not name it. Harder only after a success.
+
+Other tools:
+- learn_note: when the learner shows they can use an idea, save 1 to 3 short propositions. In premises, give an earlier proposition by its id (such as "p2") or plain words for what it rests on.
+- Facts about the learner that matter in later sessions go to memory_append. Use web_search before teaching a fact you doubt. Never write to the learner's files.)";
 }
 
 bool learn_tool_allowed(const std::string & n) {
     static const std::set<std::string> ok = {
-        "learner_context", "learn_progress", "memory_read", "memory_search", "memory_append", "read_file", "list_dir",
+        "learner_context", "learn_ask", "learn_plan", "learn_note", "memory_read", "memory_search", "memory_append", "read_file", "list_dir",
         "glob", "grep", "web_search", "web_fetch", "load_skill", "recall", "update_plan", "done", "session_search",
         "view_image", "spawn_agent", "wait_agents", "send_agent", "list_agents", "notify"};
     return ok.count(n) > 0;
 }
 
 namespace {
-
-std::mutex g_progress_mu;
 
 std::string today_str() {
     std::time_t t = std::time(nullptr);
@@ -323,33 +261,28 @@ ToolResult t_context(const json & a, ToolContext & ctx) {
     return {true, o};
 }
 
-ToolResult t_progress(const json & a, ToolContext & ctx) {
+ToolResult t_ask(const json & a, ToolContext &) {
+    std::string err = learn_ask_check(a);
+    if (!err.empty()) return {false, err};
+    return {true, "The question is on the learner's screen. Your turn ends here; their answer arrives as the next message."};
+}
+
+// Shared by learn_plan and learn_note: load, apply under the lock, save on success.
+ToolResult topics_call(const json & a, ToolContext & ctx,
+                       std::string (*apply)(json &, const json &, bool *, const std::string &, const std::string &)) {
     static const Config def;
     const Config & cfg = ctx.cfg ? *ctx.cfg : def;
-    std::lock_guard lk(g_progress_mu);
-    std::string path = learn_progress_path(cfg);
-    json doc = json::object();
-    {
-        std::ifstream in(path);
-        if (in) doc = json::parse(in, nullptr, false);
-        if (doc.is_discarded()) doc = json::object();
-    }
-    bool ok = true;
-    std::string reply = learn_progress_apply(doc, a, &ok, today_str());
-    if (ok && a.value("action", "show") != "show") {
-        std::error_code ec;
-        fs::create_directories(fs::path(path).parent_path(), ec);
-        std::string tmp = path + ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::trunc);
-            out << doc.dump(1) << "\n";
-            if (!out) return {false, "cannot write " + tmp};
-        }
-        fs::rename(tmp, path, ec);
-        if (ec) return {false, "cannot write " + path};
-    }
-    return {ok, reply};
+    std::lock_guard lk(learn_topics_mutex());
+    json doc = learn_topics_load_migrated(cfg);
+    bool ok = false;
+    std::string reply = apply(doc, a, &ok, today_str(), ctx.session);
+    if (!ok) return {false, reply};
+    std::string err;
+    if (!learn_topics_save(cfg, doc, &err)) return {false, err};
+    return {true, reply};
 }
+ToolResult t_plan(const json & a, ToolContext & ctx) { return topics_call(a, ctx, learn_plan_apply); }
+ToolResult t_note(const json & a, ToolContext & ctx) { return topics_call(a, ctx, learn_note_apply); }
 
 }  // namespace
 
@@ -364,26 +297,72 @@ void register_learn_tools(ToolRegistry & reg) {
                     {"required", json::array()}};
     c.run = t_context;
     reg.add(std::move(c));
-    Tool p;
-    p.name = "learn_progress";
-    p.description = "The learner's progress record, kept per topic. Actions: show (all topics, or one with topic), "
-                    "set_goal(topic, goal), probe(topic, held[], gaps[]), plan(topic, steps[]), "
-                    "step_done(topic, index, note), practice(topic, problem, result).";
-    p.parameters = {{"type", "object"},
+    Tool q;
+    q.name = "learn_ask";
+    q.description = "Put one question in front of the learner as a card and end your turn. kind: predict (what will happen "
+                    "before you show it), check (did the last idea land), probe (find where understanding stops), practice "
+                    "(a fresh problem). prompt is markdown. options gives answer buttons; leave it out for a free answer box. "
+                    "want_confidence adds a 4 step confidence control, want_thinking a box for the learner's reasoning. "
+                    "Their reply comes back as the next message.";
+    q.parameters = {{"type", "object"},
                     {"properties",
-                     {{"action", str("show | set_goal | probe | plan | step_done | practice")},
-                      {"topic", str("Topic name")},
-                      {"goal", str("What the learner wants to understand")},
-                      {"held", {{"type", "array"}, {"items", {{"type", "string"}}}}},
-                      {"gaps", {{"type", "array"}, {"items", {{"type", "string"}}}}},
-                      {"steps", {{"type", "array"}, {"items", {{"type", "string"}}}}},
-                      {"index", {{"type", "integer"}, {"description", "1-based plan step"}}},
-                      {"note", str("Short note")},
-                      {"problem", str("The practice problem")},
-                      {"result", str("How it went")}}},
-                    {"required", {"action"}}};
-    p.run = t_progress;
-    reg.add(std::move(p));
+                     {{"kind", {{"type", "string"}, {"enum", {"predict", "check", "probe", "practice"}}}},
+                      {"prompt", str("The question, markdown")},
+                      {"options", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "2 to 8 answer buttons; omit for a free answer"}}},
+                      {"want_confidence", {{"type", "boolean"}}},
+                      {"want_thinking", {{"type", "boolean"}}}}},
+                    {"required", {"kind", "prompt"}}};
+    q.run = t_ask;
+    reg.add(std::move(q));
+    Tool pl;
+    pl.name = "learn_plan";
+    pl.description = "Keep the learner's plan for a topic where they can see it. phase is where the session is: measure "
+                     "(finding what they hold), plan, teach or practice. steps replaces the whole plan: each has id, "
+                     "title, depends_on (ids of steps that must come first) and status todo, now, done or repair. "
+                     "update changes only the status of listed steps. Send phase alone to move on.";
+    pl.parameters = {{"type", "object"},
+                     {"properties",
+                      {{"topic", str("Short topic name; reuse it across calls")},
+                       {"phase", {{"type", "string"}, {"enum", {"measure", "plan", "teach", "practice"}}}},
+                       {"steps",
+                        {{"type", "array"},
+                         {"items",
+                          {{"type", "object"},
+                           {"properties",
+                            {{"id", str("Short id such as s1")},
+                             {"title", str("What this step teaches")},
+                             {"depends_on", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                             {"status", {{"type", "string"}, {"enum", {"todo", "now", "done", "repair"}}}}}},
+                           {"required", {"id", "title"}}}}}},
+                       {"update",
+                        {{"type", "array"},
+                         {"items",
+                          {{"type", "object"},
+                           {"properties",
+                            {{"id", str("Step id")}, {"status", {{"type", "string"}, {"enum", {"todo", "now", "done", "repair"}}}}}},
+                           {"required", {"id", "status"}}}}}}}},
+                     {"required", {"topic"}}};
+    pl.run = t_plan;
+    reg.add(std::move(pl));
+    Tool nt;
+    nt.name = "learn_note";
+    nt.description = "Write down what the learner now understands as 1 to 3 short propositions, each with the premises "
+                     "it rests on (earlier propositions by id such as p2, or plain statements). Later Learn sessions on "
+                     "the topic start with them. Only note what the learner showed they can use.";
+    nt.parameters = {{"type", "object"},
+                     {"properties",
+                      {{"topic", str("Same topic name as learn_plan")},
+                       {"notes",
+                        {{"type", "array"},
+                         {"items",
+                          {{"type", "object"},
+                           {"properties",
+                            {{"text", str("One proposition, a sentence")},
+                             {"premises", {{"type", "array"}, {"items", {{"type", "string"}}}}}}},
+                           {"required", {"text"}}}}}}}},
+                     {"required", {"topic", "notes"}}};
+    nt.run = t_note;
+    reg.add(std::move(nt));
 }
 
 }  // namespace judas

@@ -1,3 +1,4 @@
+#include <map>
 // Offline checks for the agent turn policy (reply classification, continuation, loop guard, delegation nudge)
 // and for the per-edit git step (dedicated ref, user's branch and index untouched, nothing swept in).
 #include "agent/gitstep.h"
@@ -34,6 +35,75 @@ static void test_classify() {
 static void test_announce() {
     CHECK(classify_reply("Now let me spawn 6 workers, one per module. Each gets the house rules and its module's function specs.", false, "stop") == ReplyKind::Announce);
     CHECK(classify_reply("All six modules pass. Let me know if you want more tests.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("My guess is **deep teal**, calm and precise. Showing you a real example now.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Searching for photos...", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Running the tests shows all 12 pass.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Looking good overall.", false, "stop") != ReplyKind::Announce);
+    // a lone progress line is not an answer (seen live: "Extruding to the full arm length." ended an Engineering turn)
+    CHECK(classify_reply("Extruding to the full arm length.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Adding the two mounting holes", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Now create the artifact and render it for inspection.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Next, add the fillets.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Two holes remove 663.66 mm3 total. Now record net volume, compute mass, export, and render.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("The bracket is 10 mm thick and weighs 63 g. Now you have the full design.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("All done. The render matches the spec.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Now everything is in place.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Now you have a working bracket.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Nothing else needed.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Morning brief sent.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Rendering confirms the hole is centered. The part matches the spec.", false, "stop") != ReplyKind::Announce);
+    // waiting on the user is not a promise of work (seen live: the nudge made the model say "Hello!" to no one)
+    CHECK(classify_reply("Queued. I'll hold here and wait for your next instruction.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("I'll wait for your go-ahead before changing anything.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Let me know when you want me to continue.", false, "stop") != ReplyKind::Announce);
+    {
+        std::vector<TextCall> calls;
+        std::string slip = "<tool_call>\n<parameter=memory_search>\n<parameter=query>\nfavorite color\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(slip, {"memory_search", "web_search"}, calls) == TextCallParse::Ok);
+        CHECK(calls.size() == 1 && calls[0].name == "memory_search" && calls[0].args.value("query", "") == "favorite color");
+        // list-typed schema fields (calc_record value is string or number) must not throw (crashed the daemon live)
+        {
+            json props = json::object();
+            props["value"] = {{"type", json::array({"string", "number"})}};
+            props["n"] = {{"type", json::array({"integer", "null"})}};
+            json schema = {{"type", "object"}, {"properties", props}};
+            json args = {{"value", "12.5"}, {"n", "3"}};
+            coerce_text_args(args, schema);
+            CHECK(args["value"] == "12.5" && args["n"] == 3);
+        }
+        // Bare-tag slips seen live (Ornith, cad_state with no arguments)
+        for (std::string bare : {"<tool_call> <cad_state> </parameter> </function> </tool_call>",
+                                 "<tool_call> <cad_state> </function> </tool_call>",
+                                 "<tool_call>\n<cad_state>\n</tool_call>"}) {
+            CHECK(parse_text_tool_calls(bare, {"cad_state", "cad_feature"}, calls) == TextCallParse::Ok);
+            CHECK(calls.size() == 1 && calls[0].name == "cad_state" && calls[0].args.empty());
+        }
+        CHECK(parse_text_tool_calls("<tool_call> <rm_everything> </function> </tool_call>", {"cad_state"}, calls) != TextCallParse::Ok);
+        std::string unknown = "<tool_call>\n<parameter=rm_everything>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(unknown, {"memory_search"}, calls) != TextCallParse::Ok);
+    }
+    {
+        // Nameless calls seen live (Ornith, health_query): no <function=NAME>, a stray </parameter> in the first one.
+        std::map<std::string, std::vector<std::string>> ps = {
+            {"health_query", {"metric", "from", "to", "granularity"}},
+            {"web_search", {"query"}},
+            {"memory_search", {"query"}}};
+        std::vector<std::string> names = {"health_query", "web_search", "memory_search"};
+        std::vector<TextCall> calls;
+        std::string a = "\n\n<tool_call>\n<parameter=metric>\nsleep\n</parameter>\n<parameter=granularity>\nday\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(a, names, ps, calls) == TextCallParse::Ok);
+        CHECK(calls.size() == 1 && calls[0].name == "health_query" && calls[0].args.value("metric", "") == "sleep" &&
+              calls[0].args.value("granularity", "") == "day");
+        std::string b = "<tool_call>\n<parameter=metric>\nsleep\n</parameter>\n<parameter=granularity>\nday\n</parameter>\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(b, names, ps, calls) == TextCallParse::Ok);
+        CHECK(calls.size() == 1 && calls[0].name == "health_query");
+        // two tools share "query": ambiguous, never guessed
+        std::string amb = "<tool_call>\n<parameter=query>\ncats\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(amb, names, ps, calls) != TextCallParse::Ok);
+        // a key no tool has: not guessed
+        std::string none = "<tool_call>\n<parameter=path>\n/etc\n</parameter>\n</function>\n</tool_call>";
+        CHECK(parse_text_tool_calls(none, names, ps, calls) != TextCallParse::Ok);
+    }
     // Replies that only say what the agent is about to do: no tool call means the turn must continue.
     for (const char * s : {
              "Let me read the file.",

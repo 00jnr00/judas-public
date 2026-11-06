@@ -8,6 +8,7 @@ from judas_mcp import client as c
 
 STATE = {"turn": {"running": True, "status": "running", "reason": "", "open_items": ["a"]}, "polls": 0}
 CALLS = []
+HEADERS = []
 
 
 class H(BaseHTTPRequestHandler):
@@ -23,6 +24,14 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         CALLS.append(("GET", self.path))
+        HEADERS.append(self.headers.get("X-Judas-Client"))
+        if self.path.startswith("/api/sessions/s2"):   # a naive server that still returns the content
+            return self._send({"session": {"title": "my sleep numbers", "health_tainted": True}, "total": 4,
+                               "turn": {"running": False, "status": "done", "reason": "r", "open_items": 1},
+                               "agents": [{"id": "a1", "parent": "", "role": "lead", "status": "done",
+                                           "result": "resting HR 64"}],
+                               "messages": [{"id": 1, "agent": "a1", "role": "assistant",
+                                             "body": {"content": "HRV 40 ms"}}]})
         if self.path == "/api/state":
             return self._send({"model": "m", "loaded": True, "ctx_active": 5, "ctx_total": 100, "ctx_free": 90,
                                "active": 1, "queued": 0, "queue": [], "preemptions": 0, "gen_tok_s": 50})
@@ -30,7 +39,9 @@ class H(BaseHTTPRequestHandler):
             return self._send({"snapshots": [{"reverted": False, "files": [
                 {"path": "/x/hello.txt", "before_hash": "", "after_hash": "h"}]}]})
         if self.path.startswith("/api/sessions?"):
-            return self._send({"sessions": [{"id": "s1", "title": "t", "mode": "code", "turn_status": "done"}], "more": False})
+            return self._send({"sessions": [{"id": "s1", "title": "t", "mode": "code", "turn_status": "done"},
+                                               {"id": "s2", "title": "my sleep numbers", "mode": "chat", "turn_status": "done",
+                                                "health_tainted": True}], "more": False})
         if self.path.startswith("/api/sessions/s1"):
             STATE["polls"] += 1
             if STATE["polls"] >= 3:
@@ -121,3 +132,29 @@ def test_clean_harmony_leak():
     raw = '<|channel|>analysis<|message|>x<|end|><|start|>assistant<|channel|>final to=functions.done<|channel|>commentary<|constrain|>json<|message|>{"summary":"Created it"}'
     assert c.clean(raw) == "Created it"
     assert c.clean("plain") == "plain"
+
+
+def test_header_sent_on_every_request():
+    c.status("s1")
+    c.sessions(5)
+    assert HEADERS and all(h == "mcp" for h in HEADERS)
+
+
+def test_tainted_session_withholds_content():
+    for out in (c.status("s2"), c.result("s2"), c.wait("s2", 5, poll_s=0.05)):
+        assert out["health_tainted"] is True and out["content_withheld"] == c.WITHHELD
+        dumped = json.dumps(out)
+        for leak in ("resting HR", "HRV 40", "sleep numbers", "last_assistant_text", "answer", "lead_result"):
+            assert leak not in dumped
+    st = c.status("s2")
+    assert st["turn_status"] == "done" and st["agents"][0]["lead"] and st["messages_total"] == 4
+
+
+def test_tainted_session_blocks_message_and_list_titles():
+    assert c.message("s2", "hello") == {"session": "s2", "sent": False, "health_tainted": True,
+                                        "content_withheld": c.WITHHELD}
+    assert not [x for x in CALLS if x[0] == "POST"]
+    ls = c.sessions(5)["sessions"]
+    assert ls[0]["title"] == "t" and not ls[0]["health_tainted"]
+    assert ls[1]["title"] == c.WITHHELD and ls[1]["health_tainted"]
+    assert "sleep numbers" not in json.dumps(ls)

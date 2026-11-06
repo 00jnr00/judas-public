@@ -1,12 +1,14 @@
 // Built-in tools: files, search, shell, web, snapshots.
 #include <fcntl.h>
 #include <fnmatch.h>
+#include <glob.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -85,6 +87,40 @@ std::string hard_deny(const fs::path & p, const PermissionsConfig & perm) {
     return "";
 }
 
+// permissions.deny_paths: the path or any parent directory matching a glob refuses (reads and writes).
+std::string deny_glob(const fs::path & p, const PermissionsConfig & perm) {
+    for (const auto & dp : perm.deny_paths) {
+        if (dp.empty()) continue;
+        std::string pat = expand(dp);
+        fs::path cur;
+        for (const auto & part : p) {
+            cur /= part;
+            if (fnmatch(pat.c_str(), cur.string().c_str(), 0) == 0) return "path matches deny_paths entry '" + dp + "'";
+        }
+    }
+    return "";
+}
+
+// Existing paths an absolute glob matches right now (at most 256), so a sandbox can mask them.
+std::vector<std::string> expand_globs(const std::string & pattern) {
+    std::vector<std::string> out;
+    if (pattern.empty() || pattern[0] != '/') return out;
+    glob_t g{};
+    if (::glob(pattern.c_str(), GLOB_NOSORT, nullptr, &g) == 0)
+        for (size_t i = 0; i < g.gl_pathc && out.size() < 256; i++) out.push_back(g.gl_pathv[i]);
+    globfree(&g);
+    return out;
+}
+
+// A directory entry or search hit the model must not see: hard-denied or deny_paths, by its own spelling or by
+// where a symlink resolves to (a link inside the tree must not carry a secret's content or name past the filter).
+bool hidden_from_listing(const PermissionsConfig & perm, const fs::path & p) {
+    if (!hard_deny(p, perm).empty() || !deny_glob(p, perm).empty()) return true;
+    std::error_code ec;
+    fs::path c = fs::weakly_canonical(p, ec);
+    return !ec && c != p && (!hard_deny(c, perm).empty() || !deny_glob(c, perm).empty());
+}
+
 // Judas's own state: no tool may write its config, secrets or data (a forged checkpoint or an edited
 // permissions table would be an escalation), and no tool may read its secrets.
 std::string judas_internal(const ToolContext & ctx, const fs::path & p, bool write) {
@@ -107,6 +143,8 @@ std::string read_denied(const ToolContext & ctx, const std::string & path, fs::p
     const auto & perm = cfg_of(ctx).permissions;
     if (std::string r = hard_deny(fs::path(expand(path)), perm); !r.empty()) return "refused: " + r;
     if (std::string r = hard_deny(resolved, perm); !r.empty()) return "refused: " + r;
+    if (std::string r = deny_glob(fs::path(expand(path)), perm); !r.empty()) return "refused: " + r;
+    if (std::string r = deny_glob(resolved, perm); !r.empty()) return "refused: " + r;
     return "";
 }
 
@@ -365,8 +403,15 @@ void write_whole(const fs::path & p, const std::string & content) {
     if (!f) throw std::runtime_error("write failed: " + p.string());
 }
 
+const char * const kWriteModeRefusal = "Write mode: suggest with doc_suggest; the text is the user's";
+
 ToolResult t_write_file(const json & a, ToolContext & ctx) {
     fs::path p;
+    if (ctx.mode == "write") {   // new files are fine; an existing file is the user's text
+        std::string rs;
+        std::error_code ec0;
+        if (check_write_path(ctx, a.at("path").get<std::string>(), rs).empty() && fs::exists(rs, ec0)) return fail(kWriteModeRefusal);
+    }
     std::string content = a.at("content").get<std::string>();
     std::string e = prepare_write(ctx, "write_file", a.at("path").get<std::string>(), p, diff_body("", content));
     if (!e.empty()) return fail(e);
@@ -387,6 +432,7 @@ ToolResult t_write_file(const json & a, ToolContext & ctx) {
 
 ToolResult t_edit_file(const json & a, ToolContext & ctx) {
     fs::path p;
+    if (ctx.mode == "write") return fail(kWriteModeRefusal);
     std::string path = a.at("path").get<std::string>();
     std::string rs;
     std::string why = check_write_path(ctx, path, rs);
@@ -447,6 +493,7 @@ ToolResult t_list_dir(const json & a, ToolContext & ctx) {
             std::error_code e2;
             bool isdir = en.is_directory(e2);
             if (isdir && skip_dir(name)) continue;
+            if (hidden_from_listing(cfg_of(ctx).permissions, en.path())) continue;
             if (++n > cap) { truncated = true; return; }
             o << ind << name << (isdir ? "/" : "") << "\n";
             if (isdir && lvl < depth && !en.is_symlink(e2)) rec(en.path(), lvl + 1, ind + "  ");
@@ -474,7 +521,7 @@ ToolResult t_glob(const json & a, ToolContext & ctx) {
     std::ostringstream o;
     size_t shown = 0;
     for (auto & f : files) {
-        if (!hard_deny(f.second, cfg_of(ctx).permissions).empty()) continue;
+        if (hidden_from_listing(cfg_of(ctx).permissions, f.second)) continue;
         if (shown++ >= 200) break;
         o << f.second.string() << "\n";
     }
@@ -494,7 +541,7 @@ ToolResult t_grep(const json & a, ToolContext & ctx) {
     std::vector<std::string> lines;
     bool have_rg = run_process({"rg", "--version"}, "", 5, false).code == 0;
     if (have_rg) {
-        std::vector<std::string> argv = {"rg", "--line-number", "--no-heading", "--color", "never", "--max-columns", "300", "--glob", "!.git"};
+        std::vector<std::string> argv = {"rg", "--line-number", "--null", "--no-heading", "--color", "never", "--max-columns", "300", "--glob", "!.git"};
         if (icase) argv.push_back("-i");
         if (!gl.empty()) { argv.push_back("--glob"); argv.push_back(gl); }
         argv.insert(argv.end(), {"-e", pat, "--", root.string()});
@@ -502,7 +549,13 @@ ToolResult t_grep(const json & a, ToolContext & ctx) {
         if (r.code == 2 && r.output.empty()) return fail("grep: invalid pattern or path");
         std::istringstream in(r.output);
         std::string l;
-        while (std::getline(in, l)) lines.push_back(l);
+        // --null puts a NUL right after the file name, so a ':' in a path cannot confuse the deny filter
+        while (std::getline(in, l)) {
+            size_t z = l.find('\0');
+            if (z == std::string::npos) { lines.push_back(l); continue; }
+            if (hidden_from_listing(cfg_of(ctx).permissions, fs::path(l.substr(0, z)))) continue;
+            lines.push_back(l.substr(0, z) + ":" + l.substr(z + 1));
+        }
     } else {
         std::regex re;
         try { re = std::regex(pat, icase ? std::regex::ECMAScript | std::regex::icase : std::regex::ECMAScript); }
@@ -517,6 +570,7 @@ ToolResult t_grep(const json & a, ToolContext & ctx) {
         std::sort(files.begin(), files.end(), [](auto & x, auto & y) { return x.second < y.second; });
         for (auto & f : files) {
             if (lines.size() > maxr) break;
+            if (hidden_from_listing(cfg_of(ctx).permissions, f.second)) continue;
             std::string data = read_whole(f.second);
             if (looks_binary(data)) continue;
             std::istringstream in(data);
@@ -532,7 +586,7 @@ ToolResult t_grep(const json & a, ToolContext & ctx) {
     for (auto & l : lines) {
         // drop hits in hard-denied files
         size_t c = l.find(':');
-        if (c != std::string::npos && !hard_deny(fs::path(l.substr(0, c)), cfg_of(ctx).permissions).empty()) continue;
+        if (c != std::string::npos && hidden_from_listing(cfg_of(ctx).permissions, fs::path(l.substr(0, c)))) continue;
         if (shown++ >= maxr) break;
         o << l << "\n";
     }
@@ -541,28 +595,84 @@ ToolResult t_grep(const json & a, ToolContext & ctx) {
     return okr(o.str());
 }
 
+// The spellings a shell would fold into one word: the raw text, and a form with quotes and backslashes removed,
+// $'\xNN' and \NNN escapes decoded and ${IFS} read as a space, so s""udo, su\do, sudo${IFS}id and $'\x73udo' are
+// seen as sudo. Every check runs on every form; a form can only add refusals.
+std::vector<std::string> command_forms(const std::string & cmd) {
+    std::vector<std::string> out = {cmd};
+    static const std::regex ifs(R"(\$\{?IFS[^}\s;&|]*\}?)");
+    std::string t = std::regex_replace(cmd, ifs, " ");
+    std::string d;
+    auto hexv = [](char c) { return std::isdigit((unsigned char) c) ? c - '0' : std::tolower((unsigned char) c) - 'a' + 10; };
+    for (size_t i = 0; i < t.size(); i++) {
+        if (t[i] == '\\' && i + 3 < t.size() && t[i + 1] == 'x' && std::isxdigit((unsigned char) t[i + 2]) && std::isxdigit((unsigned char) t[i + 3])) {
+            d += (char) (hexv(t[i + 2]) * 16 + hexv(t[i + 3]));
+            i += 3;
+        } else if (t[i] == '\\' && i + 3 < t.size() && t[i + 1] >= '0' && t[i + 1] <= '3' && t[i + 2] >= '0' && t[i + 2] <= '7' && t[i + 3] >= '0' && t[i + 3] <= '7') {
+            d += (char) (((t[i + 1] - '0') << 6) | ((t[i + 2] - '0') << 3) | (t[i + 3] - '0'));
+            i += 3;
+        } else {
+            d += t[i];
+        }
+    }
+    std::string n;
+    for (size_t i = 0; i < d.size(); i++) {
+        char c = d[i];
+        if (c == '$' && i + 1 < d.size() && (d[i + 1] == '\'' || d[i + 1] == '"')) continue;   // $'..' and $".." quoting
+        if (c != '\'' && c != '"' && c != '\\') n += c;
+    }
+    if (n != cmd) out.push_back(n);
+    return out;
+}
+
 // Always blocked, in EVERY permission mode including full-auto. Shell access is fine; privilege escalation and
 // credential handling are not. Added 2026-10-13 after a worker, told only to write files, invented a sudo
 // password brute-force loop that tripped pam_faillock and locked the real user out of sudo.
 std::string blocked_command(const std::string & cmd) {
-    // Program names that must never be invoked by an agent, matched in command position only (start, after ; & | ( ` { $( or a launcher like env/exec/xargs), optionally quoted,
+    // Program names that must never be invoked by an agent, matched in command position only (start, after ; & | ( ` { $( or a launcher like env/exec/xargs/sh -c), optionally quoted,
     // escaped or spelled with a bin path; so "getent passwd" or "man sudo" pass.
+    static const char * kNames = "sudo|sudo-rs|sudoedit|doas|pkexec|su|visudo|passwd|chpasswd|gpasswd|usermod|useradd|userdel|"
+                                 "groupadd|groupmod|groupdel|adduser|deluser|vipw|vigr|faillock|pam_tally2|run0|machinectl";
+    static const std::vector<std::string> kNameList = {"sudo", "sudo-rs", "sudoedit", "doas", "pkexec", "su", "visudo", "passwd",
+        "chpasswd", "gpasswd", "usermod", "useradd", "userdel", "groupadd", "groupmod", "groupdel", "adduser", "deluser", "vipw",
+        "vigr", "faillock", "pam_tally2", "run0", "machinectl"};
+    static const char * kLaunch = "env|exec|command|builtin|nohup|time|nice|ionice|xargs|setsid|stdbuf|timeout|strace|watch|eval|busybox|"
+                                  "sh|bash|dash|zsh|ksh|ash|do|then|else|!";
     static const std::regex re(
-        R"((^|[;&|(`{\n]|\$\()\s*((env|exec|command|nohup|time|nice|xargs|setsid|stdbuf|timeout|do|then|else|!)(\s+-\S+|\s+\w+=\S*)*(\s+\d+\S*)?\s+)*)"
-        R"((\w+=\S*\s+)*["'\\]?(/\S*/)?(sudo|doas|pkexec|su|visudo|passwd|chpasswd|usermod|faillock|pam_tally2|run0)["']?)"
-        R"(([\s;&|)]|$))",
+        std::string(R"((?:^|[;&|(`{\n]|\$\()\s*(?:(?:)") + kLaunch + R"()(?:\s+-\S+|\s+\w+=\S*)*(?:\s+\d+\S*)?\s+)*)"
+        R"((?:\w+=\S*\s+)*["'\\]?(?:/\S*/)?()" + kNames + R"()["']?)"
+        R"((?:[\s;&|)<>$,}]|$))",
         std::regex::icase);
-    std::smatch m;
-    if (std::regex_search(cmd, m, re)) return "refused: privilege escalation and credential commands are blocked ('" + m[8].str() + "'). Shell is allowed, sudo is not. If a step truly needs root, stop and report it to the user.";
+    // the first word of every command position, to catch a glob that expands to a blocked name (/usr/bin/sud?)
+    static const std::regex head(
+        std::string(R"((?:^|[;&|(`{\n]|\$\()\s*(?:(?:)") + kLaunch + R"()(?:\s+-\S+|\s+\w+=\S*)*(?:\s+\d+\S*)?\s+)*)"
+        R"((?:\w+=\S*\s+)*(\S+))",
+        std::regex::icase);
+    const std::vector<std::string> forms = command_forms(cmd);
+    for (const std::string & f : forms) {
+        std::smatch m;
+        if (std::regex_search(f, m, re))
+            return "refused: privilege escalation and credential commands are blocked ('" + m[1].str() + "'). Shell is allowed, sudo is not. If a step truly needs root, stop and report it to the user.";
+        for (auto it = std::sregex_iterator(f.begin(), f.end(), head), end = std::sregex_iterator(); it != end; ++it) {
+            std::string w = (*it)[1].str();
+            if (size_t sl = w.rfind('/'); sl != std::string::npos) w = w.substr(sl + 1);
+            if (w.find_first_of("?*[") == std::string::npos || w.find_first_not_of("*?[]") == std::string::npos) continue;
+            for (const auto & nm : kNameList)
+                if (fnmatch(w.c_str(), nm.c_str(), FNM_CASEFOLD) == 0)
+                    return "refused: privilege escalation and credential commands are blocked (a pattern that expands to '" + nm + "'). Shell is allowed, sudo is not. If a step truly needs root, stop and report it to the user.";
+        }
+    }
     // The auth databases: the secret ones may not be named at all; the readable ones may not be written by any
     // common verb. A string check is a courtesy, not the floor: inside bwrap no_new_privs stops setuid tools.
-    for (const char * p : {"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/var/run/faillock", "/run/faillock",
-                           "/etc/security/opasswd"})
-        if (cmd.find(p) != std::string::npos) return std::string("refused: the auth database (") + p + ") is off limits.";
-    static const std::regex writes(R"((>>?\s*/etc/(passwd|group)\b|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bdd\b|\bsed\s+-i|\btruncate\b|\bln\b|\bch(mod|own)\b|\brm\b))");
-    for (const char * p : {"/etc/passwd", "/etc/group"})
-        if (cmd.find(p) != std::string::npos && std::regex_search(cmd, writes))
-            return std::string("refused: writing to the auth database (") + p + ") is blocked.";
+    for (const std::string & f : forms) {
+        for (const char * p : {"/etc/shadow", "/etc/gshadow", "/etc/shad", "/etc/gshad", "/etc/sudoers", "/etc/sudoer", "/etc/sudo.conf",
+                               "/etc/doas.conf", "/var/run/faillock", "/run/faillock", "/etc/security/opasswd"})
+            if (f.find(p) != std::string::npos) return std::string("refused: the auth database (") + p + ") is off limits.";
+        static const std::regex writes(R"((>>?\|?\s*/etc/(passwd|group)\b|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bdd\b|\bsed\b[^|;&\n]*(\s-[A-Za-z]*i|--in-place)|\bperl\b[^|;&\n]*\s-[A-Za-z]*i|\bsponge\b|\brsync\b|\btruncate\b|\bln\b|\bch(mod|own|attr)\b|\brm\b|\bvipw\b|\bvigr\b))");
+        for (const char * p : {"/etc/passwd", "/etc/group"})
+            if (f.find(p) != std::string::npos && std::regex_search(f, writes))
+                return std::string("refused: writing to the auth database (") + p + ") is blocked.";
+    }
     return "";
 }
 
@@ -572,7 +682,10 @@ std::string blocked_command(const std::string & cmd) {
 // Sandbox "bwrap" with no bwrap installed returns an empty argv: the caller refuses instead of running unconfined.
 std::vector<std::string> shell_argv(const ToolContext & ctx, const std::string & cmd, const std::string & cwd) {
     const auto & perm = cfg_of(ctx).permissions;
-    if (perm.sandbox != "bwrap") {
+    // Write mode: the user's text is theirs, so the shell sees every file read-only (scratch space is the private /tmp).
+    const bool write_mode = ctx.mode == "write";
+    if (write_mode && find_bwrap().empty()) return {};
+    if (perm.sandbox != "bwrap" && !ctx.no_network && !write_mode) {
         // No sandbox: still set no_new_privs when setpriv exists, so sudo and other setuid tools cannot elevate.
         if (::access("/usr/bin/setpriv", X_OK) == 0) return {"/usr/bin/setpriv", "--no-new-privs", "/bin/bash", "-lc", cmd};
         return {"/bin/bash", "-lc", cmd};
@@ -581,7 +694,7 @@ std::vector<std::string> shell_argv(const ToolContext & ctx, const std::string &
     if (bw.empty()) return {};
     std::vector<std::string> v = {bw, "--die-with-parent", "--unshare-pid", "--unshare-uts",
                                   "--unshare-ipc", "--unshare-cgroup-try"};
-    if (!perm.sandbox_net) v.push_back("--unshare-net");
+    if (!perm.sandbox_net || ctx.no_network) v.push_back("--unshare-net");
     // root read-only, then standard virtual filesystems
     v.insert(v.end(), {"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"});
     // writable: the configured allow paths and the working directory
@@ -590,20 +703,30 @@ std::vector<std::string> shell_argv(const ToolContext & ctx, const std::string &
         std::error_code ec;
         if (!p.empty() && p != "/" && fs::exists(p, ec)) v.insert(v.end(), {"--bind", p, p});
     };
-    for (const auto & p : perm.allow_paths) add_rw(p);
+    if (!write_mode) for (const auto & p : perm.allow_paths) add_rw(p);
     // the working directory is writable only when the write policy allows it (a model-chosen cwd like /etc
     // must not become a read-write bind)
     std::string cwd_resolved;
-    if (!cwd.empty() && check_write_path(ctx, cwd, cwd_resolved).empty()) add_rw(cwd);
+    if (!write_mode && !cwd.empty() && check_write_path(ctx, cwd, cwd_resolved).empty()) add_rw(cwd);
     // hide secrets from the sandboxed shell (reads and writes both), on top of the rw binds
     // and Judas's own config (API tokens in secrets.env) and data
     std::vector<std::string> hide = {home_dir() + "/.ssh", home_dir() + "/.gnupg", home_dir() + "/.config/judas",
                                      expand(cfg_of(ctx).data_dir)};
     for (const auto & sp : perm.secret_paths)
         if (!sp.empty() && sp.find('*') == std::string::npos) hide.push_back(expand(sp));
+    // deny_paths without wildcards are hidden too (the file tools refuse them; the shell must not read around that)
+    for (const auto & dp : perm.deny_paths) {
+        if (dp.empty()) continue;
+        if (dp.find_first_of("*?[") == std::string::npos) hide.push_back(expand(dp));
+        else for (auto & m : expand_globs(expand(dp))) hide.push_back(m);   // what matches now; bwrap cannot mask a pattern
+    }
+    for (const auto & sp : perm.secret_paths)
+        if (!sp.empty() && sp.find_first_of("*?[") != std::string::npos)
+            for (auto & m : expand_globs(expand(sp))) hide.push_back(m);
     for (const std::string & d : hide) {
         std::error_code ec;
         if (fs::is_directory(d, ec)) v.insert(v.end(), {"--tmpfs", d});
+        else if (fs::is_regular_file(d, ec)) v.insert(v.end(), {"--ro-bind", "/dev/null", d});   // a secret file reads as empty
     }
     if (!cwd.empty()) v.insert(v.end(), {"--chdir", cwd});
     v.insert(v.end(), {"/bin/bash", "-lc", cmd});
@@ -625,6 +748,9 @@ ToolResult t_shell(const json & a, ToolContext & ctx) {
     if (a.contains("cwd") && a["cwd"].is_string()) cwd = resolve_path(ctx, a["cwd"].get<std::string>()).string();
     if (ctx.journal) ctx.journal->note_irreversible(ctx.checkpoint, "shell: " + cmd);
     auto argv = shell_argv(ctx, cmd, cwd);
+    if (argv.empty() && ctx.no_network)
+        return fail("refused: health data is in this chat, so shell runs only with the network cut off, and that needs "
+                    "bubblewrap (bwrap), which is not installed.");
     if (argv.empty())
         return fail("refused: permissions.sandbox is \"bwrap\" but bwrap is not installed. Install bubblewrap, or set "
                     "permissions.sandbox = \"none\" to run shell commands unconfined.");
@@ -652,14 +778,26 @@ std::string url_encode(const std::string & s) {
     return o;
 }
 
+// SearXNG category for the tool's `category` argument; "" when the value is not one we map.
+std::string searxng_category(const std::string & c) {
+    if (c.empty() || c == "general") return "general";
+    if (c == "images") return "images";
+    if (c == "news") return "news";
+    return "";
+}
+
 ToolResult t_web_search(const json & a, ToolContext & ctx) {
     std::string q = a.at("query").get<std::string>();
     int maxr = std::max(1, a.value("max_results", 8));
+    std::string cat_in = a.contains("category") && a["category"].is_string() ? a["category"].get<std::string>() : std::string();
+    std::string cat = searxng_category(cat_in);
+    if (cat.empty()) return fail("web_search: category must be general, images or news (got '" + cat_in + "')");
+    bool images = cat == "images";
     std::string base = cfg_of(ctx).search.searxng;
     httplib::Client cli(base);
     cli.set_connection_timeout(5);
     cli.set_read_timeout(20);
-    auto res = cli.Get("/search?q=" + url_encode(q) + "&format=json");
+    auto res = cli.Get("/search?q=" + url_encode(q) + "&format=json&categories=" + cat);
     if (!res) return fail("web_search: SearXNG at " + base + " is not reachable (is the searxng service running?)");
     if (res->status != 200) return fail("web_search: SearXNG returned HTTP " + std::to_string(res->status) + " (format=json may be disabled)");
     json j = json::parse(res->body, nullptr, false);
@@ -667,12 +805,23 @@ ToolResult t_web_search(const json & a, ToolContext & ctx) {
     std::ostringstream o;
     int n = 0;
     for (auto & r : j["results"]) {
+        auto str_of = [&](const char * k) { return r.contains(k) && r[k].is_string() ? r[k].get<std::string>() : std::string(); };
+        auto is_http = [](const std::string & u) { return u.rfind("https://", 0) == 0 || u.rfind("http://", 0) == 0; };
+        // an image result without a usable image URL is of no use
+        if (images && !is_http(str_of("img_src"))) continue;
         if (n++ >= maxr) break;
-        o << n << ". " << r.value("title", std::string()) << "\n   " << r.value("url", std::string()) << "\n";
-        std::string c = r.value("content", std::string());
+        o << n << ". " << r.value("title", std::string()) << "\n   " << (images ? "page: " : "") << str_of("url") << "\n";
+        std::string c = str_of("content");
         if (!c.empty()) o << "   " << c.substr(0, 400) << "\n";
+        // thumbnails: SearXNG calls them img_src (image and shopping results) or thumbnail; pass http(s) ones on
+        // so the model can put them in a cards block or hand them to show_image
+        for (const char * k : {"img_src", "thumbnail_src", "thumbnail"}) {
+            std::string im = str_of(k);
+            if (is_http(im)) { o << "   " << (images ? "img_src: " : "image: ") << im << "\n"; break; }
+        }
     }
     if (n == 0) return okr("no results for: " + q);
+    if (images) o << "To show one to the user: show_image {source: <img_src>, caption}, then paste the markdown it returns.\n";
     return okr(o.str());
 }
 
@@ -782,14 +931,7 @@ std::string check_write_path(const ToolContext & ctx, const std::string & path, 
     if (learn_is_context_file(cfg_of(ctx), resolved)) return "path is a read-only Learn context file ([learn] context_files)";
     const auto & perm = cfg_of(ctx).permissions;
     // deny globs: the path or any parent directory matching refuses
-    for (auto & dp : perm.deny_paths) {
-        std::string pat = expand(dp);
-        fs::path cur;
-        for (auto & part : p) {
-            cur /= part;
-            if (fnmatch(pat.c_str(), cur.string().c_str(), 0) == 0) return "path matches deny_paths entry '" + dp + "'";
-        }
-    }
+    if (std::string r = deny_glob(p, perm); !r.empty()) return r;
     bool allowed = false;
     for (auto & ap : perm.allow_paths) {
         std::error_code ec;
@@ -799,6 +941,29 @@ std::string check_write_path(const ToolContext & ctx, const std::string & path, 
     }
     if (!allowed) return "path " + resolved + " is outside the allowed paths (permissions.allow_paths)";
     return "";
+}
+
+std::string check_allowed_read_path(const ToolContext & ctx, const std::string & path, std::string & resolved) {
+    if (std::string d = check_read_path(ctx, path, resolved); !d.empty()) return d;
+    const auto & perm = cfg_of(ctx).permissions;
+    fs::path p = resolved;
+    for (auto & dp : perm.deny_paths) {
+        std::string pat = expand(dp);
+        fs::path cur;
+        for (auto & part : p) {
+            cur /= part;
+            if (fnmatch(pat.c_str(), cur.string().c_str(), 0) == 0) return "path matches deny_paths entry '" + dp + "'";
+        }
+    }
+    std::vector<std::string> roots = perm.allow_paths;
+    if (!ctx.cwd.empty()) roots.push_back(ctx.cwd);
+    for (auto & ap : roots) {
+        std::error_code ec;
+        fs::path a = fs::weakly_canonical(expand(ap), ec);
+        if (ec) a = expand(ap);
+        if (under(p, a)) return "";
+    }
+    return "path " + resolved + " is outside the allowed paths (permissions.allow_paths)";
 }
 
 void register_builtin_tools(ToolRegistry & reg) {
@@ -837,8 +1002,10 @@ void register_builtin_tools(ToolRegistry & reg) {
     add("shell", "Run a bash command in the working directory and return combined output and the exit code. Cannot be undone by snapshots.",
         obj({{"command", str("Command line")}, {"timeout_s", num("Timeout in seconds")}, {"cwd", str("Directory to run in")}}, {"command"}),
         false, true, t_shell);
-    add("web_search", "Search the web through the local SearXNG. Returns title, url and snippet for each result.",
-        obj({{"query", str("Search query")}, {"max_results", num("Max results, default 8")}}, {"query"}), false, false, t_web_search);
+    add("web_search", "Search the web through the local SearXNG. Returns title, url, snippet and (when the result has one) an image URL for each result. "
+        "category=images returns photos (title, page url, img_src); the usual flow to show a picture is web_search(category=images) then show_image(img_src).",
+        obj({{"query", str("Search query")}, {"max_results", num("Max results, default 8")},
+             {"category", str("general (default), images or news")}}, {"query"}), false, false, t_web_search);
     add("web_fetch", "Fetch a web page and return its text.",
         obj({{"url", str("http or https URL")}, {"max_chars", num("Max characters returned, default 20000")}}, {"url"}), false, false, t_web_fetch);
     add("snapshot_list", "List recent checkpoints (one per tool step) of this session with id, label, file count and reverted state.",

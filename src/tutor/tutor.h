@@ -1,5 +1,5 @@
 // Learn mode: a tutoring session grounded in the learner's own files. Pure helpers (file lists, digest, search,
-// the progress record) live here so they can be tested; the agent wires the prompt and the two tools.
+// the old progress path) live here so they can be tested; the agent wires the prompt and the Learn tools.
 // context_files are read only: nothing in this module opens one for writing.
 #pragma once
 
@@ -26,10 +26,14 @@ std::vector<std::string> learn_context_search(const Config & cfg, const std::str
 // One context file by base name or full path (only listed files), capped at max_bytes. "" + *err on failure.
 std::string learn_context_read(const Config & cfg, const std::string & which, size_t max_bytes, std::string * err);
 
-// The per-learner progress record, <data_dir>/learn/progress.json. Topics keyed by name.
-// Applies one learn_progress call to `doc`; returns the reply text, *ok false on bad input.
-std::string learn_progress_apply(json & doc, const json & args, bool * ok, const std::string & today);
+// Old per-learner record, <data_dir>/learn/progress.json. Retired record: the learn_progress tool is gone, learn/progress.json is only read, once, into the topics store.
 std::string learn_progress_path(const Config & cfg);
+
+// Validates one learn_ask call. Returns "" when fine, else a message the model can act on. *norm (if given) gets the
+// cleaned arguments: kind, prompt, options (strings, at most 8), want_confidence, want_thinking.
+std::string learn_ask_check(const json & args, json * norm = nullptr);
+// True for a tool whose successful call ends the lead's turn (the learner must answer first).
+bool learn_ends_turn(const std::string & tool);
 
 // System prompt text for Learn sessions (the digest is appended by the caller).
 const char * learn_prompt();

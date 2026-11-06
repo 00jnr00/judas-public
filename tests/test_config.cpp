@@ -96,7 +96,8 @@ static bool same(const Config & a, const Config & b) {
            a.agents.max_steps == b.agents.max_steps && a.agents.role_dirs == b.agents.role_dirs &&
            a.agents.read_streak_nudge == b.agents.read_streak_nudge && a.agents.read_streak_force == b.agents.read_streak_force &&
            a.agents.auto_resume == b.agents.auto_resume && a.agents.auto_resume_max == b.agents.auto_resume_max &&
-           a.agents.auto_resume_delay_s == b.agents.auto_resume_delay_s && a.memory.path == b.memory.path &&
+           a.agents.auto_resume_delay_s == b.agents.auto_resume_delay_s && a.agents.turn_wall_s == b.agents.turn_wall_s &&
+           a.agents.url_retry_cap == b.agents.url_retry_cap && a.agents.empty_turn_limit == b.agents.empty_turn_limit && a.memory.path == b.memory.path &&
            a.memory.inject_sections == b.memory.inject_sections &&
            a.data_dir == b.data_dir && a.permissions.sandbox == b.permissions.sandbox &&
            a.permissions.sandbox_net == b.permissions.sandbox_net &&
@@ -132,6 +133,8 @@ static void test_defaults() {
     CHECK(c.context.window == "auto" && c.context.pin_tokens == 1200 && c.context.pin_total == 3000);
     CHECK(c.agents.read_streak_nudge == 8 && c.agents.read_streak_force == 14);
     CHECK(!c.agents.auto_resume && c.agents.auto_resume_max == 20 && c.agents.auto_resume_delay_s == 30);
+    CHECK(c.agents.turn_wall_s == 0);
+    CHECK(c.agents.url_retry_cap == 2 && c.agents.empty_turn_limit == 2);
     CHECK(c.prompt.max_memory_tokens == 3000);
     CHECK(c.memory.path == "~/.local/share/judas/memory.md");
     CHECK((c.memory.inject_sections == std::vector<std::string>{"About me", "Rules"}));
@@ -161,7 +164,7 @@ static void test_phase3() {
           "[git]\ncommit_per_edit = true\nbranch_prefix = \"j/\"\n"
           "[skills]\nenabled = false\npaths = [\"/a\", \"/b\"]\nautoload = \"on\"\n"
           "[prompt]\nmax_memory_tokens = 500\ntool_schema = \"lazy\"\n"
-          "[agents]\nread_streak_nudge = 5\nread_streak_force = 9\nauto_resume = true\nauto_resume_max = 5\nauto_resume_delay_s = 7\n"
+          "[agents]\nread_streak_nudge = 5\nread_streak_force = 9\nauto_resume = true\nauto_resume_max = 5\nauto_resume_delay_s = 7\nturn_wall_s = 90\nurl_retry_cap = 4\nempty_turn_limit = 3\n"
           "[memory]\npath = \"/m/x.md\"\ninject_sections = [\"Rules\", \"Projects\"]\n"
           "[hooks]\nenabled = true\n"
           "[[hooks.hooks]]\nevent = \"pre-edit\"\ncommand = \"echo hi\"\ntimeout_s = 5\nblocking = true\nmatch = \"src/\"\n"
@@ -173,6 +176,8 @@ static void test_phase3() {
     CHECK(c.prompt.max_memory_tokens == 500 && c.prompt.tool_schema == "lazy");
     CHECK(c.agents.read_streak_nudge == 5 && c.agents.read_streak_force == 9);
     CHECK(c.agents.auto_resume && c.agents.auto_resume_max == 5 && c.agents.auto_resume_delay_s == 7);
+    CHECK(c.agents.turn_wall_s == 90);
+    CHECK(c.agents.url_retry_cap == 4 && c.agents.empty_turn_limit == 3);
     CHECK(c.memory.path == "/m/x.md" && c.memory.inject_sections.size() == 2 && c.memory.inject_sections[1] == "Projects");
     CHECK(c.hooks.enabled);
     REQUIRE(c.hooks.hooks.size() == 2);
@@ -589,9 +594,11 @@ static void test_swarm() {
     CHECK(load_config(root / "none").swarm.unit == "my-swarm@1.service");
     write(f, "[swarm]\nunit = \"bad;unit\"\n");
     CHECK(!load_error(root / "none").empty());
-    write(f, "[learn]\nvisual_url = \"http://localhost:8024\"\nvisual_unit = \"learnharness\"\n");
+    write(f, "[learn]\nvisual_url = \"http://localhost:8024\"\nvisual_unit = \"learnharness\"\nshow_visual = true\n");
     {
         Config lc = load_config(root / "none");
+        CHECK(lc.learn.show_visual && !Config().learn.show_visual);
+        CHECK(dump_config(lc).find("show_visual = true") != std::string::npos);
         CHECK(lc.learn.visual_url == "http://localhost:8024" && lc.learn.visual_unit == "learnharness" &&
               lc.learn.visual_label == "Visual tutor");
         write(root / "lv-dump.toml", dump_config(lc));

@@ -17,9 +17,41 @@ struct SessionRow {
     std::string title;
     std::string cwd;
     std::string model;
-    std::string mode = "chat"; // chat | cowork | code | learn | swarm (the UI surface the session belongs to; unknown values are shown everywhere)
+    std::string mode = "chat"; // chat | cowork | code | learn | swarm | engineering | design | research | write (the UI surface the session belongs to; unknown values are shown everywhere)
+    bool health_tainted = false;  // the session has read health data (Judas Health Link); see docs/API.md
+    bool location_used = false;  // the session called location_get: memory and skill writes and background review are off for it
+    std::string project_id;    // "" = not in a project (a plain folder); see ProjectRow
     int auto_resume = -1;      // -1 follows agents.auto_resume, 0 off, 1 on (per-session override)
     long long created_ms = 0, updated_ms = 0;
+};
+
+// A project: a name, a folder and optional instructions that go into the system prompt of every session in it.
+struct ProjectRow {
+    std::string id;            // "p-20261105-142233-ab12"
+    std::string name;
+    std::string folder;        // absolute path
+    std::string instructions;  // "" = none
+    std::string kind = "existing";  // existing (a folder the user picked) | made (a folder Judas created under projects.root)
+    long long created_ms = 0, updated_ms = 0;
+};
+
+// Per-session state of the Cowork work modes (docs/COWORK-MODES.md).
+struct CalcRow {
+    long long n = 0;           // 1-based row number in the session
+    std::string name, expr, value, unit, note;
+    long long created_ms = 0;
+};
+struct SourceRow {
+    long long n = 0;           // 1-based, stable per session
+    std::string url, title, quote, note;
+    bool autoadded = false;    // recorded from a web_fetch, not by source_add
+    long long created_ms = 0;
+};
+struct SuggestionRow {
+    std::string id;            // "g1", "g2", ... per session
+    std::string path, kind, find, replace, why;   // kind: spelling | note
+    std::string status = "open";                  // open | accepted | rejected | stale
+    long long created_ms = 0;
 };
 
 struct AgentRow {
@@ -64,11 +96,41 @@ public:
     std::optional<SessionRow> get_session(const std::string & id) const;
     // Newest updated first. before_ms > 0 returns only sessions updated strictly before it (the cursor for
     // the next page).
-    std::vector<SessionRow> list_sessions(size_t limit = 50, long long before_ms = 0) const;
+    // project_id non-empty returns only that project's sessions.
+    std::vector<SessionRow> list_sessions(size_t limit = 50, long long before_ms = 0, const std::string & project_id = "") const;
     void rename_session(const std::string & id, const std::string & title);
     bool set_session_mode(const std::string & id, const std::string & mode);  // false if no such session
     bool set_session_auto_resume(const std::string & id, int v);      // -1 inherit | 0 | 1; false if no such session
+    // Attach a session to a project ("" detaches). Does not touch cwd; the caller sets it (set_session_cwd).
+    bool set_session_project(const std::string & id, const std::string & project_id);
+    bool set_session_cwd(const std::string & id, const std::string & cwd);
     void delete_session(const std::string & id);                      // cascades agents + messages
+    // Health taint (Judas Health Link): a session that has read health data. Persisted; once set it stays set.
+    bool set_session_health_tainted(const std::string & id);          // false if no such session
+    bool session_health_tainted(const std::string & id) const;
+    // Location note: a session that called location_get. Persisted (the flag, never the position).
+    bool set_session_location_used(const std::string & id);
+    bool session_location_used(const std::string & id) const;
+
+    // Projects. Deleting a project row detaches its sessions (project_id = ""); it never removes sessions or folders.
+    ProjectRow create_project(const std::string & name, const std::string & folder, const std::string & instructions,
+                              const std::string & kind);
+    std::optional<ProjectRow> get_project(const std::string & id) const;
+    std::vector<ProjectRow> list_projects() const;                  // newest updated first
+    bool update_project(const ProjectRow & p);                      // name, folder, instructions; false if no such project
+    bool delete_project(const std::string & id);
+
+    // Cowork work-mode state, per session.
+    long long add_calc(const std::string & session, const CalcRow & c);   // returns the row number
+    std::vector<CalcRow> list_calcs(const std::string & session) const;
+    // Dedupes by url within the session: an existing row keeps its number (an agent-written call fills empty fields
+    // and clears `autoadded`). Returns the number; *added tells whether a row was created.
+    long long add_source(const std::string & session, const SourceRow & s, bool * added = nullptr);
+    std::vector<SourceRow> list_sources(const std::string & session) const;
+    std::string add_suggestion(const std::string & session, const SuggestionRow & g);   // returns the id
+    std::vector<SuggestionRow> list_suggestions(const std::string & session) const;
+    std::optional<SuggestionRow> get_suggestion(const std::string & session, const std::string & id) const;
+    bool set_suggestion_status(const std::string & session, const std::string & id, const std::string & status);
 
     AgentRow create_agent(const std::string & session, const std::string & parent, const std::string & role,
                           const std::string & task);
@@ -93,8 +155,10 @@ public:
     // Cross-session search for the session_search tool: matching messages newest first, each with its
     // session title and a snippet (about 32 tokens, matches wrapped in [ ]). session_id "" means all
     // sessions. Query terms are quoted so FTS syntax in user text cannot throw.
+    // skip_system drops the injected system prompts (they match generic words in every session).
     std::vector<SearchHit> search_messages(const std::string & query, int limit = 10,
-                                           const std::string & session_id = "") const;
+                                           const std::string & session_id = "", bool skip_system = false,
+                                           bool exclude_health_tainted = false) const;
 
     // Scheduled tasks: a saved prompt that runs once at a time, on an interval, or on demand.
     struct TaskRow {

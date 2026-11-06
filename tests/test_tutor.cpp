@@ -89,23 +89,8 @@ int main() {
     CHECK(reg.call("learner_context", {{"query", "chaining"}}, ctx).output.find("hash-tables.md:") != std::string::npos);
     CHECK(!reg.call("learner_context", {{"file", "status.json"}}, ctx).ok);
 
-    // progress record
-    auto pr = [&](json a) { return reg.call("learn_progress", a, ctx); };
-    CHECK(pr({{"action", "show"}}).output.find("no learning topics") != std::string::npos);
-    CHECK(pr({{"action", "set_goal"}, {"topic", "hashing"}, {"goal", "see why chaining and probing both work"}}).ok);
-    CHECK(pr({{"action", "probe"}, {"topic", "hashing"}, {"held", {"arrays"}}, {"gaps", {"modulo", "load factor"}}}).ok);
-    CHECK(pr({{"action", "plan"}, {"topic", "hashing"}, {"steps", {"hash function", "collisions", "load factor"}}}).ok);
-    CHECK(!pr({{"action", "step_done"}, {"topic", "hashing"}, {"index", 9}}).ok);
-    CHECK(pr({{"action", "step_done"}, {"topic", "hashing"}, {"index", 1}, {"note", "got it"}}).ok);
-    CHECK(pr({{"action", "practice"}, {"topic", "hashing"}, {"problem", "insert 5 keys"}, {"result", "correct"}}).ok);
-    CHECK(!pr({{"action", "practice"}, {"topic", "hashing"}, {"problem", "p"}}).ok);
-    CHECK(!pr({{"action", "bogus"}, {"topic", "t"}}).ok);
-    CHECK(!pr({{"action", "show"}, {"topic", "nope"}}).ok);
-    auto shown = pr({{"action", "show"}, {"topic", "hashing"}});
-    CHECK(shown.output.find("[x] hash function (got it)") != std::string::npos);
-    CHECK(shown.output.find("insert 5 keys -> correct") != std::string::npos);
-    CHECK(shown.output.find("Gaps: [modulo]") != std::string::npos);
-    CHECK(fs::exists(learn_progress_path(cfg)));
+    // learn_progress is gone from the toolset
+    CHECK(!reg.call("learn_progress", {{"action", "show"}}, ctx).ok);
     CHECK(fs::path(learn_progress_path(cfg)).string().rfind(cfg.data_dir, 0) == 0);
 
     // tool gating for Learn sessions: no writes, shell or MCP

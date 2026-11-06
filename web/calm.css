@@ -1,0 +1,239 @@
+/* Judas desktop, calm layer: the phone UI's look (web/m/m.css) on every desktop screen.
+   Loaded last; colors still come only from /skin.css, so every skin keeps working.
+   Hairlines instead of boxes, soft fills for the few things that need a surface, rounded fields and pills.
+   Layout rules that would fight the narrow-screen bottom bar sit under min-width:761px. */
+:root{--hair:var(--border);--r-card:16px;--r-field:12px}
+@supports (color:color-mix(in srgb,red,blue)){:root{--hair:color-mix(in srgb,var(--border) 55%,transparent)}}
+body{font-size:15px;line-height:1.55;background:var(--bg)}
+*{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+
+/* ---------- primitives ---------- */
+h2{font-size:1.375rem;font-weight:600;letter-spacing:0}
+h3{font-size:1rem;font-weight:600}
+.desc{font-size:.9375rem}
+.btn{border:0;border-radius:var(--r-field);background:var(--surface2);min-height:38px;padding:.45em 1.05em;font-weight:500;transition:background .12s,color .12s}
+.btn:hover{border-color:transparent;background:color-mix(in srgb,var(--surface2) 80%,var(--title))}
+.btn.small{min-height:30px;border-radius:99px;padding:.2em .85em}
+.btn.ghost{background:none;color:var(--dim)}
+.btn.ghost:hover{background:var(--surface2);color:var(--text)}
+.btn.primary{background:var(--title);color:var(--bg);font-weight:600}
+.btn.primary:hover{background:var(--title);filter:brightness(1.08)}
+.btn.danger{background:var(--surface2);color:var(--error)}
+.btn.danger:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface2))}
+input,textarea,select{background:var(--surface);border:1px solid var(--hair);border-radius:var(--r-field)}
+input:focus,textarea:focus,select:focus{outline:0;border-color:var(--dim)}
+button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tag,.badge{border:0;border-radius:99px;background:var(--surface2);padding:.05em .7em;line-height:1.6}
+.badge.ok,.badge.done{color:var(--ok)}
+.badge.failed,.badge.killed,.tag.failed{color:var(--error)}
+.badge.paused,.tag.paused{color:var(--warn)}
+.chip{border:0;border-radius:99px;background:var(--surface2);padding:.2em .9em}
+.chip:hover{background:color-mix(in srgb,var(--surface2) 80%,var(--title))}
+.note{border:0;border-radius:var(--r-card);background:var(--surface);color:var(--dim);padding:12px 16px}
+.switch .trk{border:0;width:42px;height:24px;border-radius:99px}
+.switch .trk::after{top:3px;left:3px;width:18px;height:18px}
+.switch[aria-checked="true"] .trk{background:var(--accent)}
+.switch[aria-checked="true"] .trk::after{left:21px;background:var(--bg)}
+.coin{border:1.5px solid var(--accent);box-shadow:none;color:var(--accent)}
+.coin.big{width:52px;height:52px;font-size:1.125rem}
+
+/* cards on every page: one soft surface, no outline */
+.card,.task,.gcard,.hb-fact,.agent,.form-card,.model-item,.skin,.snaprow{border:0;border-radius:var(--r-card);background:var(--surface)}
+.model-item,.skin{box-shadow:inset 0 0 0 1px var(--hair)}
+.model-item:hover,.skin:hover{box-shadow:inset 0 0 0 1px var(--dim)}
+.model-item.active,.skin.active{box-shadow:inset 0 0 0 2px var(--accent)}
+.agent.lead{box-shadow:inset 0 0 0 1px var(--accent)}
+.agent .kids{border-left:1px solid var(--hair)}
+.snaprow:hover{background:var(--surface2)}
+.mem-row,.fop{border-bottom-color:var(--hair)}
+
+/* ---------- header: one quiet line ---------- */
+.top{background:var(--bg);border-bottom:1px solid var(--hair);min-height:48px;padding:4px 16px}
+.brand-name{font-size:.875rem;letter-spacing:.28em}
+.brand-sub{display:none}
+.hdr-state{gap:14px;color:var(--dim)}
+.hdr-model{color:var(--text)}
+.mini{width:56px;height:3px;border:0;border-radius:99px;background:var(--surface2)}
+.mini-fill{background:var(--dim)}
+#hdr-guide{display:none}
+.banner{background:color-mix(in srgb,var(--error) 22%,var(--bg));color:var(--title);font-weight:500;border-bottom:1px solid var(--hair)}
+
+/* ---------- rail: icons and labels, no captions ---------- */
+.rail{background:var(--bg);border-right:1px solid var(--hair)}
+.rail button svg{flex:none;width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.rail button.active svg{stroke-width:1.9}
+.rail .rl small{display:none}
+.rail .rl b{font-weight:500}
+.rail button.active .rl b{font-weight:600}
+.rail-cap{text-transform:none;letter-spacing:.02em;font-size:.75rem}
+.rail-tools{border-top:0}
+@media (min-width:761px){
+  :root{--rail-w:196px}
+  .rail{padding:8px 8px}
+  .rail button{border-left:0;border-radius:12px;padding:0 12px;min-height:40px;gap:12px;font-size:.9375rem}
+  .rail-modes button{padding:0 12px;min-height:42px}
+  .rail button:hover{background:var(--surface2)}
+  .rail button.active{background:var(--surface2);color:var(--title)}
+  .rail-cap{padding:14px 12px 4px}
+  .rail-tools{margin-top:6px}
+}
+
+/* ---------- sessions: the phone drawer, always open ---------- */
+.sess{background:var(--bg);border-right:1px solid var(--hair)}
+.sess-head{border-bottom:0;padding:12px 10px 6px}
+.sess-head #new-session{border-radius:99px}
+.sess-list{padding:0 8px 8px}
+.sess-row{border-bottom:0;border-radius:12px}
+.sess-item{border:0;border-radius:12px;padding:8px 12px}
+.sess-item:hover,.sess-row:hover{background:var(--surface2)}
+.sess-item.active{background:var(--surface2);box-shadow:none}
+.sess-item .t{color:var(--text)}
+.sess-item.active .t{color:var(--title)}
+.sess-item .s{font-size:.75rem}
+.sess-more{border-top:0;border-radius:12px}
+.sess-del{border-radius:50%}
+
+/* ---------- work area ---------- */
+.work-head{border-bottom:1px solid var(--hair);padding:8px 24px 6px}
+.wh-top h2{font-size:1rem;font-weight:600;color:var(--title)}
+.mode-tag{display:none}
+#screen-work .work-head .desc{display:none}
+.pill{border:0;background:var(--surface2);color:var(--warn)}
+.turn-banner{border:0;border-radius:var(--r-card);background:color-mix(in srgb,var(--warn) 14%,var(--surface))}
+.turn-banner.failed{background:color-mix(in srgb,var(--error) 14%,var(--surface))}
+.swarm-strip{border:0;border-radius:99px;background:var(--surface2)}
+.cwd-bar label{font-weight:500;color:var(--dim);font-size:.875rem}
+#screen-work[data-mode="code"] .cwd,#screen-work[data-mode="swarm"] .cwd{border-width:1px;border-color:var(--hair)}
+.side{background:var(--bg);border-left:1px solid var(--hair)}
+
+/* conversation: centered column, bubbles for you, plain text for Judas */
+.log{gap:18px;padding-top:20px}
+.log .empty{border:0;border-radius:0;padding:24px 0;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;margin-top:auto;margin-bottom:auto}
+.log .empty .empty-title{margin:4px 0 0;font-size:1.5rem;font-weight:600;line-height:1.25;color:var(--title)}
+.log .empty .empty-hint{margin:0;max-width:46ch;color:var(--dim)}
+.log .empty .starter-cap{color:var(--dim);font-size:.8125rem}
+.starter-card{border:0;border-radius:var(--r-card);background:var(--surface)}
+.starter-card:hover,.starter-card:focus-visible{background:var(--surface2)}
+.msg{font-size:1rem;line-height:1.65}
+.log>.msg.user{align-self:flex-end;width:auto;max-width:min(85%,calc(var(--col) * .85));margin-left:auto;margin-right:max(0px,calc((100% - var(--col)) / 2));
+  border:0;border-radius:20px 20px 6px 20px;background:var(--surface2);padding:9px 15px}
+#screen-work:not([data-mode="chat"]) .log>.msg.user{margin-left:auto;margin-right:max(0px,calc(100% - var(--col)))}
+.msg.err{border:0;border-radius:var(--r-card);background:color-mix(in srgb,var(--error) 12%,var(--surface))}
+.msg code{border:0;border-radius:4px}
+.msg pre{border:1px solid var(--hair);border-radius:10px;font-size:.8125rem}
+.code-copy{border:1px solid var(--hair);border-radius:8px;background:var(--surface2)}
+/* tool calls and reasoning: one quiet line each */
+.tool{border-left:0;padding-left:0;font-family:var(--font-mono,ui-monospace,monospace);font-size:.8125rem}
+.tool summary{padding:4px 0}
+.tool .nm{color:var(--text);font-weight:500}
+.tool summary::before{content:"\203A";display:inline-block;width:12px;color:var(--dim);transition:transform .15s}
+.tool[open] summary::before{transform:rotate(90deg)}
+.tool pre{border:0;border-radius:10px;background:var(--surface);color:var(--text)}
+details.think{border-left:0;padding-left:0;opacity:1}
+details.think summary{color:var(--dim);font-style:italic}
+details.think .body{color:var(--thinking,var(--dim))}
+
+/* composer: one rounded field */
+.composer{border-top:0;background:var(--bg);padding:8px 24px 14px}
+@media (min-width:761px){
+  .comp-row{display:grid;grid-template-columns:auto 1fr auto;grid-template-areas:"in in in" "tools . btns";align-items:center;gap:2px 6px;
+    max-width:calc(var(--col) + 2ch);margin:0 auto;background:var(--surface);border:1px solid var(--hair);border-radius:24px;padding:4px 8px 6px 16px}
+  #screen-work:not([data-mode="chat"]) .comp-row{margin-left:0}
+  .comp-row:focus-within{border-color:var(--dim)}
+  .comp-row textarea{grid-area:in;border:0;background:none;resize:none;outline:0;padding:10px 4px 2px 0;min-height:44px;max-height:40vh;border-radius:0}
+  .comp-tools{grid-area:tools;display:flex;flex-direction:row;gap:2px;margin-left:-10px}
+  .comp-btns{grid-area:btns;display:flex;flex-direction:row;gap:6px;min-width:0}
+  .comp-btns .btn{min-height:36px;border-radius:99px;padding:0 16px}
+  .att-chips,.att-hint,.queue-box,.approval-box{max-width:calc(var(--col) + 2ch);margin-left:auto;margin-right:auto}
+  #screen-work:not([data-mode="chat"]) :is(.att-chips,.att-hint,.queue-box,.approval-box){margin-left:0}
+}
+.comp-tools .btn.icon{background:none;border-radius:50%;color:var(--dim)}
+.comp-tools .btn.icon:hover{background:var(--surface2);color:var(--text)}
+.pop-menu{border:1px solid var(--hair);border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.35)}
+.cchip{border:0;border-radius:99px;background:var(--surface2)}
+
+/* ---------- pages (tools screens) ---------- */
+.page{padding:28px 32px 48px;max-width:960px}
+.page-head{margin-bottom:18px}
+.page-head-bar{border-bottom:1px solid var(--hair);padding:20px 32px 10px}
+.page h3{margin-top:28px;color:var(--title)}
+.tools-bar{border-bottom:1px solid var(--hair);gap:4px;padding:10px 32px}
+.tools-tab{border:0;border-radius:99px;padding:.3em 1em}
+.tools-tab.active{background:var(--surface2);color:var(--title)}
+.snap-list-pane{border-right:1px solid var(--hair);background:var(--bg)}
+.kv dt{color:var(--dim)}
+
+/* tasks: the phone's task cards */
+.form-card{padding:14px 18px}
+.form-card summary{font-weight:600;font-size:1rem}
+.task-list{display:flex;flex-direction:column;gap:10px}
+.task{padding:14px 18px}
+.task .th b{font-size:1rem;font-weight:600}
+.task .pr{color:var(--text);font-size:.9375rem}
+.task .meta{color:var(--dim)}
+.task .acts .btn{border-radius:99px;min-height:34px}
+
+/* motion */
+@media (prefers-reduced-motion:reduce){.tool summary::before{transition:none}}
+
+/* fixes after the first look */
+.auto-toggle{white-space:nowrap}
+#seal{background:var(--surface2);color:var(--text);font-weight:500}
+.sess-item .tag{background:none;padding:0;margin-right:.6em;color:var(--dim);font-size:.75rem}
+.agent.lead{box-shadow:inset 0 0 0 1px var(--hair)}
+.agent .role{letter-spacing:.04em}
+/* tool and thinking lines sit close together, like the phone */
+.log>.tool,.log>details.think{margin-top:-12px;margin-bottom:-6px}
+/* swarm view tabs: the phone's pill switch */
+.team-views{display:inline-flex;gap:2px;padding:3px;border:0;border-radius:99px;background:var(--surface2)}
+.tm-vtab{border:0!important;border-radius:99px;background:none;color:var(--dim);font-family:inherit;letter-spacing:0;text-transform:none;min-height:30px;padding:0 14px}
+.tm-vtab[aria-selected=true]{background:var(--bg);color:var(--title);box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.tm-vtab:not([aria-selected=true]):hover{background:none;color:var(--text)}
+.tm-map-box{border-color:var(--hair);border-radius:var(--r-card)}
+.bar{border:0;border-radius:99px;background:var(--surface2)}
+details.think summary{list-style:none}
+details.think summary::-webkit-details-marker{display:none}
+details.think summary::before{content:"\203A";display:inline-block;width:12px;font-style:normal;transition:transform .15s}
+details.think[open] summary::before{transform:rotate(90deg)}
+.log .empty,.log .empty.starter{background:none}
+.starter-card{box-shadow:none}
+
+/* queued messages: a dashed card above the composer so they never look sent */
+.queue-box{border:1px dashed var(--border);border-radius:var(--r-card);background:var(--surface);padding:8px 10px 6px 14px}
+.qb-cap{color:var(--warn)}
+.qb-item{display:flex;align-items:center;gap:6px;min-height:36px}
+.qb-text{flex:1;min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#send.is-queue{box-shadow:inset 0 0 0 1.5px var(--warn)}
+
+/* ---------- projects: the picker in the work header and the Projects screen ---------- */
+.cwd-bar select{min-height:34px;padding:0 .8em;color:var(--text)}
+.proj-new-wrap{border-radius:var(--r-card);background:var(--surface);padding:14px 16px;margin-bottom:var(--s2)}
+.proj-form .field{margin-bottom:12px}
+.proj-form .field label{color:var(--dim);font-weight:500;font-size:.875rem}
+.proj-form textarea{width:100%;resize:vertical;padding:.55em .8em}
+.proj-form input[type=text]{width:100%;padding:.4em .8em;min-height:36px}
+.proj-kinds{display:flex;flex-wrap:wrap;gap:6px 18px;margin-bottom:4px}
+.proj-form .field .proj-kind{display:inline-flex;align-items:center;gap:8px;color:var(--text);font-weight:400;font-size:.9375rem;margin:0}
+.proj-hint{margin-top:2px}
+.proj-card{margin-bottom:12px}
+.proj-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.proj-name{margin:0;font-size:1.0625rem;color:var(--title)}
+.proj-path{margin:2px 0 6px;overflow-wrap:anywhere}
+.proj-ins{margin:0 0 8px}
+.proj-sessions{display:flex;flex-direction:column;margin:6px 0 10px}
+.proj-sess{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 10px;border:0;border-radius:10px;background:none;color:var(--text);text-align:left;font:inherit}
+.proj-sess:hover{background:var(--surface2)}
+.proj-sess .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.proj-edit summary{cursor:pointer;color:var(--dim);padding:4px 0}
+.proj-edit[open] summary{margin-bottom:8px}
+.proj-del{margin-top:6px}
+.proj-del-panel{margin-top:8px;padding:12px 14px;border-radius:var(--r-card);background:color-mix(in srgb,var(--error) 10%,var(--surface))}
+.proj-del-panel p{margin:0 0 8px}
+.proj-also{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.proj-tag{max-width:12em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.location-settings .cs-row{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.proj-form .proj-kind input{width:auto;min-height:0;padding:0;margin:0;flex:none}
+.proj-form .proj-kind span{white-space:nowrap}
+.proj-card h3.proj-name{margin:0;line-height:1.5}
+.proj-also input{width:auto;min-height:0;margin:0}

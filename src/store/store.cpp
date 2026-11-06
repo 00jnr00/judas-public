@@ -200,11 +200,14 @@ SessionRow read_session(const Stmt & s) {
     r.id = s.str(0); r.title = s.str(1); r.cwd = s.str(2); r.model = s.str(3);
     r.created_ms = s.num(4); r.updated_ms = s.num(5); r.mode = s.str(6);
     r.auto_resume = (int) s.num(7);
+    r.health_tainted = s.num(8) != 0;
+    r.project_id = s.str(9);
+    r.location_used = s.num(10) != 0;
     if (r.mode.empty()) r.mode = "chat";
     return r;
 }
 
-const char * kSessionCols = "id, title, cwd, model, created_ms, updated_ms, mode, auto_resume";
+const char * kSessionCols = "id, title, cwd, model, created_ms, updated_ms, mode, auto_resume, health_tainted, project_id, location_used";
 
 AgentRow read_agent(const Stmt & s) {
     AgentRow r;
@@ -258,16 +261,40 @@ Store::Store(const std::string & db_path) {
 
 // Columns added after the first release: ALTER TABLE for databases created by an older build.
 void Store::migrate() {
-    bool has_mode = false, has_auto_resume = false;
+    bool has_mode = false, has_auto_resume = false, has_health = false, has_project = false, has_loc = false;
     {
         Stmt s(db_, "PRAGMA table_info(sessions)");
         while (s.step()) {
             if (s.str(1) == "mode") has_mode = true;
             if (s.str(1) == "auto_resume") has_auto_resume = true;
+            if (s.str(1) == "health_tainted") has_health = true;
+            if (s.str(1) == "project_id") has_project = true;
+            if (s.str(1) == "location_used") has_loc = true;
         }
     }
     if (!has_auto_resume) exec(db_, "ALTER TABLE sessions ADD COLUMN auto_resume INTEGER NOT NULL DEFAULT -1");
     if (!has_mode) exec(db_, "ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'");
+    if (!has_health) exec(db_, "ALTER TABLE sessions ADD COLUMN health_tainted INTEGER NOT NULL DEFAULT 0");
+    if (!has_project) exec(db_, "ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''");
+    if (!has_loc) exec(db_, "ALTER TABLE sessions ADD COLUMN location_used INTEGER NOT NULL DEFAULT 0");
+    exec(db_, "CREATE INDEX IF NOT EXISTS sessions_project ON sessions(project_id, updated_ms DESC)");
+    exec(db_, "CREATE TABLE IF NOT EXISTS projects ("
+               "id TEXT PRIMARY KEY, name TEXT NOT NULL, folder TEXT NOT NULL, instructions TEXT NOT NULL DEFAULT '', "
+               "kind TEXT NOT NULL DEFAULT 'existing', created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL)");
+
+    exec(db_, "CREATE TABLE IF NOT EXISTS calcs ("
+               "session TEXT NOT NULL, n INTEGER NOT NULL, name TEXT NOT NULL, expr TEXT NOT NULL, value TEXT NOT NULL, "
+               "unit TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', created_ms INTEGER NOT NULL, "
+               "PRIMARY KEY (session, n))");
+    exec(db_, "CREATE TABLE IF NOT EXISTS sources ("
+               "session TEXT NOT NULL, n INTEGER NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
+               "quote TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', auto INTEGER NOT NULL DEFAULT 0, "
+               "created_ms INTEGER NOT NULL, PRIMARY KEY (session, n))");
+    exec(db_, "CREATE UNIQUE INDEX IF NOT EXISTS sources_url ON sources(session, url)");
+    exec(db_, "CREATE TABLE IF NOT EXISTS suggestions ("
+               "session TEXT NOT NULL, seq INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, "
+               "find TEXT NOT NULL, replace TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '', "
+               "status TEXT NOT NULL DEFAULT 'open', created_ms INTEGER NOT NULL, PRIMARY KEY (session, seq))");
 
     // FTS5 virtual table over the message text. External content means the index
     // is derived from the messages table itself rather than storing a copy, so the
@@ -321,11 +348,12 @@ std::optional<SessionRow> Store::get_session(const std::string & id) const {
     return read_session(s);
 }
 
-std::vector<SessionRow> Store::list_sessions(size_t limit, long long before_ms) const {
+std::vector<SessionRow> Store::list_sessions(size_t limit, long long before_ms, const std::string & project_id) const {
     std::lock_guard<std::mutex> lk(mu_);
     Stmt s(db_, (std::string("SELECT ") + kSessionCols +
-                 " FROM sessions WHERE (?1 = 0 OR updated_ms < ?1) ORDER BY updated_ms DESC, rowid DESC LIMIT ?2").c_str());
-    s.i64(1, before_ms).i64(2, (long long) limit);
+                 " FROM sessions WHERE (?1 = 0 OR updated_ms < ?1) AND (?3 = '' OR project_id = ?3) "
+                 "ORDER BY updated_ms DESC, rowid DESC LIMIT ?2").c_str());
+    s.i64(1, before_ms).i64(2, (long long) limit).text(3, project_id);
     std::vector<SessionRow> out;
     while (s.step()) out.push_back(read_session(s));
     return out;
@@ -344,6 +372,205 @@ bool Store::set_session_mode(const std::string & id, const std::string & mode) {
     return sqlite3_changes(db_) > 0;
 }
 
+bool Store::set_session_project(const std::string & id, const std::string & project_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE sessions SET project_id=? WHERE id=?");
+    s.text(1, project_id).text(2, id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+bool Store::set_session_cwd(const std::string & id, const std::string & cwd) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE sessions SET cwd=? WHERE id=?");
+    s.text(1, cwd).text(2, id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+namespace {
+ProjectRow read_project(const Stmt & s) {
+    ProjectRow p;
+    p.id = s.str(0); p.name = s.str(1); p.folder = s.str(2); p.instructions = s.str(3); p.kind = s.str(4);
+    p.created_ms = s.num(5); p.updated_ms = s.num(6);
+    return p;
+}
+const char * kProjectCols = "id, name, folder, instructions, kind, created_ms, updated_ms";
+}  // namespace
+
+ProjectRow Store::create_project(const std::string & name, const std::string & folder, const std::string & instructions,
+                                 const std::string & kind) {
+    std::lock_guard<std::mutex> lk(mu_);
+    ProjectRow p;
+    p.id = new_id("p");
+    p.name = name; p.folder = folder; p.instructions = instructions;
+    p.kind = kind == "made" ? "made" : "existing";
+    p.created_ms = p.updated_ms = now_ms();
+    Stmt s(db_, "INSERT INTO projects(id, name, folder, instructions, kind, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?)");
+    s.text(1, p.id).text(2, name).text(3, folder).text(4, instructions).text(5, p.kind).i64(6, p.created_ms)
+        .i64(7, p.updated_ms).run();
+    return p;
+}
+
+std::optional<ProjectRow> Store::get_project(const std::string & id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, (std::string("SELECT ") + kProjectCols + " FROM projects WHERE id=?").c_str());
+    s.text(1, id);
+    if (!s.step()) return std::nullopt;
+    return read_project(s);
+}
+
+std::vector<ProjectRow> Store::list_projects() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, (std::string("SELECT ") + kProjectCols + " FROM projects ORDER BY updated_ms DESC, rowid DESC").c_str());
+    std::vector<ProjectRow> out;
+    while (s.step()) out.push_back(read_project(s));
+    return out;
+}
+
+bool Store::update_project(const ProjectRow & p) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE projects SET name=?, folder=?, instructions=?, updated_ms=? WHERE id=?");
+    s.text(1, p.name).text(2, p.folder).text(3, p.instructions).i64(4, now_ms()).text(5, p.id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+bool Store::delete_project(const std::string & id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    {
+        Stmt d(db_, "UPDATE sessions SET project_id='' WHERE project_id=?");
+        d.text(1, id).run();
+    }
+    Stmt s(db_, "DELETE FROM projects WHERE id=?");
+    s.text(1, id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+long long Store::add_calc(const std::string & session, const CalcRow & c) {
+    std::lock_guard<std::mutex> lk(mu_);
+    long long n = 1;
+    {
+        Stmt m(db_, "SELECT COALESCE(MAX(n), 0) + 1 FROM calcs WHERE session=?");
+        m.text(1, session);
+        if (m.step()) n = m.num(0);
+    }
+    Stmt s(db_, "INSERT INTO calcs(session, n, name, expr, value, unit, note, created_ms) VALUES (?,?,?,?,?,?,?,?)");
+    s.text(1, session).i64(2, n).text(3, c.name).text(4, c.expr).text(5, c.value).text(6, c.unit).text(7, c.note)
+        .i64(8, now_ms()).run();
+    return n;
+}
+
+std::vector<CalcRow> Store::list_calcs(const std::string & session) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "SELECT n, name, expr, value, unit, note, created_ms FROM calcs WHERE session=? ORDER BY n");
+    s.text(1, session);
+    std::vector<CalcRow> out;
+    while (s.step()) {
+        CalcRow c;
+        c.n = s.num(0); c.name = s.str(1); c.expr = s.str(2); c.value = s.str(3); c.unit = s.str(4); c.note = s.str(5);
+        c.created_ms = s.num(6);
+        out.push_back(c);
+    }
+    return out;
+}
+
+long long Store::add_source(const std::string & session, const SourceRow & r, bool * added) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (added) *added = false;
+    {
+        Stmt q(db_, "SELECT n, title, quote, note, auto FROM sources WHERE session=? AND url=?");
+        q.text(1, session).text(2, r.url);
+        if (q.step()) {
+            long long n = q.num(0);
+            std::string title = q.str(1), quote = q.str(2), note = q.str(3);
+            bool was_auto = q.num(4) != 0;
+            // an agent-written source_add enriches an automatic row; a repeated auto record changes nothing
+            if (!r.autoadded) {
+                if (title.empty() || (was_auto && !r.title.empty())) title = r.title;
+                if (quote.empty()) quote = r.quote;
+                if (note.empty()) note = r.note;
+                Stmt u(db_, "UPDATE sources SET title=?, quote=?, note=?, auto=0 WHERE session=? AND n=?");
+                u.text(1, title).text(2, quote).text(3, note).text(4, session).i64(5, n).run();
+            }
+            return n;
+        }
+    }
+    long long n = 1;
+    {
+        Stmt m(db_, "SELECT COALESCE(MAX(n), 0) + 1 FROM sources WHERE session=?");
+        m.text(1, session);
+        if (m.step()) n = m.num(0);
+    }
+    Stmt s(db_, "INSERT INTO sources(session, n, url, title, quote, note, auto, created_ms) VALUES (?,?,?,?,?,?,?,?)");
+    s.text(1, session).i64(2, n).text(3, r.url).text(4, r.title).text(5, r.quote).text(6, r.note)
+        .i64(7, r.autoadded ? 1 : 0).i64(8, now_ms()).run();
+    if (added) *added = true;
+    return n;
+}
+
+std::vector<SourceRow> Store::list_sources(const std::string & session) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "SELECT n, url, title, quote, note, auto, created_ms FROM sources WHERE session=? ORDER BY n");
+    s.text(1, session);
+    std::vector<SourceRow> out;
+    while (s.step()) {
+        SourceRow r;
+        r.n = s.num(0); r.url = s.str(1); r.title = s.str(2); r.quote = s.str(3); r.note = s.str(4);
+        r.autoadded = s.num(5) != 0; r.created_ms = s.num(6);
+        out.push_back(r);
+    }
+    return out;
+}
+
+namespace {
+SuggestionRow read_suggestion(const Stmt & s) {
+    SuggestionRow g;
+    g.id = "g" + std::to_string(s.num(0)); g.path = s.str(1); g.kind = s.str(2); g.find = s.str(3);
+    g.replace = s.str(4); g.why = s.str(5); g.status = s.str(6); g.created_ms = s.num(7);
+    return g;
+}
+const char * kSuggestionCols = "seq, path, kind, find, replace, why, status, created_ms";
+}  // namespace
+
+std::string Store::add_suggestion(const std::string & session, const SuggestionRow & g) {
+    std::lock_guard<std::mutex> lk(mu_);
+    long long n = 1;
+    {
+        Stmt m(db_, "SELECT COALESCE(MAX(seq), 0) + 1 FROM suggestions WHERE session=?");
+        m.text(1, session);
+        if (m.step()) n = m.num(0);
+    }
+    Stmt s(db_, "INSERT INTO suggestions(session, seq, path, kind, find, replace, why, status, created_ms) "
+                "VALUES (?,?,?,?,?,?,?,'open',?)");
+    s.text(1, session).i64(2, n).text(3, g.path).text(4, g.kind).text(5, g.find).text(6, g.replace).text(7, g.why)
+        .i64(8, now_ms()).run();
+    return "g" + std::to_string(n);
+}
+
+std::vector<SuggestionRow> Store::list_suggestions(const std::string & session) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, (std::string("SELECT ") + kSuggestionCols + " FROM suggestions WHERE session=? ORDER BY seq").c_str());
+    s.text(1, session);
+    std::vector<SuggestionRow> out;
+    while (s.step()) out.push_back(read_suggestion(s));
+    return out;
+}
+
+std::optional<SuggestionRow> Store::get_suggestion(const std::string & session, const std::string & id) const {
+    if (id.size() < 2 || id[0] != 'g' || id.find_first_not_of("0123456789", 1) != std::string::npos) return std::nullopt;
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, (std::string("SELECT ") + kSuggestionCols + " FROM suggestions WHERE session=? AND seq=?").c_str());
+    s.text(1, session).i64(2, std::atoll(id.c_str() + 1));
+    if (!s.step()) return std::nullopt;
+    return read_suggestion(s);
+}
+
+bool Store::set_suggestion_status(const std::string & session, const std::string & id, const std::string & status) {
+    if (id.size() < 2 || id[0] != 'g' || id.find_first_not_of("0123456789", 1) != std::string::npos) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE suggestions SET status=? WHERE session=? AND seq=?");
+    s.text(1, status).text(2, session).i64(3, std::atoll(id.c_str() + 1)).run();
+    return sqlite3_changes(db_) > 0;
+}
+
 bool Store::set_session_auto_resume(const std::string & id, int v) {
     std::lock_guard<std::mutex> lk(mu_);
     Stmt s(db_, "UPDATE sessions SET auto_resume=? WHERE id=?");
@@ -351,8 +578,40 @@ bool Store::set_session_auto_resume(const std::string & id, int v) {
     return sqlite3_changes(db_) > 0;
 }
 
+bool Store::set_session_health_tainted(const std::string & id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE sessions SET health_tainted=1 WHERE id=?");
+    s.text(1, id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+bool Store::set_session_location_used(const std::string & id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "UPDATE sessions SET location_used=1 WHERE id=?");
+    s.text(1, id).run();
+    return sqlite3_changes(db_) > 0;
+}
+
+bool Store::session_location_used(const std::string & id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "SELECT location_used FROM sessions WHERE id=?");
+    s.text(1, id);
+    return s.step() && s.num(0) != 0;
+}
+
+bool Store::session_health_tainted(const std::string & id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt s(db_, "SELECT health_tainted FROM sessions WHERE id=?");
+    s.text(1, id);
+    return s.step() && s.num(0) != 0;
+}
+
 void Store::delete_session(const std::string & id) {
     std::lock_guard<std::mutex> lk(mu_);
+    for (const char * t : {"calcs", "sources", "suggestions"}) {
+        Stmt d(db_, (std::string("DELETE FROM ") + t + " WHERE session=?").c_str());
+        d.text(1, id).run();
+    }
     Stmt s(db_, "DELETE FROM sessions WHERE id=?");
     s.text(1, id).run();
 }
@@ -480,7 +739,8 @@ std::vector<MessageRow> Store::search(const std::string & query, size_t limit) c
 }
 
 std::vector<SearchHit> Store::search_messages(const std::string & query, int limit,
-                                              const std::string & session_id) const {
+                                              const std::string & session_id, bool skip_system,
+                                              bool exclude_health_tainted) const {
     std::vector<SearchHit> out;
     std::string fq = fts_quote(query);
     if (fq.empty() || limit <= 0) return out;
@@ -489,9 +749,10 @@ std::vector<SearchHit> Store::search_messages(const std::string & query, int lim
                 "snippet(messages_fts, 0, '[', ']', '...', 32) "
                 "FROM messages_fts f JOIN messages m ON m.id = f.rowid "
                 "JOIN sessions s ON s.id = m.session "
-                "WHERE messages_fts MATCH ?1 AND (?2 = '' OR m.session = ?2) "
+                "WHERE messages_fts MATCH ?1 AND (?2 = '' OR m.session = ?2) AND (?4 = 0 OR m.role != 'system') "
+                "AND (?5 = 0 OR s.health_tainted = 0) "
                 "ORDER BY m.created_ms DESC, m.id DESC LIMIT ?3");
-    s.text(1, fq).text(2, session_id).i64(3, limit);
+    s.text(1, fq).text(2, session_id).i64(3, limit).i64(4, skip_system ? 1 : 0).i64(5, exclude_health_tainted ? 1 : 0);
     while (s.step()) {
         SearchHit h;
         h.session = s.str(0);
@@ -616,7 +877,7 @@ json Store::usage_stats(int days) const {
     json daily = json::array();
     {
         Stmt s(db_, "SELECT date(created_ms/1000,'unixepoch','localtime') d, COUNT(*) FROM messages "
-                    "WHERE role='user' AND created_ms/1000 >= strftime('%s','now',? ) GROUP BY d ORDER BY d");
+                    "WHERE role='user' AND created_ms/1000 >= CAST(strftime('%s','now',?) AS INTEGER) GROUP BY d ORDER BY d");
         s.text(1, "-" + std::to_string(days) + " days");
         while (s.step()) daily.push_back({{"date", s.str(0)}, {"count", s.num(1)}});
     }

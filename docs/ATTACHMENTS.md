@@ -59,5 +59,7 @@ the marker becomes `[image: name, not shown: the loaded model has no vision]` pl
 
 - `view_image {path}`: loads an image file (png/jpg/gif/bmp/webp) under the allowed paths and returns it to the
   model as an image (tool result carries `ChatMessage::images`). Without vision it returns OCR text.
+- `show_image {source, caption?}`: shows an image to the user. Fetches an http(s) URL (or reads a file inside the
+  allowed paths), stores it as an attachment and returns `![caption](/api/attachments/ID)`. See `docs/TOOLS.md`.
 - `screenshot {region?: bool}`: grabs the screen like `/api/screenshot` and returns it as an image. Asks for
   approval like other side-effect tools outside full-auto.

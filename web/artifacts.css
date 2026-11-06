@@ -1,0 +1,29 @@
+/* Artifacts screen and chat cards. Colors come only from /skin.css variables. */
+.art-bar{display:flex;gap:10px;align-items:center;margin:0 0 16px}
+.art-bar input{flex:1;max-width:340px;padding:.5em .9em;border-radius:99px}
+.art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
+.art-card{display:flex;flex-direction:column;border:0;padding:0;text-align:left;background:var(--surface);border-radius:var(--r-card,16px);overflow:hidden;cursor:pointer;color:var(--text);font:inherit}
+.art-card:hover{background:var(--surface2)}
+.art-thumb{aspect-ratio:4/3;background:var(--surface2);display:flex;align-items:center;justify-content:center;color:var(--dim);overflow:hidden}
+.art-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.art-thumb svg{width:38px;height:38px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.art-meta{padding:10px 14px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.art-meta b{font-weight:600;color:var(--title);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.art-meta span{font-size:.8125rem;color:var(--dim)}
+#screen-artifacts.viewing .art-list-view{display:none}
+#screen-artifacts:not(.viewing) .art-view{display:none}
+.art-view{display:flex;flex-direction:column;height:100%;min-height:0}
+#screen-artifacts.active.viewing{display:flex;flex-direction:column;overflow:hidden}
+.art-vbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hair,var(--border))}
+.art-vbar h2{flex:1;min-width:8rem;margin:0;font-size:1.0625rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.art-vbar select{padding:.3em .7em;border-radius:99px;max-width:14rem}
+.art-frame{flex:1;min-height:0;display:flex;background:var(--surface)}
+.art-frame iframe{flex:1;width:100%;border:0;background:#fff}
+.art-note{padding:6px 20px;font-size:.8125rem;color:var(--dim)}
+/* chat card */
+.art-chat{display:flex;gap:12px;align-items:center;width:100%;max-width:420px;margin:6px 0;padding:8px;border:0;border-radius:var(--r-card,16px);background:var(--surface);color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.art-chat:hover{background:var(--surface2)}
+.art-chat .art-thumb{width:84px;aspect-ratio:4/3;flex:none;border-radius:10px}
+.art-chat .art-meta{padding:0;flex:1}
+@media (max-width:760px){.art-vbar{padding:10px 12px}.art-grid{grid-template-columns:repeat(2,1fr)}}
+.art-vbar a.btn{text-decoration:none;color:var(--text)}

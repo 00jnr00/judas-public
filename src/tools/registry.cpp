@@ -7,6 +7,23 @@
 
 namespace judas {
 
+const char * const kHealthTaintMessage =
+    "health data is in this chat, so tools that send anything off this machine are off for this session";
+
+std::string location_taint_refusal(const std::string & tool) {
+    if (tool != "memory_append" && tool != "skill_manage") return "";
+    return "Refused: this chat has the user's location in it, and a location is never saved to memory or skills (" + tool +
+           "). Start a new chat to use it.";
+}
+
+std::string health_taint_refusal(const std::string & tool, const std::string & source) {
+    static const char * const gated[] = {"memory_append", "skill_manage", "web_search", "web_fetch"};
+    bool hit = !source.empty();   // MCP servers may be cloud
+    for (const char * g : gated) if (tool == g) hit = true;
+    if (!hit) return "";
+    return std::string("Refused: ") + kHealthTaintMessage + " (" + tool + "). Start a new chat to use it.";
+}
+
 void ToolRegistry::add(Tool t) {
     std::lock_guard lk(mu_);
     for (auto & p : tools_) {
@@ -61,6 +78,14 @@ ToolResult ToolRegistry::call(const std::string & name, const json & args, ToolC
         std::string names;
         for (const Tool * p : list()) names += (names.empty() ? "" : ", ") + p->name;
         return {false, "unknown tool '" + name + "'. Available tools: " + names, false};
+    }
+    if (ctx.health_tainted) {
+        std::string why = health_taint_refusal(name, t->source);
+        if (!why.empty()) return {false, why, false};
+    }
+    if (ctx.location_used) {
+        std::string why = location_taint_refusal(name);
+        if (!why.empty()) return {false, why, false};
     }
     if (!args.is_object() && !args.is_null()) return {false, "arguments for " + name + " must be a JSON object", false};
     json a = args.is_null() ? json::object() : args;

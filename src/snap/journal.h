@@ -76,6 +76,8 @@ private:
 
 // sha256 of a file's bytes as lowercase hex ("" if missing).
 std::string sha256_file(const std::filesystem::path & p);
+// sha256 of a byte string as lowercase hex.
+std::string sha256_hex(const std::string & data);
 // Copy src to dst with FICLONE when possible, else a normal copy. Returns true on success.
 bool reflink_copy(const std::filesystem::path & src, const std::filesystem::path & dst);
 

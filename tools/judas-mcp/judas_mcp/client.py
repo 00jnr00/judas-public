@@ -12,8 +12,17 @@ POLL_S = 5
 TERMINAL = {"done", "paused", "error", "failed", "killed", "idle"}
 
 
+CLIENT_HEADER = {"X-Judas-Client": "mcp"}
+WITHHELD = "this session has health data; open it in the Judas app"
+
+
 class JudasError(Exception):
     pass
+
+
+def tainted(view):
+    """True when the daemon says the session holds health data (never send its content to a cloud model)."""
+    return bool(((view or {}).get("session") or {}).get("health_tainted")) or bool((view or {}).get("content_withheld"))
 
 
 def clean(text):
@@ -40,7 +49,7 @@ def trim(text, n=1500):
 def call(method, path, body=None, timeout=15):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(BASE + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", **CLIENT_HEADER})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
@@ -133,6 +142,13 @@ def status(sid):
     turn = v.get("turn") or {}
     ags = v.get("agents") or []
     ld = lead(ags)
+    if tainted(v):   # non-content fields only
+        return {"session": sid, "health_tainted": True, "content_withheld": WITHHELD,
+                "turn_status": turn.get("status", "running" if turn.get("running") else "idle"),
+                "running": bool(turn.get("running")),
+                "agents": [{"id": a.get("id"), "role": a.get("role"), "status": a.get("status"),
+                            "lead": not a.get("parent")} for a in ags],
+                "messages_total": v.get("total"), "engine": engine_summary()}
     return {
         "session": sid,
         "title": (v.get("session") or {}).get("title"),
@@ -201,6 +217,9 @@ def result(sid):
     v = session_view(sid, 40)
     ld = lead(v.get("agents") or [])
     turn = v.get("turn") or {}
+    if tainted(v):
+        return {"session": sid, "health_tainted": True, "content_withheld": WITHHELD,
+                "turn_status": turn.get("status"), "lead_status": (ld or {}).get("status")}
     answer = (ld or {}).get("result") or last_assistant(v.get("messages") or [], (ld or {}).get("id")) \
         or last_assistant(v.get("messages") or [])
     files, err = files_changed(sid)
@@ -214,6 +233,8 @@ def result(sid):
 
 
 def message(sid, text):
+    if tainted(session_view(sid, 0)):
+        return {"session": sid, "sent": False, "health_tainted": True, "content_withheld": WITHHELD}
     call("POST", f"/api/sessions/{sid}/messages", {"content": text})
     return {"session": sid, "sent": True}
 
@@ -228,7 +249,8 @@ def cancel(sid):
 
 def sessions(limit=10):
     r = call("GET", f"/api/sessions?limit={int(limit)}")
-    return {"sessions": [{"id": s["id"], "title": trim(s.get("title"), 70), "mode": s.get("mode"),
+    return {"sessions": [{"id": s["id"], "title": WITHHELD if s.get("health_tainted") else trim(s.get("title"), 70),
+                          "health_tainted": bool(s.get("health_tainted")), "mode": s.get("mode"),
                           "cwd": s.get("cwd"), "turn_status": s.get("turn_status"),
                           "running": s.get("running"), "open_items": s.get("open_items"),
                           "updated_ms": s.get("updated_ms")} for s in r.get("sessions", [])],

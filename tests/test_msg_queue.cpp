@@ -160,6 +160,44 @@ int main() {
     CHECK(!n.queued);
     agents.wait_session(s.id);
     CHECK(wait_for([&] { return engine.turns() == 5; }));
+
+    // interrupt: the running turn stops, the queue is kept, the interrupting message runs next, then the queue
+    engine.close();
+    CHECK(!agents.submit_queued(s.id, "long HOLD", "", wd).queued);
+    REQUIRE(wait_for([&] { return engine.turns() == 6; }));
+    CHECK(agents.submit_queued(s.id, "q1", "", wd).queued);
+    CHECK(agents.submit_queued(s.id, "q2", "", wd).queued);
+    CHECK(agents.interrupt(s.id, "urgent", wd) == s.id);
+    REQUIRE(wait_for([&] { return engine.turns() == 9; }));
+    agents.wait_session(s.id);
+    {
+        std::lock_guard lk(engine.mu);
+        CHECK(engine.seen[6] == "urgent");
+        CHECK(engine.seen[7] == "q1");
+        CHECK(engine.seen[8] == "q2");
+    }
+    CHECK(agents.queued(s.id).empty());
+
+    // send now: one queued message jumps ahead (interrupting the turn), the others keep their order
+    CHECK(!agents.submit_queued(s.id, "busy HOLD", "", wd).queued);
+    REQUIRE(wait_for([&] { return engine.turns() == 10; }));
+    auto x1 = agents.submit_queued(s.id, "x1", "", wd);
+    auto x2 = agents.submit_queued(s.id, "x2", "\n[att]", wd);
+    CHECK(x1.queued && x2.queued);
+    CHECK(agents.queue_send_now(s.id, x2.id, wd));
+    CHECK(!agents.queue_send_now(s.id, x2.id, wd));   // already taken
+    REQUIRE(wait_for([&] { return engine.turns() == 12; }));
+    agents.wait_session(s.id);
+    {
+        std::lock_guard lk(engine.mu);
+        CHECK(engine.seen[10] == "x2\n[att]");
+        CHECK(engine.seen[11] == "x1");
+    }
+
+    // interrupt with nothing running is a plain send
+    CHECK(agents.interrupt(s.id, "idle send", wd) == s.id);
+    REQUIRE(wait_for([&] { return engine.turns() == 13; }));
+    agents.wait_session(s.id);
     fs::remove_all(base);
     return 0;
 }

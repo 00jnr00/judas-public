@@ -1,4 +1,6 @@
 // Auto-resume decision logic (pure) and the progress rule.
+#include <vector>
+
 #include "agent/autoresume.h"
 #include "test.h"
 
@@ -40,11 +42,31 @@ int main() {
     auto nomax = base(); nomax.max_per_day = 0;
     CHECK(decide_auto_resume(nomax) == A::None);
 
-    auto stall = base(); stall.stalled = kAutoResumeStallLimit - 1;
+    auto stall = base(); stall.stalled = kAutoResumeWrapUpAfter - 1;
     CHECK(decide_auto_resume(stall) == A::Resume);
+    stall.stalled = kAutoResumeWrapUpAfter;   // two no-progress stretches in a row: ask for a summary
+    CHECK(decide_auto_resume(stall) == A::WrapUp);
+    auto wait = base(); wait.stalled = kAutoResumeWrapUpAfter; wait.paused_for_ms = 1;
+    CHECK(decide_auto_resume(wait) == A::Wait);   // the delay applies to the wrap-up too
+    stall.stalled = kAutoResumeStallLimit - 1;
+    CHECK(decide_auto_resume(stall) == A::WrapUp);
     stall.stalled = kAutoResumeStallLimit;
     CHECK(decide_auto_resume(stall) == A::None);
-    CHECK(kAutoResumeStallLimit == 3);
+    CHECK(kAutoResumeStallLimit == 3 && kAutoResumeWrapUpAfter == 2);
+
+    // Scripted run of resumes that change nothing: resume, resume, one wrap-up, then give up.
+    {
+        std::vector<A> seen;
+        int stalled = 0;
+        for (int i = 0; i < 6; i++) {
+            auto in = base(); in.stalled = stalled;
+            A act = decide_auto_resume(in);
+            seen.push_back(act);
+            if (act == A::None) break;
+            if (!resume_made_progress(5, 5, 3, 3)) stalled++;
+        }
+        CHECK((seen == std::vector<A>{A::Resume, A::Resume, A::WrapUp, A::None}));
+    }
 
     CHECK(!resume_made_progress(5, 5, 3, 3));
     CHECK(resume_made_progress(5, 6, 3, 3));    // a file-changing tool call

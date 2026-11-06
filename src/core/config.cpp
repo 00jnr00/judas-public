@@ -367,7 +367,13 @@ void apply_file(Config & c, const std::string & file) {
                 std::string l(lk.str()), full = key + "." + l;
                 if (l == "context_files") c.learn.context_files = get_str_array(r, full, lv);
                 else if (l == "max_context_tokens") c.learn.max_context_tokens = get_int(r, full, lv);
+                else if (l == "show_visual") c.learn.show_visual = get_bool(r, full, lv);
                 else if (l == "visual_url") c.learn.visual_url = get_str(r, full, lv);
+                else if (l == "visual_proxy_port") {
+                    c.learn.visual_proxy_port = get_int(r, full, lv);
+                    if (c.learn.visual_proxy_port < -1 || c.learn.visual_proxy_port > 65535)
+                        fail_at(r, full + ": expected -1 (auto), 0 (off) or a port", &lv);
+                }
                 else if (l == "visual_label") c.learn.visual_label = get_str(r, full, lv);
                 else if (l == "visual_unit") {
                     c.learn.visual_unit = get_str(r, full, lv);
@@ -394,6 +400,7 @@ void apply_file(Config & c, const std::string & file) {
                 else if (l == "review_tool_steps") c.learning.review_tool_steps = get_int(r, full, lv);
                 else if (l == "review_memory_turns") c.learning.review_memory_turns = get_int(r, full, lv);
                 else if (l == "review_max_steps") c.learning.review_max_steps = get_int(r, full, lv);
+                else if (l == "review_max_wall_s") c.learning.review_max_wall_s = get_int(r, full, lv);
                 else if (l == "curator") c.learning.curator = get_bool(r, full, lv);
                 else if (l == "curator_interval_hours") c.learning.curator_interval_hours = get_int(r, full, lv);
                 else if (l == "curator_min_idle_minutes") c.learning.curator_min_idle_minutes = get_int(r, full, lv);
@@ -423,6 +430,13 @@ void apply_file(Config & c, const std::string & file) {
                 std::string u(uk.str()), full = key + "." + u;
                 if (u == "mascot") c.ui.mascot = get_bool(r, full, uv);
                 else unknown_key(r, full, uv);
+            }
+        } else if (key == "daily_question") {
+            for (auto && [dk, dv] : as_table(r, key, v)) {
+                std::string dn(dk.str()), full = key + "." + dn;
+                if (dn == "enabled") c.daily_question.enabled = get_bool(r, full, dv);
+                else if (dn == "hour") c.daily_question.hour = std::max(0, std::min(23, get_int(r, full, dv)));
+                else unknown_key(r, full, dv);
             }
         } else if (key == "memory") {
             for (auto && [mk, mv] : as_table(r, key, v)) {
@@ -501,11 +515,14 @@ void apply_file(Config & c, const std::string & file) {
                 else if (a == "loop_pause_after") c.agents.loop_pause_after = get_int(r, full, av);
                 else if (a == "read_streak_nudge") c.agents.read_streak_nudge = get_int(r, full, av);
                 else if (a == "read_streak_force") c.agents.read_streak_force = get_int(r, full, av);
+                else if (a == "turn_wall_s") c.agents.turn_wall_s = get_int(r, full, av);
                 else if (a == "delegate_after_edits") c.agents.delegate_after_edits = get_int(r, full, av);
                 else if (a == "role_dirs") c.agents.role_dirs = get_str_array(r, full, av);
                 else if (a == "auto_resume") c.agents.auto_resume = get_bool(r, full, av);
                 else if (a == "auto_resume_max") c.agents.auto_resume_max = get_int(r, full, av);
                 else if (a == "auto_resume_delay_s") c.agents.auto_resume_delay_s = get_int(r, full, av);
+                else if (a == "url_retry_cap") c.agents.url_retry_cap = get_int(r, full, av);
+                else if (a == "empty_turn_limit") c.agents.empty_turn_limit = get_int(r, full, av);
                 else unknown_key(r, full, av);
             }
         } else if (key == "context") {
@@ -607,6 +624,26 @@ void apply_file(Config & c, const std::string & file) {
                 } else {
                     unknown_key(r, full, tv);
                 }
+            }
+        } else if (key == "health") {
+            for (auto && [hk, hv] : as_table(r, key, v)) {
+                std::string h(hk.str()), full = key + "." + h;
+                if (h == "enabled") c.health.enabled = get_bool(r, full, hv);
+                else if (h == "url") c.health.url = get_str(r, full, hv);
+                else if (h == "token_env") c.health.token_env = get_str(r, full, hv);
+                else if (h == "timeout_s") c.health.timeout_s = get_int(r, full, hv);
+                else if (h == "weekly_checkin") c.health.weekly_checkin = get_bool(r, full, hv);
+                else if (h == "weekly_day") {
+                    c.health.weekly_day = get_str(r, full, hv);
+                    if (std::string bad = health_weekly_day_error(c.health.weekly_day); !bad.empty()) fail_at(r, bad, &hv);
+                } else if (h == "weekly_hour") c.health.weekly_hour = get_int(r, full, hv);
+                else unknown_key(r, full, hv);
+            }
+        } else if (key == "projects") {
+            for (auto && [pk, pv] : as_table(r, key, v)) {
+                std::string pn(pk.str()), full = key + "." + pn;
+                if (pn == "root") c.projects.root = get_str(r, full, pv);
+                else unknown_key(r, full, pv);
             }
         } else if (key == "mach12") {
             for (auto && [mk, mv] : as_table(r, key, v)) {
@@ -789,8 +826,30 @@ Config load_config(const std::string & project_dir) {
     return c;
 }
 
+std::string health_weekly_day_error(const std::string & day) {
+    if (day == "sat")
+        return "health.weekly_day = \"sat\" is not allowed: Saturday is rest day, pick another day (mon, tue, wed, thu, fri or sun)";
+    for (const char * d : {"mon", "tue", "wed", "thu", "fri", "sun"})
+        if (day == d) return "";
+    return "health.weekly_day must be one of mon, tue, wed, thu, fri, sun (got \"" + day + "\")";
+}
+
+std::vector<std::string> health_config_problems(const HealthConfig & h) {
+    std::vector<std::string> p;
+    if (std::string e = health_weekly_day_error(h.weekly_day); !e.empty()) p.push_back(e);
+    if (h.weekly_hour < 0 || h.weekly_hour > 23) p.push_back("health.weekly_hour must be 0 to 23");
+    if (h.timeout_s < 1 || h.timeout_s > 120) p.push_back("health.timeout_s must be 1 to 120");
+    if (h.enabled) {
+        if (h.url.rfind("http://", 0) != 0 && h.url.rfind("https://", 0) != 0)
+            p.push_back("health.url must start with http:// or https://");
+        if (h.token_env.empty()) p.push_back("health.token_env must name an environment variable");
+    }
+    return p;
+}
+
 std::vector<std::string> validate_config(const Config & cfg) {
     std::vector<std::string> p;
+    for (auto & e : health_config_problems(cfg.health)) p.push_back(e);
     auto it = cfg.models.find(cfg.engine.model);
     if (it == cfg.models.end()) {
         p.push_back("engine.model '" + cfg.engine.model + "' is not defined in [models]");
@@ -1057,9 +1116,11 @@ std::string dump_config(const Config & c) {
       << "[learn]\n"
       << "context_files = " << str_array(c.learn.context_files) << "\n"
       << "max_context_tokens = " << c.learn.max_context_tokens << "\n"
+      << "show_visual = " << (c.learn.show_visual ? "true" : "false") << "\n"
       << "visual_url = " << q(c.learn.visual_url) << "\n"
       << "visual_label = " << q(c.learn.visual_label) << "\n"
-      << "visual_unit = " << q(c.learn.visual_unit) << "\n\n"
+      << "visual_unit = " << q(c.learn.visual_unit) << "\n"
+      << "visual_proxy_port = " << c.learn.visual_proxy_port << "\n\n"
       << "[coach]\n"
       << "enabled = " << (c.coach.enabled ? "true" : "false") << "\n"
       << "overlay = " << q(c.coach.overlay) << "\n"
@@ -1071,6 +1132,7 @@ std::string dump_config(const Config & c) {
       << "review_tool_steps = " << c.learning.review_tool_steps << "\n"
       << "review_memory_turns = " << c.learning.review_memory_turns << "\n"
       << "review_max_steps = " << c.learning.review_max_steps << "\n"
+      << "review_max_wall_s = " << c.learning.review_max_wall_s << "\n"
       << "curator = " << (c.learning.curator ? "true" : "false") << "\n"
       << "curator_interval_hours = " << c.learning.curator_interval_hours << "\n"
       << "curator_min_idle_minutes = " << c.learning.curator_min_idle_minutes << "\n"
@@ -1097,11 +1159,14 @@ std::string dump_config(const Config & c) {
       << "loop_pause_after = " << c.agents.loop_pause_after << "\n"
       << "read_streak_nudge = " << c.agents.read_streak_nudge << "\n"
       << "read_streak_force = " << c.agents.read_streak_force << "\n"
+      << "turn_wall_s = " << c.agents.turn_wall_s << "\n"
       << "delegate_after_edits = " << c.agents.delegate_after_edits << "\n"
       << "role_dirs = " << str_array(c.agents.role_dirs) << "\n"
       << "auto_resume = " << (c.agents.auto_resume ? "true" : "false") << "\n"
       << "auto_resume_max = " << c.agents.auto_resume_max << "\n"
-      << "auto_resume_delay_s = " << c.agents.auto_resume_delay_s << "\n\n"
+      << "auto_resume_delay_s = " << c.agents.auto_resume_delay_s << "\n"
+      << "url_retry_cap = " << c.agents.url_retry_cap << "\n"
+      << "empty_turn_limit = " << c.agents.empty_turn_limit << "\n\n"
       << "[context]\n"
       << "mode = " << q(c.context.mode) << "\n"
       << "trigger_pct = " << dnum(c.context.trigger_pct) << "\n"
@@ -1150,6 +1215,16 @@ std::string dump_config(const Config & c) {
       << "max_item_chars = " << c.swarm.max_item_chars << "\n"
       << "config = " << q(c.swarm.config) << "\n"
       << "unit = " << q(c.swarm.unit) << "\n";
+    o << "\n[health]\n"
+      << "enabled = " << (c.health.enabled ? "true" : "false") << "\n"
+      << "url = " << q(c.health.url) << "\n"
+      << "token_env = " << q(c.health.token_env) << "\n"
+      << "timeout_s = " << c.health.timeout_s << "\n"
+      << "weekly_checkin = " << (c.health.weekly_checkin ? "true" : "false") << "\n"
+      << "weekly_day = " << q(c.health.weekly_day) << "\n"
+      << "weekly_hour = " << c.health.weekly_hour << "\n";
+    o << "\n[projects]\n"
+      << "root = " << q(c.projects.root) << "\n";
     o << "\n[mach12]\n"
       << "enabled = " << (c.mach12.enabled ? "true" : "false") << "\n"
       << "tools = " << (c.mach12.tools ? "true" : "false") << "\n"
@@ -1260,6 +1335,11 @@ ocr = true                 # run tesseract on images when it is installed
 [ui]
 mascot = true              # pixel-art companions in the TUI and web UI
 
+# ---- daily question (phone app notification) ------------------------------
+[daily_question]
+enabled = true
+hour = 10                  # local hour (0 to 23) the Android app posts the question
+
 # ---- server ----------------------------------------------------------------
 [server]
 bind = "127.0.0.1"
@@ -1301,7 +1381,8 @@ track_usage = true         # record skill loads and patches in <data_dir>/skills
 review = true              # run a background review when a nudge counter reaches its threshold
 review_tool_steps = 10     # tool-calling steps since the last review (skill nudge)
 review_memory_turns = 10   # lead turns since the last review (memory nudge)
-review_max_steps = 12      # model steps the review agent may take
+review_max_steps = 12      # model steps the review agent may take (compaction calls count)
+review_max_wall_s = 300    # wall-clock cap per review run in seconds; 0 = no cap
 # The curator keeps the agent-authored skill library healthy: unused skills go stale, long-unused ones move
 # into .archive/ (never deleted), and every pass is preceded by a backup. It fires only between a week-minimum
 # interval and only while no agent has been active for a while, so it never competes with your agents.
@@ -1332,9 +1413,11 @@ reject_dashes = false      # memory_append refuses facts containing em or en das
 [learn]
 context_files = []
 max_context_tokens = 3000
+show_visual = false         # true brings back the Tutor chat / Visual tutor switch (needs visual_url)
 visual_url = ""             # optional visual tutor app embedded in the Learn screen (e.g. http://localhost:8024)
 visual_label = "Visual tutor"
 visual_unit = ""            # optional systemd user unit started on demand when the view opens
+visual_proxy_port = -1      # phones cannot reach localhost: Judas forwards visual_url on this port (-1 = its port + 100, 0 = off)
 
 # ---- coach -----------------------------------------------------------------
 # Propose-only review of a past session (`judas coach <session>`, /coach, Coach tab). A proposal is plain files under
@@ -1373,11 +1456,14 @@ loop_repeats = 3           # the same tool call or error this many times = loopi
 loop_pause_after = 2       # loop warnings in a short time before the turn pauses
 read_streak_nudge = 8     # code/cowork: read-only calls in a row before a "write now" message (0 = off)
 read_streak_force = 14    # read-only calls in a row after which reads are refused until a write or build/test (0 = off)
+turn_wall_s = 0            # wall-clock budget per turn in seconds; past it the agent must summarize and stop (0 = off)
 delegate_after_edits = 8   # lead: edits in a row with 2+ open plan items before a delegate reminder (0 = off)
 role_dirs = ["~/.config/judas/roles"]
 auto_resume = false        # resume paused lead turns by itself (a session can override it)
 auto_resume_max = 20       # auto-resumes per session per day
 auto_resume_delay_s = 30   # wait this long after a pause before resuming
+url_retry_cap = 2          # failures per URL (web_fetch or shell curl/wget) before the agent must give up on it (0 = off)
+empty_turn_limit = 2       # Swarm lead: empty replies in a row before "write the report now" is injected (0 = off)
 
 # ---- context ---------------------------------------------------------------
 # What to do as an agent's conversation nears its context cap.

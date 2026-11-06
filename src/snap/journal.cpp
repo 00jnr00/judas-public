@@ -400,6 +400,8 @@ RevertResult revert_locked(const fs::path & root, const std::string & id, bool s
 
 // ---------- free functions ----------
 
+std::string sha256_hex(const std::string & data) { return sha256_bytes(data); }
+
 std::string sha256_file(const fs::path & p) {
     int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return "";

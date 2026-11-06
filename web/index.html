@@ -8,8 +8,13 @@
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
 <link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/rich.css">
 <link rel="stylesheet" href="/tools.css">
 <link rel="stylesheet" href="/agent-pane.css">
+<link rel="stylesheet" href="/learn/learn.css">
+<link rel="stylesheet" href="/calm.css">
+<link rel="stylesheet" href="/artifacts.css">
+<link rel="stylesheet" href="/cowork/cowork.css">
 </head>
 <body>
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop to attach</div></div>
@@ -27,27 +32,29 @@
   <nav class="rail" id="rail" aria-label="Main navigation">
     <div class="rail-group rail-modes">
       <div class="rail-cap">Modes</div>
-      <button type="button" data-screen="chat" class="active"><i aria-hidden="true">&#9993;</i><span class="rl"><b>Chat</b><small>Quick questions</small></span></button>
-      <button type="button" data-screen="cowork"><i aria-hidden="true">&#10070;</i><span class="rl"><b>Cowork</b><small>Delegate bigger jobs</small></span></button>
-      <button type="button" data-screen="code"><i aria-hidden="true">{ }</i><span class="rl"><b>Code</b><small>Work in a project</small></span></button>
-      <button type="button" data-screen="learn"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Learn</b><small>Understand something</small></span></button>
-      <button type="button" data-screen="swarm"><i aria-hidden="true">&#8756;</i><span class="rl"><b>Swarm</b><small>Teams of agents, live</small></span></button>
+      <button type="button" data-screen="chat" class="active"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 01-11.6 7.1L4 20.5l1.3-4.4A8 8 0 1121 12z"/></svg><span class="rl"><b>Chat</b><small>Quick questions</small></span></button>
+      <button type="button" data-screen="cowork"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="13" rx="2.5"/><path d="M9 7V5a1.5 1.5 0 011.5-1.5h3A1.5 1.5 0 0115 5v2M3 13h18"/></svg><span class="rl"><b>Cowork</b><small>Delegate bigger jobs</small></span></button>
+      <button type="button" data-screen="code"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></svg><span class="rl"><b>Code</b><small>Work in a project</small></span></button>
+      <button type="button" data-screen="learn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 9L12 4.5 21.5 9 12 13.5z"/><path d="M6 11.3V16c0 1.4 2.7 3 6 3s6-1.6 6-3v-4.7M21.5 9v5"/></svg><span class="rl"><b>Learn</b><small>Understand something</small></span></button>
+      <button type="button" data-screen="swarm"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="2.3"/><circle cx="6" cy="17" r="2.3"/><circle cx="18" cy="17" r="2.3"/><path d="M11 8.2L7 14.8M13 8.2l4 6.6M8.4 17h7.2"/></svg><span class="rl"><b>Swarm</b><small>Teams of agents, live</small></span></button>
     </div>
     <div class="rail-group rail-tools" id="rail-tools">
       <div class="rail-cap">Tools</div>
-      <button type="button" data-screen="agents"><i aria-hidden="true">&#9813;</i><span class="rl"><b>Agents</b></span></button>
-      <button type="button" data-screen="tasks"><i aria-hidden="true">&#9719;</i><span class="rl"><b>Tasks</b></span></button>
-      <button type="button" data-screen="memory"><i aria-hidden="true">&#9998;</i><span class="rl"><b>Memory</b></span></button>
-      <button type="button" data-screen="coach"><i aria-hidden="true">&#9873;</i><span class="rl"><b>Coach</b></span></button>
-      <button type="button" data-screen="snapshots"><i aria-hidden="true">&#8634;</i><span class="rl"><b>Snapshots</b></span></button>
-      <button type="button" data-screen="resources"><i aria-hidden="true">&#9636;</i><span class="rl"><b>Resources</b></span></button>
-      <button type="button" data-screen="heartbeat"><i aria-hidden="true">&#9829;</i><span class="rl"><b>Heartbeat</b></span></button>
-      <button type="button" data-screen="stats"><i aria-hidden="true">&#9641;</i><span class="rl"><b>Statistics</b></span></button>
-      <button type="button" data-screen="tools" hidden><i aria-hidden="true">&#8801;</i><span class="rl"><b>Tools</b></span></button>
-      <button type="button" data-screen="settings"><i aria-hidden="true">&#9881;</i><span class="rl"><b>Settings</b></span></button>
-      <button type="button" data-screen="guide"><i aria-hidden="true">?</i><span class="rl"><b>Guide</b></span></button>
+      <button type="button" data-screen="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 4.6a3.2 3.2 0 010 6.3M18 14.3c1.8.8 3 2.7 3 5.7"/></svg><span class="rl"><b>Agents</b></span></button>
+      <button type="button" data-screen="tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 10h16M9 3v4M15 3v4M9 15l2 2 4-4"/></svg><span class="rl"><b>Tasks</b></span></button>
+      <button type="button" data-screen="projects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 012-2h4l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z"/></svg><span class="rl"><b>Projects</b></span></button>
+      <button type="button" data-screen="memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17l-6-4-6 4z"/></svg><span class="rl"><b>Memory</b></span></button>
+      <button type="button" data-screen="coach"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg><span class="rl"><b>Coach</b></span></button>
+      <button type="button" data-screen="snapshots"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 102.3-5.7M4 4v5h5"/><path d="M12 8v4l3 2"/></svg><span class="rl"><b>Snapshots</b></span></button>
+      <button type="button" data-screen="resources"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/></svg><span class="rl"><b>Resources</b></span></button>
+      <button type="button" data-screen="heartbeat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span class="rl"><b>Heartbeat</b></span></button>
+      <button type="button" data-screen="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V5M19 20v-6"/></svg><span class="rl"><b>Statistics</b></span></button>
+      <button type="button" data-screen="artifacts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg><span class="rl"><b>Artifacts</b></span></button>
+      <button type="button" data-screen="tools" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6.5a4 4 0 00-5.3 5.3L4 17l3 3 5.2-5.2a4 4 0 005.3-5.3l-2.5 2.5-2.5-.5-.5-2.5z"/></svg><span class="rl"><b>Tools</b></span></button>
+      <button type="button" data-screen="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg><span class="rl"><b>Settings</b></span></button>
+      <button type="button" data-screen="guide"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 114 2c-.9.6-1.5 1.1-1.5 2.3M12 17h.01"/></svg><span class="rl"><b>Guide</b></span></button>
     </div>
-    <button type="button" id="rail-more" class="rail-morebtn" aria-expanded="false"><i aria-hidden="true">&#8943;</i><span class="rl"><b>More</b></span></button>
+    <button type="button" id="rail-more" class="rail-morebtn" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg><span class="rl"><b>More</b></span></button>
   </nav>
   <main class="main">
 
@@ -63,6 +70,7 @@
             <button type="button" id="sess-toggle" class="btn small ghost">Sessions</button>
             <h2 id="work-title">Chat</h2>
             <span id="mode-tag" class="mode-tag">Mode: Chat</span>
+            <div id="cw-tabs" class="cw-tabs" role="tablist" aria-label="Cowork view" hidden></div>
             <span id="turn-pill" class="pill" hidden>working</span>
             <button type="button" id="panel-toggle" class="btn small ghost" hidden>Panel</button>
           </div>
@@ -83,10 +91,17 @@
             <a id="lv-open" class="btn small ghost" target="_blank" rel="noopener" hidden>Open in new tab</a>
           </div>
           <div id="cwd-bar" class="cwd-bar">
-            <label for="cwd" id="cwd-label">Project folder</label>
-            <input id="cwd" class="cwd" type="text" list="cwd-recent" placeholder="/home/you/project" spellcheck="false" autocomplete="off">
+            <label for="proj-select" id="proj-label">Project</label>
+            <div class="proj-pick">
+              <select id="proj-select" aria-label="Project"></select>
+              <span id="proj-folder" class="proj-folder mono" hidden></span>
+              <button type="button" id="proj-manage" class="btn small ghost" data-screen-go="projects" hidden>Manage</button>
+            </div>
+            <label for="cwd" id="cwd-label" class="cwd-folder">Project folder</label>
+            <input id="cwd" class="cwd cwd-folder" type="text" list="cwd-recent" placeholder="/home/you/project" spellcheck="false" autocomplete="off">
             <datalist id="cwd-recent"></datalist>
-            <div id="cwd-chips" class="chips"></div>
+            <div id="cwd-chips" class="chips cwd-folder"></div>
+            <div id="proj-new" class="proj-new-wrap" hidden></div>
             <div id="cwd-err" class="field-err" hidden>This mode needs a folder. Enter one above.</div>
           </div>
           <div class="title-row">
@@ -104,6 +119,7 @@
           </div>
         </div>
         <div class="work-body">
+          <div id="cw-stage" class="cw-stage" hidden></div>
           <div class="conv">
             <div id="team-area" class="team-area" hidden>
               <div class="team-bar">
@@ -119,6 +135,7 @@
               <div id="team-v-table" class="tm-view" hidden><div id="team-table" class="tm-table-box"></div></div>
               <div id="team-v-file" class="tm-view" hidden><div id="team-file" class="tm-file-box"></div></div>
             </div>
+            <div id="learn-top" hidden></div>
             <div id="log" class="log"></div>
             <div id="learn-visual" class="learn-visual" hidden>
               <iframe id="lv-frame" title="Visual tutor" referrerpolicy="no-referrer"></iframe>
@@ -148,7 +165,8 @@
                 <textarea id="input" rows="2" placeholder="Ask anything. Enter sends, Shift+Enter for a new line." aria-label="Message"></textarea>
                 <div class="comp-btns">
                   <button type="submit" id="send" class="btn primary">Send</button>
-                  <button type="button" id="cancel" class="btn danger" hidden>Cancel</button>
+                  <button type="button" id="interrupt" class="btn" hidden title="Stop the current turn and send this message now (Ctrl+Enter); queued messages stay queued">Interrupt</button>
+                  <button type="button" id="cancel" class="btn danger" hidden title="Stop the current turn and drop the queue">Stop</button>
                   <button type="button" id="sched" class="btn" hidden title="Turn this prompt into a saved task">Schedule this</button>
                 </div>
               </div>
@@ -199,15 +217,20 @@
             <div class="field kind-once" hidden><label for="t-when">Run at</label><input id="t-when" type="datetime-local"></div>
             <div class="field kind-interval" hidden>
               <label for="t-every">Repeat every</label>
-              <div class="inline"><input id="t-every" type="number" min="1" step="1" value="30"><select id="t-unit"><option value="60">minutes</option><option value="3600">hours</option></select></div>
+              <div class="inline"><input id="t-every" type="number" min="1" step="1" value="30"><select id="t-unit"><option value="60">minutes</option><option value="3600">hours</option><option value="86400">days</option></select></div>
+              <label for="t-start">Starting</label><input id="t-start" type="datetime-local">
             </div>
             <div class="field-err" id="t-err" hidden></div>
-            <div class="actions"><button type="submit" class="btn primary">Create task</button></div>
+            <div class="actions"><button type="button" class="btn" id="t-cancel-edit" hidden>Cancel</button><button type="submit" class="btn primary">Create task</button></div>
           </form>
         </details>
         <h3>Your tasks</h3>
         <div id="task-list" class="task-list"></div>
       </div>
+    </section>
+
+    <section id="screen-projects" class="screen">
+      <div class="page" id="projects"></div>
     </section>
 
     <section id="screen-memory" class="screen">
@@ -255,6 +278,9 @@
         <h3>Companion</h3>
         <p class="dim">A small pixel buddy that reacts while Judas works. It only moves a little and stops when this tab is hidden.</p>
         <div id="companion-settings" class="companion-settings"></div>
+        <h3>Location</h3>
+        <p class="dim">Lets Judas know where you are, for questions like what is open near me. Off until you turn it on; turning it on asks this browser for permission. While on, this page sends your position when it changes and every few minutes while it is visible. The server keeps only the latest position, in memory, and forgets it on restart or when you turn this off.</p>
+        <div id="location-settings" class="location-settings"></div>
         <h3>Model</h3>
         <p class="dim">Judas loads one model at a time, shared by every agent. Switching saves the choice and restarts the daemon so the new model loads; running chats are interrupted.</p>
         <div id="model-switch" class="model-switch"></div>
@@ -276,6 +302,19 @@
       <div id="tools-body" class="tools-body"></div>
     </section>
 
+    <section id="screen-artifacts" class="screen">
+      <div class="page art-list-view">
+        <header class="page-head"><h2>Artifacts</h2><p class="desc" data-desc="artifacts"></p></header>
+        <div class="art-bar"><input id="art-q" type="search" placeholder="Search by title or kind" aria-label="Search artifacts"><button type="button" id="art-refresh" class="btn small">Refresh</button></div>
+        <div id="art-grid" class="art-grid"></div>
+      </div>
+      <div class="art-view">
+        <div id="art-vbar" class="art-vbar"></div>
+        <div id="art-note" class="art-note"></div>
+        <div id="art-frame" class="art-frame"></div>
+      </div>
+    </section>
+
     <section id="screen-guide" class="screen">
       <div class="page" id="guide"></div>
     </section>
@@ -284,9 +323,17 @@
 </div>
 <script src="/vendor/katex/katex.min.js"></script>
 <script src="/companion.js"></script>
+<script src="/location.js"></script>
+<script src="/projects.js"></script>
 <script src="/fonts.js"></script>
 <script src="/theme.js"></script>
+<script src="/suggestions.js"></script>
 <script src="/agent-pane.js"></script>
+<script src="/rich.js"></script>
+<script src="/learn/learn.js"></script>
+<script src="/artifact-capture.js"></script>
+<script src="/artifacts.js"></script>
+<script src="/cowork/cowork.js"></script>
 <script src="/app.js"></script>
 <script src="/team-save.js"></script>
 <script src="/tools.js"></script>

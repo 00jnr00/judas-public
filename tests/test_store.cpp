@@ -237,6 +237,20 @@ static void test_pagination() {
     for (auto & x : next) CHECK(x.updated_ms < first.back().updated_ms);
 }
 
+static void test_usage_daily() {
+    // Regression: strftime('%s') returns TEXT, and an INTEGER never compares >= TEXT in SQLite,
+    // so the daily grid used to come back empty.
+    Store st(tmp_db("usage.db"));
+    auto s = st.create_session("u", "/", "big");
+    st.add_message(s.id, "", "user", json{{"content", "hi"}});
+    st.add_message(s.id, "", "user", json{{"content", "again"}});
+    st.add_message(s.id, "", "assistant", json{{"content", "ok"}});
+    json u = st.usage_stats();
+    CHECK(u["turns"].get<long long>() == 2);
+    REQUIRE(u["daily"].size() == 1);
+    CHECK(u["daily"][0]["count"].get<long long>() == 2);
+}
+
 int main() {
     test_ids();
     test_mode_migration();
@@ -247,6 +261,7 @@ int main() {
     test_search_and_cascade();
     test_cascade_agents();
     test_persistence_and_threads();
+    test_usage_daily();
     std::printf("test_store: done\n");
     TEST_MAIN_END();
 }

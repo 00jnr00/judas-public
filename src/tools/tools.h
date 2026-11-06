@@ -19,6 +19,9 @@ struct ToolContext {
     Journal * journal = nullptr;     // may be null in tests that do not write
     std::string checkpoint;          // current step's checkpoint id (set by the agent loop before each call)
     std::string session, agent;
+    // The session's mode (chat, cowork, engineering, design, research, write ...), "" in tests. Write mode refuses edits to
+    // existing files; the cowork tools refuse to run outside their own mode.
+    std::string mode;
     // A background actor with no user present (the review agent). Tools that can touch user-owned state use
     // this to refuse writes no user consented to.
     bool autonomous = false;
@@ -28,6 +31,16 @@ struct ToolContext {
     // Like approve, but the permission mode never answers for the user: full-auto still asks. For edits to
     // user-owned state (the day planner). Null = deny (no user present, or no approver).
     std::function<bool(const std::string & what)> approve_strict;
+    // Judas Health Link. health_tainted: this session has read health data (set by the agent loop from the store);
+    // the registry then refuses every tool that sends content off the machine (see health_taint_refusal) and the
+    // shell runs with no network. taint_session marks the session (the health tool calls it when it returns data).
+    bool health_tainted = false;
+    bool no_network = false;
+    std::function<void()> taint_session;
+    // Location: the session has called location_get (the agent loop sets it from the store). The registry then refuses
+    // memory_append and skill_manage, so a position is never saved to memory or a skill; note_location marks the session.
+    bool location_used = false;
+    std::function<void()> note_location;
     // Long tools report progress here (the agent loop turns it into a "swarm" UI event). May be null.
     std::function<void(const json &)> progress;
 };
@@ -67,15 +80,27 @@ private:
     std::vector<std::unique_ptr<Tool>> retired_;
 };
 
+// "" if `tool` may run in a health-tainted session, else the refusal text. `source` is Tool::source ("mcp:<server>"
+// for MCP tools). Refused: memory_append, skill_manage, web_search, web_fetch, every MCP tool. show_image, notify and
+// session_search have narrower rules inside the tools themselves.
+std::string health_taint_refusal(const std::string & tool, const std::string & source);
+extern const char * const kHealthTaintMessage;
+// "" if `tool` may run in a session that has used location_get, else the refusal text.
+std::string location_taint_refusal(const std::string & tool);
+
 // read_file, write_file, edit_file, list_dir, glob, grep, shell, web_search, web_fetch,
 // snapshot_list, snapshot_diff, snapshot_revert
 void register_builtin_tools(ToolRegistry & reg);
 
-// view_image, screenshot (they return images through [[image:ID|name]] markers; see src/attach).
+// view_image, screenshot, show_image (they return images through [[image:ID|name]] markers; see src/attach).
 void register_attach_tools(ToolRegistry & reg);
 
 // Read-side path policy: resolves like read_file and applies the secret/deny lists. Returns "" if allowed.
 std::string check_read_path(const ToolContext & ctx, const std::string & path, std::string & resolved);
+
+// check_read_path plus the allow_paths / deny_paths / working-directory containment (for tools that copy a file
+// somewhere the user will see it). Returns "" if allowed, else the reason.
+std::string check_allowed_read_path(const ToolContext & ctx, const std::string & path, std::string & resolved);
 
 // Path policy shared by every writing tool: resolves relative to ctx.cwd, expands ~, and checks
 // permissions.allow_paths / deny_paths. Returns "" if allowed, else the reason.

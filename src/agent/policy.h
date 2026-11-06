@@ -6,7 +6,11 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <string>
+#include <vector>
+
+#include "core/json.h"
 
 namespace judas {
 
@@ -34,7 +38,17 @@ PlanState plan_state(const std::string & plan);
 struct TurnState {
     int auto_continues = 0;   // harness nudges used this turn
     int truncations = 0;      // replies cut off at the token limit this turn
+    int empty_streak = 0;     // consecutive empty replies; at kEmptyWrapUpAfter the model is told to wrap up
+    bool wrapping = false;    // a wrap-up instruction was given: a plain reply now ends the turn
 };
+
+// Two empty (or no-progress) replies in a row switch from "keep going" to "wrap up": say what is done and what is
+// left, then stop. A third empty reply after the instruction pauses the turn.
+constexpr int kEmptyWrapUpAfter = 2;
+std::string wrap_up_message(const std::string & why);
+
+// Per-turn wall-clock budget (agents.turn_wall_s, 0 = off).
+inline bool wall_budget_exceeded(double elapsed_s, int limit_s) { return limit_s > 0 && elapsed_s >= limit_s; }
 
 enum class Action { Execute, Continue, Finish, Pause };
 
@@ -58,7 +72,7 @@ std::string truncation_nudge(bool was_tool_call, int completion_tokens);
 std::string normalize_error(const std::string & output);
 
 // Detects a model repeating itself: the same tool call (name + args), or the same tool error, K times within the
-// last `window` calls. A warning clears the evidence that triggered it; `pause_after` warnings in a short time
+// last `window` calls; two calls taking turns (A B A B A) count as one loop. A warning clears the evidence that triggered it; `pause_after` warnings in a short time
 // mean the model ignored them, and the verdict becomes Pause. A write that succeeded resets the call evidence
 // (the files changed, so repeating a read or a build is legitimate).
 class LoopGuard {
@@ -66,8 +80,9 @@ public:
     enum class Verdict { Ok, Warn, Pause };
     struct Result {
         Verdict verdict = Verdict::Ok;
-        std::string kind;      // "call" | "error"
+        std::string kind;      // "call" | "error" | "cycle" (two calls alternating)
         std::string tool;
+        std::string other;     // cycle: the second tool of the pair
         int count = 0;
     };
     LoopGuard(int repeats = 3, int pause_after = 2, int window = 16, int calm_after = 25)
@@ -88,6 +103,29 @@ private:
 };
 
 std::string loop_nudge(const LoopGuard::Result & r, bool can_spawn);
+// The pause reason when a warning was ignored ("looping: ...").
+std::string loop_pause_reason(const LoopGuard::Result & r);
+
+// A tool call the model wrote into its reply text instead of making a real one. Two formats are read:
+//   <tool_call><function=NAME><parameter=KEY>VALUE</parameter>...</function></tool_call>
+//   {"name": NAME, "arguments": {...}}   (also "parameters", a JSON list of them, or a ```json fence)
+struct TextCall {
+    std::string name;
+    json args = json::object();
+};
+enum class TextCallParse { None, Ok, Malformed };   // None: no tool call text; Malformed: it looks like one but is not usable
+// Only names in `known` are accepted. A JSON reply must be nothing but the call(s), so an answer that merely quotes an
+// example is never run. Parameter values are strings; coerce_text_args fixes the types from the tool's schema.
+TextCallParse parse_text_tool_calls(const std::string & content, const std::vector<std::string> & known,
+                                    std::vector<TextCall> & out);
+// Same, plus each known tool's parameter names. With them, a call that drops the <function=NAME> line entirely
+// ("<tool_call> <parameter=metric>..</parameter> </function>") is read as the one tool whose parameters cover
+// every parameter in the call; it stays Malformed when no tool or more than one tool fits.
+TextCallParse parse_text_tool_calls(const std::string & content, const std::vector<std::string> & known,
+                                    const std::map<std::string, std::vector<std::string>> & params,
+                                    std::vector<TextCall> & out);
+void coerce_text_args(json & args, const json & schema);
+std::string text_call_retry_nudge();
 
 // The lead keeps editing module code itself while the plan has several open items: remind it to delegate.
 struct DelegationState {
@@ -114,6 +152,57 @@ bool read_streak_blocked(const ReadStreak & st, int force);
 // Record a call. Returns Nudge / Force on the call that reaches the threshold (0 disables a threshold).
 StreakEvent read_streak_observe(ReadStreak & st, CallKind kind, int nudge, int force);
 std::string read_streak_message(StreakEvent ev, int count);
+
+// ---- Swarm lead delivery ----------------------------------------------------------------------------------
+// A Swarm lead has to deliver: once its workers are done it writes the deliverable from their results first and
+// verifies afterwards. The pieces below are pure so the rules are unit tested with fake tool results.
+
+// After the workers finished (or after repeated empty turns) verification tools are refused until the lead
+// writes a file or answers. `pending` is set by the agent loop and cleared by a successful write.
+struct DeliverState {
+    bool pending = false;
+};
+// True when the tool call is verification or scraping that must wait: web_fetch, web_search, and a shell command
+// that runs curl, wget or sleep. Reading and writing files and the other tools stay available.
+bool deliver_blocks_call(const std::string & tool, const std::string & command);
+// True when the call writes the deliverable: write_file with at least 400 characters. An edit or a small scratch
+// file does not lift the gate.
+bool deliver_satisfied(const std::string & tool, size_t content_chars);
+std::string deliver_blocked_message();
+// The harness message that hands the lead its workers' reports. `reports` is the reports JSON text.
+std::string workers_done_message(const std::string & reports);
+// Nudge after the lead produced empty turns in a row.
+std::string report_now_message();
+
+// Consecutive empty lead turns (no text, no tool call). observe() returns true when `limit` is reached (0 = off)
+// and restarts the count.
+struct EmptyStreak {
+    int count = 0;
+};
+bool empty_streak_observe(EmptyStreak & st, bool empty, int limit);
+
+// ---- Per-URL retry cap ----------------------------------------------------------------------------------
+// A fetch failed when the tool errored, or it "succeeded" with a rate limit stub (local_rate_limited, 429, too
+// many requests) or an empty JS shell (almost no text, or an enable-JavaScript notice).
+bool fetch_stub_text(const std::string & output);   // a rate limit stub or a JavaScript-required notice
+bool fetch_result_failed(bool tool_ok, const std::string & output);
+// http(s) URLs a shell command fetches with curl or wget (empty when the command runs neither).
+std::vector<std::string> fetch_urls_in_command(const std::string & command);
+// Counts failures per URL (fragment, trailing slash and scheme/host case ignored). After `cap` failures the URL is
+// refused with a give-up message. cap 0 = off. Not thread safe: one per agent.
+class UrlGuard {
+public:
+    explicit UrlGuard(int cap = 2) : cap_(cap) {}
+    void set_cap(int cap) { cap_ = cap; }
+    // "" when the fetch may go ahead, else the give-up text for the model.
+    std::string blocked(const std::string & url) const;
+    void record(const std::string & url, bool failed);   // a success clears the count
+    int failures(const std::string & url) const;
+private:
+    int cap_;
+    std::map<std::string, int> fails_;
+};
+std::string normalize_url(const std::string & url);
 
 // A tool result over max_chars keeps its head (2/3) and tail (1/3) with a note naming the recall id that
 // returns the full text (the store keeps it). Unchanged when it fits or max_chars is 0.

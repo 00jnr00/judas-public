@@ -3,6 +3,7 @@
 #include "tools/tools.h"
 
 #include <fnmatch.h>
+#include <glob.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -160,8 +161,25 @@ Launch build_launch(const Config & cfg, const McpServerConfig & s) {
     std::vector<std::string> hide = {h + "/.ssh", h + "/.gnupg", h + "/.config/judas", expand_value(cfg.data_dir)};
     for (const auto & sp : cfg.permissions.secret_paths)
         if (!sp.empty() && sp.find('*') == std::string::npos) hide.push_back(expand_value(sp));
-    for (const std::string & d : hide)
+    // globbed entries: mask what they match now (bwrap cannot mask a pattern); absolute patterns only
+    auto add_matches = [&](const std::string & pat) {
+        if (pat.empty() || pat[0] != '/') return;
+        glob_t g{};
+        if (::glob(pat.c_str(), GLOB_NOSORT, nullptr, &g) == 0)
+            for (size_t i = 0; i < g.gl_pathc && i < 256; i++) hide.push_back(g.gl_pathv[i]);
+        globfree(&g);
+    };
+    for (const auto & dp : cfg.permissions.deny_paths) {
+        if (dp.empty()) continue;
+        if (dp.find_first_of("*?[") == std::string::npos) hide.push_back(expand_value(dp));
+        else add_matches(expand_value(dp));
+    }
+    for (const auto & sp : cfg.permissions.secret_paths)
+        if (!sp.empty() && sp.find_first_of("*?[") != std::string::npos) add_matches(expand_value(sp));
+    for (const std::string & d : hide) {
         if (fs::is_directory(d, ec)) bargv.insert(bargv.end(), {"--tmpfs", d});
+        else if (fs::is_regular_file(d, ec)) bargv.insert(bargv.end(), {"--ro-bind", "/dev/null", d});   // a secret file reads as empty
+    }
     // Many tools want a cache dir; give them a throwaway one instead of the real one.
     if (fs::is_directory(h + "/.cache", ec)) bargv.insert(bargv.end(), {"--tmpfs", h + "/.cache"});
     if (!cwd.empty()) bargv.insert(bargv.end(), {"--chdir", cwd});

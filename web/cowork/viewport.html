@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Model</title></head>
+<body>
+<!-- Engineering viewport: hosts the built-in 3D viewer (vendor/artifacts/viewer3d.js) for ?src=<stl url>&dark=0|1.
+     The viewer picks its colors from prefers-color-scheme, so the page reports the app skin's choice instead. -->
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  document.body.dataset.model = q.get("src") || "";
+  var dark = q.get("dark") === "1", real = window.matchMedia.bind(window);
+  window.matchMedia = function (s) {
+    if (/prefers-color-scheme:\s*dark/.test(s)) return { matches: dark, media: s, addEventListener: function () {}, removeEventListener: function () {}, addListener: function () {}, removeListener: function () {} };
+    return real(s);
+  };
+})();
+</script>
+<script type="importmap">{"imports":{"three":"/vendor/artifacts/three/three.module.min.js","three/addons/":"/vendor/artifacts/three/"}}</script>
+<script type="module" src="/vendor/artifacts/viewer3d.js"></script>
+</body></html>

@@ -12,17 +12,26 @@
 #include "channels/channels.h"
 #include "coach/coach.h"
 #include "context/compactor.h"
+#include "health/health.h"
 #include "hooks/hooks.h"
 #include "learning/review.h"
+#include "tutor/learn_store.h"
 #include "mcp/filter.h"
 #include "mcp/manager.h"
 #include "skills/skill_tools.h"
 #include "skills/skills.h"
 #include "skills/usage.h"
+#include "cad/cad_tools.h"
 #include "tools/memory_tools.h"
 #include "tutor/tutor.h"
 #include "tools/swarm_tools.h"
 #include "tools/session_tools.h"
+#include "tools/project_tools.h"
+#include "tools/location_tools.h"
+#include "projects/projects.h"
+#include "tools/artifact_tools.h"
+#include "cowork/cowork.h"
+#include "tools/task_tools.h"
 #ifdef JUDAS_MACH12
 #include "mach12/mach12_tools.h"
 #endif
@@ -33,6 +42,7 @@
 #include <set>
 
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <ctime>
 #include <deque>
@@ -47,6 +57,21 @@ const char * version();
 namespace fs = std::filesystem;
 
 namespace {
+
+// Appended to every non-review agent's prompt in an Engineering-mode session.
+const char * ENG_PROMPT = R"ENG(Engineering mode: you are doing real mechanical engineering work for an engineer who will read your output critically. Peer level; do not explain fundamentals.
+Method, in order:
+1. Requirements. Restate the goal as numbers: loads, speeds, temperatures, envelope, material, process, tolerances, target cost. List every assumption and mark each one as given or assumed. If a missing number would change the design, ask once; otherwise assume a sensible value, say so, and carry on.
+2. First-principles calculation. Write each formula, then the substituted numbers with units, then the result with units. Use python through the shell for anything past trivial arithmetic (print the inputs and the results). Check every result: units, order of magnitude, a sanity bound, a safety factor. Never trust a number you did not compute or read from a source you name. Record each result that the design relies on with calc_record (name, expression, value, unit, note) so it lands in the session's calc sheet. Write the expression as the formula, then '=' and the substituted numbers only (units go in unit and note), so Judas checks the arithmetic; a value that does not match is refused. After every CAD feature, compare the measured volume with your hand calculation for that feature (for a through hole: pi*r^2*thickness of the face it goes through); a gap over 1% means the feature landed on the wrong face or the wrong size, so undo and fix it before going on.
+3. Sketch, then model. Decide the geometry on paper (dimensions, datums, features) before touching CAD. Use the CAD tools when they are listed (cad_state first, then cad_sketch, cad_feature, cad_param). If no cad_* tools are listed, this build has no CAD kernel: say so, give dimensioned geometry as text instead, and never describe a model you did not build. Put key dimensions in named parameters so they can change in one place. Millimeters and degrees.
+4. Check it. Export with cad_export to a new file under the project's artifacts folder. Measure with cad_measure and compare to the requirement. When a render tool (artifact_render) is available, render the part and actually inspect the image: is it the shape you meant, are holes, walls and fillets where the numbers say? Without one, say that you could not inspect it visually. Fix and repeat; do not stop at the first model that builds.
+5. Write the artifacts. Save results into the project's artifacts/ folder with the normal file tools (create it if missing; renders already go to artifacts/renders/): design notes and calc sheets as markdown, reports as self-contained HTML (inline CSS, no scripts), tables as csv. A design note has: requirements, assumptions, calculations, geometry decisions, the render, open risks, next steps. Reference renders by file name. Anything you rely on from a file or a measurement, cite by path.
+Rules:
+- Never claim a test, simulation, measurement or result you did not run. A calculation is an estimate, not a test; say which it is. No "zero failures", "verified" or "validated" unless you ran the check in this session and can show it.
+- Report failures and dead ends in the notes, not only the final design.
+- Only one agent drives the CAD (the CAD backend keeps one live model); workers do calculations, research, notes and reviews and never edit the model unless the lead hands CAD to exactly one of them.
+- Never delete or overwrite saved projects; never export over an existing file.
+- Proprietary design files stay on this machine: do not send their content to web_fetch or search queries.)ENG";
 
 // Appended to the lead's prompt in a Swarm-mode session.
 const char * SWARM_PROMPT = R"(Swarm mode: bulk work is done by a swarm of small, fast models on the CPU through the swarm_map tool.
@@ -71,6 +96,26 @@ const char * TEAM_LEAD_PROMPT = R"(Role: team lead. The session lead gave your t
 - Members see the brief and house rules pinned by the harness; your assignment only needs the piece itself (files, items, output path).
 - If a member's report is wrong or incomplete, team_assign it again with what to fix.
 - Do the merge yourself; keep your own reading to what the merge needs.)";
+
+const char * RICH_PROMPT = R"RICH(Rich replies. The chat shows photos, color swatches, cards and checklists; use them instead of describing.
+- Color: whenever you name, pick, guess or compare colors, include a swatch block (1 to 4 colors, one "- name:" item each). Pick the color yourself; this example only shows the format:
+```swatch
+- name: Mustard
+  hex: #D4A017
+  note: one short line on why
+```
+- "Show me", "what does X look like", "an example of X": find a real photo. Call web_search with category "images", then show_image with an img_src URL, and paste the ![caption](/api/attachments/ID) line it returns into your reply. Never make pictures with code or scripts, and never write scratch files into the home directory for visuals.
+- Products, places, links, options: one cards block. Take image from a search result (img_src) or a show_image id; never invent URLs.
+```cards
+- title: Sony WH-1000XM5
+  url: https://example.com/xm5
+  image: /api/attachments/0123456789abcdef
+  price: $299
+  badge: Top pick
+  note: Best noise cancelling
+```
+- Steps and to-dos: "- [ ] item" lines make a tickable checklist.
+- The user sees an image only through show_image or a cards image. view_image is for you alone.)RICH";
 
 const char * BASE_PROMPT = R"(You are Judas, a helpful assistant and agent running locally on the user's own machine.
 Nothing the user shares leaves this computer.
@@ -99,7 +144,7 @@ Files the user attaches:
   it, describe only what is there, and say when something is too small or blurry to read. When a note says the
   model cannot see the image, work from the OCR text given and say that you could not see the picture itself.
 - Scanned PDF pages arrive as page images in order; read them as one document.
-- view_image shows you an image file on disk; screenshot shows you the user's screen (ask first unless asked).
+- view_image shows you an image file on disk (the user does not see it); screenshot shows you the user's screen (ask first unless asked).
 
 Working with tools:
 - Look before you act. Read files before editing them. Prefer edit_file over rewriting whole files.
@@ -193,6 +238,9 @@ bool review_tool_allowed(const std::string & name) {
 
 }  // namespace
 
+const char * rich_output_prompt() { return RICH_PROMPT; }
+const char * engineering_prompt() { return ENG_PROMPT; }
+
 std::map<std::string, Role> load_roles(const Config & cfg) {
     std::map<std::string, Role> roles;
     roles["lead"] = {"lead", "Owns the request, plans, spawns workers, verifies", LEAD_PROMPT, {}, 0, -1};
@@ -247,9 +295,29 @@ struct AgentManager::Impl {
         std::string plan;        // the agent's running checklist, kept outside the chat so it survives compaction
         std::string reason;      // why the last turn paused or failed (empty otherwise)
         bool review = false;     // hidden background-review agent: no events, no hooks, restricted tools
+        // Review agents only: the tool schemas the lead advertises. The chat template renders the tool list at the
+        // top of the system turn, so a different list changes the very first tokens and the engine cannot reuse
+        // the lead's KV. The review advertises the lead's list; execution stays restricted (review_tool_allowed).
+        std::vector<const Tool *> advertise;
         std::vector<std::string> review_writes;  // successful memory/skill writes, for the review event summary
+        // Review agents only. A review is created queued (row.status "queued", no thread) and starts when no
+        // user-facing agent is running. A user turn preempts it: it is requeued from review_base.
+        std::vector<ChatMessage> review_base;    // the lead's history plus the review prompt, kept for a requeue
+        std::string review_prompt_text;
+        long long review_seq = 0;                // queue order (lowest first)
+        long long queued_ms = 0, started_ms = 0;
+        int requeues = 0;
+        int extra_calls = 0;                     // engine calls outside the step loop (compaction), counted as steps
+        bool preempt = false;                    // under mu: the cancel came from a user turn, not a stop
+        bool wall_done = false, wall_hit = false;  // under mu: wall-clock watcher state
+        std::thread wall;
         std::atomic<bool> cancel{false};
         std::set<std::string> delivered;  // child agents whose reports this agent has already received
+        // Swarm lead delivery (policy.h): kept across turns so a resume sees them.
+        DeliverState deliver;     // workers done or empty turns: verification refused until the report is written
+        EmptyStreak empty_streak; // consecutive empty replies
+        bool report_now = false;  // the next resume says "write the report now" instead of "carry on"
+        UrlGuard url_guard;       // failures per URL
         // Swarm teams. team/member/copy are empty for agents outside a team.
         std::string team, member, copy;
         std::string model = "gpu";       // gpu | cpu (runs on `eng`, the swarm instance)
@@ -261,6 +329,7 @@ struct AgentManager::Impl {
         std::string last_text;           // tail of the latest assistant output, for team_read and the UI (under mu)
         double tok_s = 0;                // generation speed of the last model call
         double ctx_pct = -1;             // last prompt's share of this agent's context cap (-1 = unknown)
+        bool wrap_next = false;          // the next turn starts in wrap-up: a plain reply ends it (stalled auto-resume)
         bool pause_req = false;          // a cancel that should leave the agent paused, not killed
         std::deque<std::string> mail;    // team messages delivered at the next model step of a running agent
         std::thread thread;
@@ -298,6 +367,9 @@ struct AgentManager::Impl {
     const Config & cfg;
     Engine & engine;
     Store & store;
+    long long review_seq_counter = 0;   // under mu
+    static constexpr size_t kMaxQueuedReviews = 4;   // queued (not yet started) reviews kept; the oldest is dropped
+    static constexpr int kMaxReviewRequeues = 3;     // user preemptions a review survives before it is dropped
     Journal & journal;
     AttachmentStore attachments;
     std::map<std::string, Role> roles;
@@ -412,14 +484,24 @@ struct AgentManager::Impl {
         }
         register_builtin_tools(tools);
         register_attach_tools(tools);
+        {   // CAD tools exist only when a kernel is compiled in (none today); see src/cad
+            std::string why;
+            register_cad_tools(tools, shared_cad_backend(), &why);
+        }
         register_memory_tools(tools);
         register_learn_tools(tools);
         register_session_tools(tools, store);
+        register_project_tools(tools, store);
+        register_location_tools(tools);
+        register_task_tools(tools, store);
+        register_artifact_tools(tools);
+        cowork::register_cowork_tools(tools, store);
         register_agent_tools();
         register_team_tools();
         register_skill_tool();
         if (cfg.skills.enabled && cfg.skills.manage) register_skill_tools(tools, skills, usage.get());
         if (cfg.swarm.enabled) register_swarm_tool(tools);
+        if (cfg.health.enabled) health::register_health_tools(tools);
         register_notify_tool();
         register_recall_tool();
         register_plan_tool();
@@ -448,8 +530,15 @@ struct AgentManager::Impl {
                           {"channel", {{"type", "string"}}}}},
                         {"required", {"message"}}};
         t.may_be_irreversible = true;  // it leaves the machine
-        t.run = [this](const json & a, ToolContext &) -> ToolResult {
+        t.run = [this](const json & a, ToolContext & ctx) -> ToolResult {
             Channels ch(cfg.channels);
+            if (ctx.health_tainted) {   // ntfy topics are on a public server; Matrix and command channels stay on our side
+                std::string want = a.value("channel", "");
+                if (want.empty()) want = cfg.channels.def;
+                for (const auto & c : cfg.channels.channels)
+                    if ((want.empty() || c.name == want) && c.kind == "ntfy")
+                        return {false, std::string("notify: ") + kHealthTaintMessage + " (ntfy channel)", false};
+            }
             auto r = ch.send(a.value("channel", ""), a.value("title", "Judas"), a.value("message", ""));
             return {r.ok, r.ok ? "sent" : "notify failed: " + r.error};
         };
@@ -488,9 +577,32 @@ struct AgentManager::Impl {
         return sess && sess->mode == "learn";
     }
 
+    // The session's mode ("" for a review, which has none).
+    std::string session_mode(const Agent & a) {
+        if (a.review) return "";
+        auto sess = store.get_session(a.row.session);
+        return sess ? sess->mode : "";
+    }
+
+    bool is_engineering_session(const Agent & a) { return session_mode(a) == "engineering"; }
+
     std::string system_prompt(const Agent & a) {
         std::string p = replace_all(replace_all(BASE_PROMPT, "{cwd}", a.cwd), "{date}", today());
         p += "\n\n" + a.role.prompt;
+        if (!a.review) {
+            auto sess = store.get_session(a.row.session);
+            if (sess && (sess->mode == "chat" || sess->mode == "cowork")) p += "\n\n" + std::string(RICH_PROMPT);
+        }
+        if (!a.review) {
+            std::string m = session_mode(a);
+            if (m == "engineering") p += "\n\n" + std::string(ENG_PROMPT);
+            else if (m == "design") p += "\n\n" + std::string(cowork::design_prompt());
+            else if (m == "research") p += "\n\n" + std::string(cowork::research_prompt());
+            else if (m == "write") p += "\n\n" + std::string(cowork::write_prompt());
+        }
+        if (!a.review) {
+            if (auto proj = projects::of_session(store, a.row.session)) p += "\n\n" + projects::prompt_block(*proj);
+        }
         if (a.role.name == "lead" && !a.review) {
             auto sess = store.get_session(a.row.session);
             if (sess && sess->mode == "swarm") {
@@ -513,6 +625,12 @@ struct AgentManager::Impl {
             p += "\n\n" + std::string(learn_prompt());
             std::string dg = learn_context_digest(cfg);
             if (!dg.empty()) p += "\n\nLearner context (read only, from their own files):\n\n" + dg;
+            std::string kn;
+            {
+                std::lock_guard lk(learn_topics_mutex());
+                kn = learn_knowledge_digest(learn_topics_load_migrated(cfg), 2500);
+            }
+            if (!kn.empty()) p += "\n\nWhat the learner has already shown they understand (your own earlier notes; build on them, do not reteach):\n\n" + kn;
         }
         return p;
     }
@@ -589,6 +707,8 @@ struct AgentManager::Impl {
         int mcp_seen = 0;
         TeamAccess ta = team_access(a);
         bool learn = is_learn_session(a);
+        std::string smode = session_mode(a);
+        bool lead_only = a.role.name == "lead" && a.row.parent.empty();
         bool sealed;   // coach probe sessions (they carry session extras) must not write global skills or memory
         {
             std::lock_guard lk(extras_mu);
@@ -601,14 +721,24 @@ struct AgentManager::Impl {
 #else
             if (t->name.rfind("mach12_", 0) == 0) continue;
 #endif
+            if (t->name == "health_query" && (a.role.name != "lead" || !a.row.parent.empty())) continue;
+            // projects and location are the lead's view of the user; workers get the folder and instructions already
+            if ((t->name == "project_info" || t->name == "project_list" || t->name == "location_get") &&
+                (a.role.name != "lead" || !a.row.parent.empty()))
+                continue;
+            // scheduling work is the lead's call, made with the user; workers and reviewers never schedule
+            if (t->name.rfind("task_", 0) == 0 && (a.role.name != "lead" || !a.row.parent.empty())) continue;
+            if (t->name.rfind("artifact_", 0) == 0 && (a.role.name != "lead" || !a.row.parent.empty())) continue;
             bool team_tool = t->name.rfind("team_", 0) == 0;
             if (team_tool && !ta.allows(t->name)) continue;
             // cpu members run a small model: read-only tools, team tools and done only
             if (a.model == "cpu" && !a.cpu_fallback && !team_tool && t->name != "done" && t->name != "update_plan" &&
                 std::find(READ_ONLY_TOOLS.begin(), READ_ONLY_TOOLS.end(), t->name) == READ_ONLY_TOOLS.end())
                 continue;
+            // CAD (engineering, design) and the Cowork work-mode tools (own mode, lead only): see cowork::tool_allowed
+            if (!cowork::tool_allowed(t->name, smode, lead_only)) continue;
             // Learn sessions get a read-only toolset; the learner tools exist only there
-            if (learn ? !learn_tool_allowed(t->name) : (t->name == "learner_context" || t->name == "learn_progress")) continue;
+            if (learn ? !(learn_tool_allowed(t->name) || t->name.rfind("artifact_", 0) == 0) : (t->name.rfind("learn", 0) == 0)) continue;
             bool agent_tool = t->name.rfind("spawn_agent", 0) == 0 || t->name == "wait_agents" ||
                               t->name == "send_agent" || t->name == "list_agents";
             if (agent_tool && !can_spawn) continue;
@@ -623,6 +753,41 @@ struct AgentManager::Impl {
             out.push_back(t);
         }
         return out;
+    }
+
+    bool chat_like_session(const std::string & session) {
+        auto sess = store.get_session(session);
+        return sess && (sess->mode == "chat" || sess->mode == "cowork");
+    }
+
+    // Final chat reply: remote markdown images go through show_image (same fetch limits) so they show inline instead
+    // of click-to-load, and /api/attachments/ links to ids that do not exist are dropped. The stored text and the
+    // "message" event carry the fixed text; both web UIs re-read the history when the turn ends, which replaces
+    // the streamed bubble.
+    std::string rewrite_reply_images(Agent * a, const std::string & text) {
+        if (text.find("![") == std::string::npos) return text;
+        if (store.session_health_tainted(a->row.session)) return text;   // fetching a remote image is an outbound request
+        auto fetch = [&](const std::string & url, const std::string & cap) -> std::string {
+            ToolContext ctx;
+            ctx.cwd = a->cwd;
+            ctx.cfg = &cfg;
+            ctx.journal = &journal;
+            ctx.session = a->row.session;
+            ctx.agent = a->row.id;
+            ToolResult r = tools.call("show_image", {{"source", url}, {"caption", cap}}, ctx);
+            if (!r.ok) return "";
+            static const std::string key = "attachment id: ";
+            size_t p = r.output.find(key);
+            if (p == std::string::npos) return "";
+            std::string id = r.output.substr(p + key.size(), 16);
+            return valid_attachment_id(id) ? "/api/attachments/" + id : "";
+        };
+        auto exists = [&](const std::string & id) { return valid_attachment_id(id) && attachments.get(id).has_value(); };
+        try {
+            return fix_reply_images(text, fetch, exists);
+        } catch (...) {
+            return text;
+        }
     }
 
 #ifdef JUDAS_MACH12
@@ -682,11 +847,18 @@ struct AgentManager::Impl {
         a->depth = lead->depth;
         a->cwd = lead->cwd;
         a->review = true;
+        a->advertise = tools_for(*lead);   // same schema block as the lead: keeps the engine's prefix reuse
         a->messages = lead->messages;
         a->messages.push_back({"user", prompt});
+        a->review_base = a->messages;
+        a->review_prompt_text = prompt;
+        a->row.status = "queued";
+        a->queued_ms = now_ms();
+        store.update_agent(a->row);
         Agent * raw = a.get();
         {
             std::lock_guard lk(mu);
+            raw->review_seq = ++review_seq_counter;
             agents[raw->row.id] = std::move(a);
             raw->inbox.push_back(prompt);   // run() sees work; it does not append this one twice
         }
@@ -720,6 +892,8 @@ struct AgentManager::Impl {
     void maybe_start_review(Agent * lead, const TurnOutcome & out) {
         if (!cfg.learning.review || lead->review || !lead->row.parent.empty()) return;
         if (has_extras(lead->row.session)) return;   // coach probe: no background review
+        if (store.session_health_tainted(lead->row.session)) return;   // health data: nothing learned from this chat
+        if (store.session_location_used(lead->row.session)) return;   // a position is in this chat: nothing learned from it
         std::string prompt;
         {
             std::lock_guard lk(mu);
@@ -748,23 +922,118 @@ struct AgentManager::Impl {
             sessions[lead->row.session].review.in_flight = false;
             return;
         }
+        // The review waits in the queue; pump_reviews_locked starts it once no user-facing agent is running
+        // (the lead's own run loop calls it as soon as the lead is idle).
+        std::vector<Agent *> dropped;
         {
             std::lock_guard lk(mu);
             auto & s = sessions[lead->row.session];
             s.review_id = review->row.id;
-            // The user may have sent a new turn while this agent was being built.
-            if (!lead->inbox.empty() || lead->cancel) review->cancel = true;
+            if (lead->cancel) {   // a stop arrived while the review was being built: it never queues
+                review->cancel = true;
+                review->inbox.clear();
+                review->row.status = "killed";
+                review->row.result = "dropped: session stopped";
+                review->row.updated_ms = now_ms();
+                store.update_agent(review->row);
+                std::vector<ChatMessage>().swap(review->messages);
+                std::vector<ChatMessage>().swap(review->review_base);
+                s.review_id.clear();
+                s.review.in_flight = false;
+            }
+            for (;;) {
+                Agent * oldest = nullptr;
+                size_t n = 0;
+                for (auto & [id, ag] : agents)
+                    if (ag->review && !ag->running && ag->row.status == "queued") {
+                        n++;
+                        if (!oldest || ag->review_seq < oldest->review_seq) oldest = ag.get();
+                    }
+                if (n <= kMaxQueuedReviews || !oldest) break;
+                oldest->row.status = "killed";
+                oldest->row.result = "dropped: review queue full";
+                oldest->row.updated_ms = now_ms();
+                oldest->inbox.clear();
+                store.update_agent(oldest->row);
+                std::vector<ChatMessage>().swap(oldest->messages);
+                std::vector<ChatMessage>().swap(oldest->review_base);
+                auto os = sessions.find(oldest->row.session);
+                if (os != sessions.end()) {
+                    if (os->second.review_id == oldest->row.id) os->second.review_id.clear();
+                    os->second.review.in_flight = false;
+                }
+            }
         }
-        start_turn(review);
+    }
+
+    // A user-facing agent is one that is not a hidden review. Caller holds mu.
+    bool user_active_locked() {
+        for (auto & [id, ag] : agents)
+            if (!ag->review && ag->running) return true;
+        return false;
+    }
+    // A user-facing agent is starting or taking a new message: a running review yields the model. It is cancelled
+    // and requeued (run() restores it from review_base). Caller holds mu.
+    void preempt_reviews_locked() {
+        for (auto & [id, ag] : agents)
+            if (ag->review && ag->running) {
+                ag->preempt = true;
+                ag->cancel = true;
+            }
+    }
+    // Start the oldest queued review if nothing user-facing is running and no review is running. mu held.
+    void pump_reviews_locked() {
+        if (stopping) return;
+        Agent * next = nullptr;
+        for (auto & [id, ag] : agents) {
+            if (!ag->review) {
+                if (ag->running) return;
+                continue;
+            }
+            if (ag->running) return;
+            if (ag->row.status != "queued" || ag->inbox.empty()) continue;
+            if (ag->thread.joinable() && ag->thread.get_id() == std::this_thread::get_id()) continue;
+            if (!next || ag->review_seq < next->review_seq) next = ag.get();
+        }
+        if (next) start_turn_locked(next);
+    }
+    void start_wall(Agent * a) {
+        int secs = cfg.learning.review_max_wall_s;
+        {
+            std::lock_guard lk(mu);
+            a->wall_done = false;
+            a->wall_hit = false;
+        }
+        if (secs <= 0) return;
+        a->wall = std::thread([this, a, secs] {
+            std::unique_lock lk(mu);
+            if (!cv.wait_for(lk, std::chrono::seconds(secs), [&] { return a->wall_done || stopping; })) {
+                a->wall_hit = true;
+                a->cancel = true;   // the engine call and the step loop both watch this
+            }
+        });
+    }
+    void stop_wall(Agent * a) {
+        {
+            std::lock_guard lk(mu);
+            a->wall_done = true;
+        }
+        cv.notify_all();
+        if (a->wall.joinable()) a->wall.join();
     }
 
     // Start a turn on the agent's own thread if it is idle. Caller holds no lock.
     void start_turn(Agent * a) {
         std::lock_guard lk(mu);
+        start_turn_locked(a);
+    }
+    void start_turn_locked(Agent * a) {
         if (a->running || stopping) return;
+        if (!a->review) preempt_reviews_locked();   // a user-facing agent never shares the model with a review
         a->running = true;
         a->row.status = "running";
         a->row.updated_ms = now_ms();
+        if (a->review) a->started_ms = now_ms();
         store.update_agent(a->row);  // the server's /events looks at the stored status
         if (a->thread.joinable()) a->thread.join();
         a->thread = std::thread([this, a] { run(a); });
@@ -791,8 +1060,7 @@ struct AgentManager::Impl {
         d.content = q.text + q.suffix;
         s->second.request = d.content;
         s->second.busy = true;
-        for (auto & [id, ag] : agents)
-            if (ag->row.session == a->row.session && ag->review) { ag->cancel = true; ag->inbox.clear(); }
+        preempt_reviews_locked();
         a->inbox.push_back(d.content);
         return d;
     }
@@ -813,13 +1081,14 @@ struct AgentManager::Impl {
                 if (a->inbox.empty()) dq = drain_queue_locked(a);   // a message queued after the last drain
                 if (a->inbox.empty() || stopping || (a->cancel && a->pause_req)) {   // a paused agent keeps its inbox
                     a->running = false;
-                    if (a->review) {
+                    if (a->review && a->row.status != "queued") {
                         auto s = sessions.find(a->row.session);
                         if (s != sessions.end()) {
                             if (s->second.review_id == a->row.id) s->second.review_id.clear();
                             s->second.review.in_flight = false;
                         }
                     }
+                    pump_reviews_locked();   // idle again: the next queued review may take the model
                     break;
                 }
                 input = a->inbox.front();
@@ -834,16 +1103,55 @@ struct AgentManager::Impl {
                 store.add_message(a->row.session, a->row.id, "user", message_to_oai(a->messages.back()));
             }
             bool canceled = a->cancel.load();
-            TurnOutcome out = (a->review && canceled) ? TurnOutcome{"cancelled", "done", ""} : turn(a);
+            if (a->review && !canceled) start_wall(a);
+            TurnOutcome out;
+            if (a->review && canceled) out = TurnOutcome{"cancelled", "done", ""};
+            else {
+                // A bug in one turn (a malformed tool call, a schema the repair code did not expect) fails that turn;
+                // it must never take the whole daemon down with every other session.
+                try {
+                    out = turn(a);
+                } catch (const std::exception & e) {
+                    std::fprintf(stderr, "judas: turn of agent %s failed with an exception: %s\n", a->row.id.c_str(), e.what());
+                    out = TurnOutcome{"", "failed", std::string("internal error: ") + e.what()};
+                }
+            }
             std::string answer = out.answer;
             if (a->review) {
+                stop_wall(a);
                 canceled = a->cancel.load();
+                bool timed_out, preempted;
+                {
+                    std::lock_guard lk(mu);
+                    timed_out = a->wall_hit;
+                    preempted = a->preempt && !stopping;
+                    if (preempted && a->requeues < kMaxReviewRequeues && a->review_writes.empty()) {
+                        // A user turn took the model before the review wrote anything: start over from the saved prefix when
+                        // idle again. A review that already wrote is not replayed (memory_append would duplicate).
+                        a->requeues++;
+                        a->preempt = false;
+                        a->cancel = false;
+                        a->wall_hit = false;
+                        a->messages = a->review_base;
+                        a->inbox.clear();
+                        a->inbox.push_back(a->review_prompt_text);
+                        a->row.status = "queued";
+                        a->row.updated_ms = now_ms();
+                        store.update_agent(a->row);
+                        a->running = false;   // no pump here: this thread must not be the one that restarts itself
+                        break;
+                    }
+                }
                 std::string summary = review_summary(*a, out);
+                if (timed_out)
+                    summary = "stopped at the wall-clock cap (" + std::to_string(cfg.learning.review_max_wall_s) + "s)" +
+                              (a->review_writes.empty() ? "" : "; " + summary);
+                else if (preempted && canceled && a->review_writes.empty()) summary = "dropped: preempted by user turns too often";
                 {
                     std::lock_guard lk(mu);
                     a->row.result = summary;
                     a->row.status = canceled ? "killed" : out.status;
-                    a->reason = canceled ? "cancelled" : out.reason;
+                    a->reason = timed_out ? "wall cap" : canceled ? "cancelled" : out.reason;
                     a->row.updated_ms = now_ms();
                     store.update_agent(a->row);
                     auto s = sessions.find(a->row.session);
@@ -852,9 +1160,11 @@ struct AgentManager::Impl {
                         s->second.review.in_flight = false;
                     }
                 }
-                if (!canceled) emit(event(*a, "review", {{"summary", summary}, {"status", out.status}}));
+                if (!canceled || timed_out)
+                    emit(event(*a, "review", {{"summary", summary}, {"status", timed_out ? "timeout" : out.status}}));
                 // The agent row stays for the session board, but its copy of the lead's history is dead weight.
                 std::vector<ChatMessage>().swap(a->messages);
+                std::vector<ChatMessage>().swap(a->review_base);
                 cv.notify_all();
                 continue;
             }
@@ -957,8 +1267,12 @@ struct AgentManager::Impl {
             r.messages.push_back({"user", "Write the summary now."});
             r.enable_thinking = false;
             r.sampling.max_tokens = 400;
-            r.priority = a->row.parent.empty() ? 0 : 2;
+            r.priority = a->review ? REVIEW_PRIORITY : a->row.parent.empty() ? 0 : 2;
             r.tag = "compact " + a->row.id;
+            if (a->review) {
+                a->extra_calls++;   // a review's summary call is a model step like any other (review_max_steps)
+                return eng_for(a).chat(r, {}, &a->cancel).message.content;
+            }
             return eng_for(a).chat(r).message.content;
         };
         auto recall_ref = [](const ChatMessage & m) { return m.tool_call_id; };  // stored; recall tool fetches it
@@ -1130,6 +1444,7 @@ struct AgentManager::Impl {
         o.reason = reason;
         o.answer = "[paused] " + reason;
         if (!a->plan.empty()) o.answer += "\nPlan:\n" + a->plan;
+        if (a->empty_streak.count > 0) a->report_now = true;   // the resume must not repeat the empty turns
         emit(event(*a, "status", {{"turn_status", "paused"}, {"reason", reason}}));
         return o;
     }
@@ -1166,10 +1481,22 @@ struct AgentManager::Impl {
                                    {"report", c->row.result}});
             }
         }
+        if (is_swarm_session(a)) {
+            a->deliver.pending = true;
+            nudge(a, workers_done_message(reports.dump(2)), "workers done: deliver first");
+            return true;
+        }
         nudge(a, "[harness] Your worker agents have finished; their reports follow. Check their work (run the "
                  "tests), fix or reassign what is wrong, then call done.\n" + reports.dump(2),
               "auto-wait for workers");
         return true;
+    }
+
+    // The lead of a Swarm-mode session (the only agent the delivery rules apply to).
+    bool is_swarm_session(Agent * a) {
+        if (a->review || !a->row.parent.empty()) return false;
+        auto sess = store.get_session(a->row.session);
+        return sess && sess->mode == "swarm";
     }
 
     void nudge(Agent * a, const std::string & text, const std::string & why) {
@@ -1180,10 +1507,12 @@ struct AgentManager::Impl {
     TurnOutcome turn(Agent * a) {
         int max_steps = a->review ? std::max(1, cfg.learning.review_max_steps)
                                   : (a->role.max_steps > 0 ? a->role.max_steps : cfg.agents.max_steps);
-        auto tlist = tools_for(*a);
+        auto tlist = (a->review && !a->advertise.empty()) ? a->advertise : tools_for(*a);
         bool can_spawn = a->depth < cfg.agents.max_depth;
         bool is_lead = a->row.parent.empty();
         TurnState ts;
+        ts.wrapping = a->wrap_next;
+        a->wrap_next = false;
         LoopGuard guard(cfg.agents.loop_repeats, cfg.agents.loop_pause_after);
         DelegationState dstate;
         ReadStreak rstreak;
@@ -1191,13 +1520,33 @@ struct AgentManager::Impl {
         if (!a->review)
             if (auto sess = store.get_session(a->row.session)) streak_on = sess->mode != "chat";
         bool forced_compact = false;
+        bool wall_wrapped = false;   // the wall-clock budget ran out: one tool-free step to summarize, then done
+        const auto turn_t0 = std::chrono::steady_clock::now();
+        int text_call_seq = 0;
+        const bool swarm_lead = is_swarm_session(a);
+        bool report_nudged = false;
+        a->url_guard.set_cap(cfg.agents.url_retry_cap);
+        if (swarm_lead && a->report_now) {   // resumed after empty turns: say so first
+            a->report_now = false;
+            a->deliver.pending = true;
+        }
         for (int step = 0;; step++) {
             maybe_compact(a);
             sync_plan(a);
             sync_team(a);
             drain_mail(a);
-            bool last = step >= max_steps;
-            if (last && plan_state(a->plan).open > 0)
+            // compaction calls count as steps; a review's final no-tools call is its last allowed call
+            bool step_limit = step + a->extra_calls + (a->review ? 1 : 0) >= max_steps;
+            if (!wall_wrapped && !step_limit &&
+                wall_budget_exceeded(std::chrono::duration<double>(std::chrono::steady_clock::now() - turn_t0).count(),
+                                     cfg.agents.turn_wall_s)) {
+                wall_wrapped = true;
+                nudge(a, wrap_up_message("The time budget for this turn (" + std::to_string(cfg.agents.turn_wall_s) +
+                                         " s) is used up."),
+                      "turn wall budget");
+            }
+            bool last = step_limit || wall_wrapped;
+            if (step_limit && plan_state(a->plan).open > 0)
                 return paused(a, "step limit (" + std::to_string(max_steps) + ") reached with plan items still open");
             if (!last) note_tool_step(a);   // a model step with tools enabled counts toward the skill nudge
             ChatRequest req;
@@ -1212,7 +1561,7 @@ struct AgentManager::Impl {
                         continue;
                     req.tools.push_back({t->name, t->description, t->parameters});
                 }
-            if (last) req.messages.push_back({"user", "Step limit reached. Answer now with what you have, no tools."});
+            if (step_limit) req.messages.push_back({"user", "Step limit reached. Answer now with what you have, no tools."});
             req.priority = a->review ? REVIEW_PRIORITY : (a->row.parent.empty() ? 0 : a->role.priority);
             req.tag = a->row.role + " " + a->row.id;
             set_activity(a, "queued");
@@ -1254,7 +1603,34 @@ struct AgentManager::Impl {
             }
             ChatMessage msg = res.message;
             msg.role = "assistant";
-            ReplyKind kind = classify_reply(msg.content, !msg.tool_calls.empty(), res.finish_reason);
+            bool text_call_bad = false;
+            if (msg.tool_calls.empty() && !last && res.finish_reason != "length" && !a->cancel.load()) {
+                // A call written as text (<tool_call> or JSON in the reply): run it as a real call when well formed.
+                // It then goes through the same checks as any call (advertised tools, hooks, approvals, shell floor).
+                std::vector<std::string> names;
+                std::map<std::string, std::vector<std::string>> pnames;
+                for (const Tool * t : tlist) {
+                    names.push_back(t->name);
+                    auto & v = pnames[t->name];
+                    if (t->parameters.is_object() && t->parameters.contains("properties") && t->parameters["properties"].is_object())
+                        for (auto & [k, _] : t->parameters["properties"].items()) v.push_back(k);
+                }
+                std::vector<TextCall> parsed;
+                auto pr = parse_text_tool_calls(msg.content, names, pnames, parsed);
+                if (pr == TextCallParse::Ok) {
+                    for (auto & tc : parsed) {
+                        if (const Tool * td = tools.find(tc.name)) coerce_text_args(tc.args, td->parameters);
+                        msg.tool_calls.push_back({"textcall_" + std::to_string(++text_call_seq), tc.name, tc.args.dump()});
+                    }
+                    size_t cut = std::min(msg.content.find("<tool_call>"), msg.content.find("<function="));
+                    msg.content = cut == std::string::npos ? "" : msg.content.substr(0, cut);
+                    emit(event(*a, "status", {{"nudge", "text tool call"}, {"count", (int) parsed.size()}}));
+                } else if (pr == TextCallParse::Malformed) {
+                    text_call_bad = true;
+                }
+            }
+            ReplyKind kind = text_call_bad ? ReplyKind::TextToolCall
+                                           : classify_reply(msg.content, !msg.tool_calls.empty(), res.finish_reason);
             bool cut_tool_call = kind == ReplyKind::Truncated &&
                                  (!msg.tool_calls.empty() || msg.content.find("<tool_call>") != std::string::npos ||
                                   msg.content.find("<function=") != std::string::npos);
@@ -1264,6 +1640,9 @@ struct AgentManager::Impl {
                 msg.reasoning.clear();
                 if (msg.content.size() > 1500) msg.content = msg.content.substr(0, 1500) + "\n[...cut off]";
             }
+            if (msg.tool_calls.empty() && kind != ReplyKind::Truncated && !a->review && a->row.parent.empty() &&
+                chat_like_session(a->row.session))
+                msg.content = rewrite_reply_images(a, msg.content);
             a->messages.push_back(msg);
             // Per-call stats ride along in the stored body (judas_stats; messages_from_oai ignores unknown keys) so the
             // web chat can show a turn footer after a reload, not only while the turn streams.
@@ -1279,6 +1658,15 @@ struct AgentManager::Impl {
             if (last) {
                 finish_hooks(a, msg.content);
                 return {msg.content, "done", ""};
+            }
+            if (swarm_lead && kind != ReplyKind::Truncated) {
+                if (empty_streak_observe(a->empty_streak, kind == ReplyKind::Empty && msg.tool_calls.empty(),
+                                         cfg.agents.empty_turn_limit) && !report_nudged) {
+                    report_nudged = true;   // once per turn; more empty replies run into the normal pause
+                    a->deliver.pending = true;
+                    nudge(a, report_now_message(), "empty turns: write the report now");
+                    continue;
+                }
             }
             if (msg.tool_calls.empty() && kind != ReplyKind::Truncated && auto_wait_children(a)) continue;
             Decision d = should_continue(kind, plan_state(a->plan), ts, cfg.agents.max_auto_continues,
@@ -1318,7 +1706,12 @@ struct AgentManager::Impl {
                 ctx.journal = &journal;
                 ctx.session = a->row.session;
                 ctx.agent = a->row.id;
+                ctx.mode = session_mode(*a);
                 ctx.autonomous = a->review || has_extras(a->row.session);   // probe sessions: no user to consent
+                ctx.health_tainted = ctx.no_network = store.session_health_tainted(a->row.session);
+                ctx.taint_session = [this, sid = a->row.session] { store.set_session_health_tainted(sid); };
+                ctx.location_used = store.session_location_used(a->row.session);
+                ctx.note_location = [this, sid = a->row.session] { store.set_session_location_used(sid); };
                 ctx.progress = [this, a](const json & d) { emit(event(*a, "swarm", d)); };
                 ctx.checkpoint = journal.begin(a->row.session, a->row.id, label.substr(0, 200));
                 if (!a->review) ctx.approve = [this, a, tool = tc.name](const std::string & what) {
@@ -1341,6 +1734,7 @@ struct AgentManager::Impl {
                 }
                 CallKind ckind = classify_call(tc.name, tc.name == "shell" ? args.value("command", "") : "", writes);
                 ToolResult r;
+                bool ran = false;   // the tool itself ran; a refusal by a policy branch below is not a fetch attempt
                 if (a->cancel) {
                     r = {false, "cancelled", false};
                 } else if (a->review && !review_tool_allowed(tc.name)) {
@@ -1350,6 +1744,11 @@ struct AgentManager::Impl {
                     r = {false, "the tool '" + tc.name + "' is not available to this agent (role " + a->row.role + ")", false};
                 } else if (!hook_block.empty()) {
                     r = {false, hook_block, false};
+                } else if (swarm_lead && a->deliver.pending &&
+                           deliver_blocks_call(tc.name, tc.name == "shell" ? args.value("command", "") : "")) {
+                    r = {false, deliver_blocked_message(), false};
+                } else if (std::string give_up = fetch_give_up(a, tc.name, args); !give_up.empty()) {
+                    r = {false, give_up, false};
                 } else if (streak_on && ckind == CallKind::Read &&
                            read_streak_blocked(rstreak, cfg.agents.read_streak_force)) {
                     r = {false, "Refused: " + std::to_string(rstreak.count) +
@@ -1362,11 +1761,20 @@ struct AgentManager::Impl {
                                     "smaller edits.", false};
                 } else {
                     r = tools.call(tc.name, args, ctx);
+                    ran = true;
                     if (!a->review)
                         hooks.run(writes ? "post-edit" : "post-tool", selector,
                                   {{"tool", tc.name}, {"ok", r.ok}, {"session", a->row.session}, {"cwd", a->cwd}});
                 }
                 journal.commit(ctx.checkpoint);
+                if (ran) record_fetch(a, tc.name, args, r);
+                if (swarm_lead && ran && r.ok &&
+                    deliver_satisfied(tc.name, args.value("content", std::string()).size()))
+                    a->deliver.pending = false;   // the report exists: verify now
+                if (swarm_lead && tc.name == "wait_agents" && r.ok && !has_live_children(*a)) {
+                    a->deliver.pending = true;
+                    notes.push_back(workers_done_message("(the reports are in the wait_agents result above)"));
+                }
                 if (r.ok && writes && !a->review) record_git_step(*a, label.substr(0, 120), args);
                 ChatMessage tm;
                 tm.role = "tool";
@@ -1384,6 +1792,7 @@ struct AgentManager::Impl {
                 a->messages.push_back(tm);
                 emit(event(*a, "tool_result", {{"id", tc.id}, {"name", tc.name}, {"ok", r.ok},
                                                {"output", r.output.substr(0, 4000)}, {"checkpoint", ctx.checkpoint}}));
+                if (!a->review) cowork_pings(a, ctx.mode, tc.name, args, r, ran);
 
                 if (a->review && r.ok) {
                     if (tc.name == "memory_append") {
@@ -1403,6 +1812,8 @@ struct AgentManager::Impl {
                 if (tc.name == "done" && r.ok) {
                     finished = true;
                     finish_summary = args.value("summary", "");
+                } else if (r.ok && learn_ends_turn(tc.name)) {
+                    finished = true;   // the learner has to answer before anything else happens
                 }
                 static const std::set<std::string> repeat_ok = {"done", "update_plan", "wait_agents", "list_agents",
                                                                 "recall", "note_context", "drop_context"};
@@ -1424,11 +1835,75 @@ struct AgentManager::Impl {
                 return {finish_summary, "done", ""};
             }
             if (loop_pause)
-                return paused(a, "looping: the same " + loop_warn.tool + " " +
-                                     (loop_warn.kind == "call" ? "call" : "error") + " kept repeating after a warning");
+                return paused(a, loop_pause_reason(loop_warn));
             if (loop_warn.verdict == LoopGuard::Verdict::Warn) notes.push_back(loop_nudge(loop_warn, can_spawn));
             for (const auto & n : notes) nudge(a, n, "harness");
         }
+    }
+
+    // URLs a web_fetch or a shell curl/wget call would fetch.
+    static std::vector<std::string> call_urls(const std::string & tool, const json & args) {
+        if (tool == "web_fetch" && args.contains("url") && args["url"].is_string()) return {args["url"].get<std::string>()};
+        if (tool == "shell" && args.contains("command") && args["command"].is_string())
+            return fetch_urls_in_command(args["command"].get<std::string>());
+        return {};
+    }
+    std::string fetch_give_up(Agent * a, const std::string & tool, const json & args) {
+        for (auto & u : call_urls(tool, args))
+            if (std::string m = a->url_guard.blocked(u); !m.empty()) return m;
+        return "";
+    }
+    // Cowork layouts refresh from pings on the session stream: {"type":"calcs"|"sources"|"suggestions"|"cad"|"artifact"}.
+    // A web_fetch in a research session is also recorded as an automatic source.
+    void cowork_pings(Agent * a, const std::string & mode, const std::string & tool, const json & args, const ToolResult & r, bool ran) {
+        if (!ran || !r.ok) return;
+        auto ping = [&](const char * type, json d = json::object()) { emit(event(*a, type, d)); };
+        if (tool == "calc_record") ping("calcs");
+        else if (tool == "source_add") ping("sources");
+        else if (tool == "doc_suggest") ping("suggestions");
+        else if (tool == "web_fetch" && mode == "research") {
+            std::string url = args.value("url", "");
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                SourceRow s;
+                s.url = url;
+                s.title = fetched_title(r.output);
+                s.autoadded = true;
+                bool added = false;
+                store.add_source(a->row.session, s, &added);
+                if (added) ping("sources");
+            }
+        } else if (tool == "cad_new_part" || tool == "cad_sketch" || tool == "cad_feature" || tool == "cad_param" || tool == "cad_undo") ping("cad");
+        else if (tool == "artifact_create" || tool == "artifact_update") {
+            std::string id = args.value("id", "");
+            if (id.empty()) {
+                const std::string key = "Created artifact ";
+                size_t p = r.output.find(key);
+                if (p != std::string::npos) id = r.output.substr(p + key.size(), r.output.find_first_of(" \n", p + key.size()) - (p + key.size()));
+            }
+            ping("artifact", {{"id", id}});
+        }
+    }
+
+    // A page title when the fetched text starts with one (a "Title:" line or a leading markdown heading), else "".
+    static std::string fetched_title(const std::string & out) {
+        std::istringstream in(out);
+        std::string line;
+        for (int i = 0; i < 8 && std::getline(in, line); i++) {
+            std::string l = line;
+            while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+            if (l.rfind("Title:", 0) == 0) { l = l.substr(6); while (!l.empty() && l[0] == ' ') l.erase(0, 1); return l.substr(0, 200); }
+            if (l.rfind("# ", 0) == 0) return l.substr(2, 200);
+        }
+        return "";
+    }
+
+    void record_fetch(Agent * a, const std::string & tool, const json & args, const ToolResult & r) {
+        if (r.output.rfind("Give up on this URL", 0) == 0) return;   // the refusal itself is not a new failure
+        auto urls = call_urls(tool, args);
+        if (urls.empty()) return;
+        // A shell command is judged by exit status and stub text only: a quiet curl -o file is not a failure.
+        bool failed = tool == "shell" ? (!r.ok || fetch_stub_text(r.output)) : fetch_result_failed(r.ok, r.output);
+        for (auto & u : urls) a->url_guard.record(u, failed);
     }
 
     void finish_hooks(Agent * a, const std::string & answer) {
@@ -2348,16 +2823,37 @@ std::string AgentManager::submit(const std::string & session_id, const std::stri
         for (auto & [id, ag] : I.agents)
             if (ag->row.session == sid) ag->cancel = false;
         // ... but a turn the user just sent always cancels an in-flight background review
-        for (auto & [id, ag] : I.agents)
-            if (ag->row.session == sid && ag->review) {
-                ag->cancel = true;
-                ag->inbox.clear();
-            }
+        I.preempt_reviews_locked();
         lead->inbox.push_back(user_message);
     }
     I.emit(I.event(*lead, "spawned", {{"task", user_message}, {"role", "lead"}}));
     I.start_turn(lead);
     return sid;
+}
+
+json AgentManager::review_state() const {
+    auto & I = *impl_;
+    std::lock_guard lk(I.mu);
+    json queued = json::array(), running = json::array();
+    std::vector<Impl::Agent *> q;
+    for (auto & [id, a] : I.agents) {
+        if (!a->review) continue;
+        if (a->running) {
+            long long left = -1;
+            if (I.cfg.learning.review_max_wall_s > 0)
+                left = std::max<long long>(0, I.cfg.learning.review_max_wall_s - (now_ms() - a->started_ms) / 1000);
+            running.push_back({{"id", id}, {"session", a->row.session}, {"started_ms", a->started_ms},
+                               {"wall_s_left", left}, {"requeues", a->requeues}});
+        } else if (a->row.status == "queued") {
+            q.push_back(a.get());
+        }
+    }
+    std::sort(q.begin(), q.end(), [](auto * x, auto * y) { return x->review_seq < y->review_seq; });
+    for (auto * a : q)
+        queued.push_back({{"id", a->row.id}, {"session", a->row.session}, {"queued_ms", a->queued_ms},
+                          {"requeues", a->requeues}});
+    return {{"queued", queued}, {"running", running}, {"max_wall_s", I.cfg.learning.review_max_wall_s},
+            {"max_steps", I.cfg.learning.review_max_steps}};
 }
 
 std::string AgentManager::wait_session(const std::string & session_id) {
@@ -2371,7 +2867,7 @@ std::string AgentManager::wait_session(const std::string & session_id) {
     return s == I.sessions.end() ? "" : s->second.last_answer;
 }
 
-void AgentManager::cancel(const std::string & session_id) {
+void AgentManager::cancel(const std::string & session_id, bool drop_queue) {
     auto & I = *impl_;
     Impl::Agent * lead = nullptr;
     bool had = false;
@@ -2381,9 +2877,25 @@ void AgentManager::cancel(const std::string & session_id) {
             if (a->row.session == session_id) {
                 a->cancel = true;
                 a->inbox.clear();
+                if (a->review) {
+                    a->preempt = false;   // a stop is not a preemption: the review is dropped, not requeued
+                    if (!a->running && a->row.status == "queued") {   // never started: drop it now
+                        a->row.status = "killed";
+                        a->row.result = "dropped: session stopped";
+                        a->row.updated_ms = now_ms();
+                        I.store.update_agent(a->row);
+                        std::vector<ChatMessage>().swap(a->messages);
+                        std::vector<ChatMessage>().swap(a->review_base);
+                        auto rs = I.sessions.find(a->row.session);
+                        if (rs != I.sessions.end()) {
+                            if (rs->second.review_id == a->row.id) rs->second.review_id.clear();
+                            rs->second.review.in_flight = false;
+                        }
+                    }
+                }
             }
         auto s = I.sessions.find(session_id);
-        if (s != I.sessions.end()) {
+        if (s != I.sessions.end() && drop_queue) {
             had = !s->second.queued.empty();
             s->second.queued.clear();
             auto it = I.agents.find(s->second.lead);
@@ -2392,6 +2904,53 @@ void AgentManager::cancel(const std::string & session_id) {
         I.cv.notify_all();
     }
     if (had && lead) I.emit(I.event(*lead, "queue", {{"queued", json::array()}}));
+}
+
+std::string AgentManager::interrupt(const std::string & session_id, const std::string & message, const std::string & cwd) {
+    auto & I = *impl_;
+    Impl::Agent * lead = nullptr;
+    {
+        std::lock_guard lk(I.mu);
+        auto s = I.sessions.find(session_id);
+        if (s != I.sessions.end()) {
+            auto it = I.agents.find(s->second.lead);
+            if (it != I.agents.end() && it->second->running) lead = it->second.get();
+        }
+    }
+    if (!lead) return submit(session_id, message, cwd);   // nothing running: a plain send
+    cancel(session_id, /*drop_queue=*/false);
+    // submit() clears the cancel flag, so wait for the lead to actually stop first. A model call stops within a
+    // token; a running tool can take longer. After two minutes send anyway.
+    std::thread([this, session_id, message, cwd, lead] {
+        auto & I = *impl_;
+        for (int i = 0; i < 1200; ++i) {
+            {
+                std::lock_guard lk(I.mu);
+                if (I.stopping) return;
+                if (!lead->running) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        submit(session_id, message, cwd);
+    }).detach();
+    return session_id;
+}
+
+bool AgentManager::queue_send_now(const std::string & session_id, const std::string & qid, const std::string & cwd) {
+    auto & I = *impl_;
+    std::string content;
+    {
+        std::lock_guard lk(I.mu);
+        auto s = I.sessions.find(session_id);
+        if (s == I.sessions.end()) return false;
+        auto & dq = s->second.queued;
+        auto it = std::find_if(dq.begin(), dq.end(), [&](const Impl::Session::Queued & x) { return x.id == qid; });
+        if (it == dq.end()) return false;
+        content = it->text + it->suffix;
+    }
+    if (!queue_remove(session_id, qid)) return false;
+    interrupt(session_id, content, cwd);
+    return true;
 }
 
 AgentManager::SubmitResult AgentManager::submit_queued(const std::string & session_id, const std::string & text,
@@ -2512,7 +3071,25 @@ AgentManager::TurnInfo AgentManager::turn_info(const std::string & session_id) c
     return t;
 }
 
-bool AgentManager::resume(const std::string & session_id, const std::string & cwd) {
+bool AgentManager::apply_project(const std::string & session_id, const std::string & cwd) {
+    auto & I = *impl_;
+    std::vector<Impl::Agent *> mine;
+    {
+        std::lock_guard lk(I.mu);
+        for (auto & [id, ag] : I.agents)
+            if (ag->row.session == session_id) {
+                if (ag->running) return false;
+                mine.push_back(ag.get());
+            }
+        for (auto * ag : mine) {
+            if (!cwd.empty()) ag->cwd = cwd;
+            if (!ag->messages.empty() && ag->messages[0].role == "system") ag->messages[0].content = I.system_prompt(*ag);
+        }
+    }
+    return true;
+}
+
+bool AgentManager::resume(const std::string & session_id, const std::string & cwd, bool wrap_up) {
     auto & I = *impl_;
     if (!I.store.get_session(session_id)) return false;
     Impl::Agent * lead = nullptr;
@@ -2531,19 +3108,24 @@ bool AgentManager::resume(const std::string & session_id, const std::string & cw
         std::lock_guard lk(I.mu);
         if (lead->running || lead->row.status != "paused") return false;
         msg = "Resume the task where you paused. Do not start over.";
-        if (!lead->reason.empty()) msg += " You paused because: " + lead->reason + ".";
-        if (!lead->plan.empty()) msg += "\nYour plan so far:\n" + lead->plan;
-        msg += "\nCarry on with the next open item, and finish with done.";
+        bool report_now = lead->report_now;
+        if (report_now) msg = report_now_message();
+        if (wrap_up)
+            msg = wrap_up_message("The last resumes made no progress.") +
+                  " Then call done with that summary." +
+                  (lead->plan.empty() ? "" : "\nYour plan so far:\n" + lead->plan);
+        else if (!report_now) {
+            if (!lead->reason.empty()) msg += " You paused because: " + lead->reason + ".";
+            if (!lead->plan.empty()) msg += "\nYour plan so far:\n" + lead->plan;
+            msg += "\nCarry on with the next open item, and finish with done.";
+        }
         auto & s = I.sessions[session_id];
         s.lead = lead->row.id;
         s.busy = true;
         for (auto & [id, ag] : I.agents)
             if (ag->row.session == session_id) ag->cancel = false;
-        for (auto & [id, ag] : I.agents)
-            if (ag->row.session == session_id && ag->review) {
-                ag->cancel = true;
-                ag->inbox.clear();
-            }
+        I.preempt_reviews_locked();
+        lead->wrap_next = wrap_up;
         lead->inbox.push_back(msg);
     }
     I.emit(I.event(*lead, "spawned", {{"task", msg}, {"role", "lead"}, {"resume", true}}));

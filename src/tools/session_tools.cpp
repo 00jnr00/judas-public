@@ -24,7 +24,7 @@ std::string stamp(long long ms) {
     return buf;
 }
 
-ToolResult t_session_search(const json & a, Store & store) {
+ToolResult t_session_search(const json & a, Store & store, const ToolContext & ctx) {
     std::string query = a.value("query", "");
     if (query.find_first_not_of(" \t\r\n") == std::string::npos)
         return {false, "session_search: query is empty"};
@@ -33,7 +33,7 @@ ToolResult t_session_search(const json & a, Store & store) {
         limit = (int) std::clamp(a["limit"].get<double>(), 1.0, 50.0);
     std::string session = a.contains("session") && a["session"].is_string() ? a["session"].get<std::string>() : "";
 
-    auto hits = store.search_messages(query, limit, session);
+    auto hits = store.search_messages(query, limit, session, false, !ctx.health_tainted);
     if (hits.empty()) return {true, "no matching messages"};
     std::string out;
     for (const auto & h : hits) {
@@ -64,7 +64,7 @@ void register_session_tools(ToolRegistry & reg, Store & store) {
                        {{"type", "string"},
                         {"description", "Session id to search one conversation; default is all sessions"}}}}},
                     {"required", {"query"}}};
-    t.run = [&store](const json & a, ToolContext &) { return t_session_search(a, store); };
+    t.run = [&store](const json & a, ToolContext & ctx) { return t_session_search(a, store, ctx); };
     reg.add(std::move(t));
 }
 

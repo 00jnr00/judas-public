@@ -831,7 +831,24 @@ private:
             }
         }
         r.result.message = from_common(msg);
+        // The chat parser sometimes drops a tool call it cannot match (a slightly off format, or a call right after
+        // the reasoning), leaving no content and no call. Hand the raw call text back as content so the agent's own
+        // text-call recovery can run it or ask for a proper call, instead of the turn ending on an empty reply.
+        if (r.result.message.tool_calls.empty() && r.result.message.content.empty()) {
+            size_t th = r.text.rfind("</think>");
+            std::string after = th == std::string::npos ? r.text : r.text.substr(th + 8);
+            if (after.find("<tool_call>") != std::string::npos || after.find("<function=") != std::string::npos)
+                r.result.message.content = after;
+        }
         if (reason == "stop" && !r.result.message.tool_calls.empty()) r.result.finish_reason = "tool_calls";
+        // An empty answer with no tool call usually means the model wrote something the chat parser dropped
+        // (a call inside the reasoning, an unknown call format). Log the raw tail so it can be diagnosed.
+        if (reason == "stop" && r.result.message.tool_calls.empty() && r.result.message.content.empty()) {
+            std::string tail = r.text.size() > 700 ? r.text.substr(r.text.size() - 700) : r.text;
+            for (char & ch : tail)
+                if (ch == '\n') ch = ' ';
+            std::fprintf(stderr, "engine: empty reply (%zu tokens), raw tail: %s\n", r.generated.size(), tail.c_str());
+        }
         total_completion_ += r.generated.size();
         total_prompt_ += r.prompt_base - std::min<size_t>(r.prompt_base, r.result.cached_tokens);
         total_requests_++;

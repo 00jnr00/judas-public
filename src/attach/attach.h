@@ -3,6 +3,7 @@
 // images and reach a vision model as ChatMessage::images. Contract: docs/ATTACHMENTS.md.
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,6 +38,7 @@ public:
     // Original bytes of an attachment ("" when missing).
     std::string read_bytes(const std::string & id) const;
     std::string dir() const { return dir_; }
+    long long max_bytes() const { return cfg_.attachments.max_bytes; }
 
     // The text a user message carries for an attachment:
     //   image             -> "[[image:ID|name]]"
@@ -57,6 +59,14 @@ struct ImageRef {
     size_t pos = 0, len = 0;   // byte span of the marker in the text
 };
 std::vector<ImageRef> find_image_markers(const std::string & text);
+
+// Post-process a final chat reply so images show inline. For each markdown image ![cap](http(s)://...) (at most
+// `max_fetch`, outside code fences) `fetch(url, cap)` returns the "/api/attachments/ID" path to use, or "" to leave the
+// markdown untouched. For ![cap](/api/attachments/ID) where `exists(ID)` is false the image markup is dropped and the
+// caption stays as plain text.
+std::string fix_reply_images(const std::string & text,
+                             const std::function<std::string(const std::string & url, const std::string & cap)> & fetch,
+                             const std::function<bool(const std::string & id)> & exists, int max_fetch = 4);
 
 // Before a request: for every [[image:ID|name]] in m.content, load the bytes into m.images when `vision`;
 // otherwise replace the marker with "[image: name, not shown: the loaded model has no vision]" plus the

@@ -31,6 +31,16 @@ Patterns that work:
 - Map then reduce: swarm for the per-item pass, the lead for the final synthesis. For very large jobs, a second `swarm_map` over the first pass's notes (grouped) before the lead's final pass.
 - The swarm can be wrong on a single item; the lead spot-checks a few replies against the source before trusting the merge.
 
+## Delivery rules for the lead
+
+A Swarm lead has to hand something over. These rules are enforced by the harness (`src/agent/policy.h`), not left to the prompt:
+
+- **Report first.** When all workers are done (the harness waited for them, or `wait_agents` returned with none left running), the lead gets their results with the instruction to write the deliverable now: `write_file` to the requested path, or the final answer when no path was asked for. Until it has written the report (a `write_file` of at least 400 characters; edits and small scratch files do not count), `web_fetch`, `web_search` and shell commands that run `curl`, `wget` or `sleep` are refused with a message saying so. Reading, writing and every other tool stay available. After the report exists, verification is open again and the lead may refine the report.
+- **Per-URL retry cap.** `web_fetch` calls, and shell `curl` or `wget` calls on the same URL, share one failure count per agent (the URL is compared without its fragment, trailing slash, or scheme and host case). Only calls that actually ran count; a call refused by the report-first gate does not. A call counts as a failure when the tool errors, when the result is a rate limit stub (`local_rate_limited`, 429, too many requests) or an empty JavaScript shell (almost no text, or an enable-JavaScript notice). After `url_retry_cap` failures (default 2) the next attempt on that URL is refused with a "Give up on this URL" result that tells the agent to use what the workers found or another source, and to mark the item unverified. A success clears the count. A shell command is judged by exit status and stub text only, so `curl -o file` with no output is not a failure.
+- **Empty turns.** When the lead replies with nothing (no text, no tool call) `empty_turn_limit` times in a row (default 2), the harness injects "write the report now from what you have" and applies the same fetch and shell refusals. If the turn still pauses on empty replies, auto-resume sends that same message instead of the generic resume text.
+
+Settings, in `[agents]`: `url_retry_cap = 2` (0 turns the cap off) and `empty_turn_limit = 2` (0 turns the empty-turn rule off). The report-first and empty-turn rules apply to the lead of a Swarm-mode session only; the URL cap applies to every agent.
+
 ## Enable it
 
 1. `install.sh` copies `contrib/swarm.toml` to `~/.config/judas/swarm.toml` (only if absent) and the unit to `~/.config/systemd/user/judas-swarm.service` (only if absent). Neither is enabled at login. Check the model path in `swarm.toml`.
