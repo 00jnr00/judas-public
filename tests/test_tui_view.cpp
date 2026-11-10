@@ -200,12 +200,20 @@ int main() {
         StatusInfo si;
         si.model = "big"; si.mode = "code"; si.session = "abcdef1234563456"; si.turn = "running";
         si.kv_used = 12345; si.kv_total = 131072; si.queued = 2; si.tok_s = 42.5; si.pending_msgs = 1;
+        si.active = 1;
         std::string line = strip_ansi(render_status(si, 100, pal));
         CHECK(line.find("big") != std::string::npos && line.find("code") != std::string::npos);
         CHECK(line.find("KV 12.3k/131k") != std::string::npos && line.find("q 2") != std::string::npos);
         CHECK(line.find("42.5 tok/s") != std::string::npos && line.find("abcdef123456") != std::string::npos);
         CHECK(line.find("running (+1 queued)") != std::string::npos);
         CHECK(display_width(line) <= 100);
+        // The rate of the last window is stale once nothing is running.
+        StatusInfo idle = si;
+        idle.active = 0;
+        CHECK(strip_ansi(render_status(idle, 100, pal)).find("tok/s") == std::string::npos);
+        // A decode step that is not returning shows up instead of looking like a quiet turn.
+        idle.stalled_s = 42.4;
+        CHECK(strip_ansi(render_status(idle, 100, pal)).find("stalled 42s") != std::string::npos);
         std::string narrow = strip_ansi(render_status(si, 40, pal));
         CHECK(display_width(narrow) <= 40);
         CHECK(narrow.find("running") != std::string::npos);              // the turn status survives truncation

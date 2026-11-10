@@ -160,7 +160,7 @@ json state_json(const EngineState & s) {
             {"model", s.model}, {"model_path", s.model_path}, {"loaded", s.loaded}, {"hybrid", s.hybrid},
             {"max_agents", s.max_agents}, {"active", s.active}, {"queued", s.queued},
             {"ctx_total", s.ctx_total}, {"ctx_used", s.ctx_used}, {"vram_used_mib", s.vram_used_mib},
-            {"vram_total_mib", s.vram_total_mib}, {"gen_tok_s", s.gen_tok_s}, {"seqs", seqs},
+            {"vram_total_mib", s.vram_total_mib}, {"gen_tok_s", s.gen_tok_s}, {"stalled_s", s.stalled_s}, {"seqs", seqs},
             {"total_prompt_tokens", s.total_prompt_tokens},
             {"total_completion_tokens", s.total_completion_tokens}, {"requests", s.requests}};
 }

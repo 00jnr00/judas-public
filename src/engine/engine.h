@@ -73,6 +73,7 @@ struct EngineState {
     int ctx_total = 0, ctx_used = 0;
     long vram_used_mib = -1, vram_total_mib = -1;
     double gen_tok_s = 0;              // aggregate over the last few seconds
+    double stalled_s = 0;              // how long the current decode/prefill step has been running (0 = idle)
     struct Seq {
         int id;
         std::string tag, phase;        // idle | prefill | generate

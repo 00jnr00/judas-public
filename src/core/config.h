@@ -72,6 +72,8 @@ struct EngineConfig {
     double prefill_duty = 1.0;    // fraction of busy decode steps that may carry a prefill chunk
     int prefill_chunk_busy = 0;   // tokens per chunk while others generate; 0 = follow prefill_chunk
     int prefill_max_wait_ms = 2000;  // priority-0 prefill starvation guard
+    int stall_warn_s = 30;        // log a warning when one decode/prefill step runs this long (0 = off)
+    int stall_abort_s = 300;      // exit(70) when one step runs this long so systemd restarts a wedged engine (0 = off)
     int max_tokens = 8192;        // default generation cap per turn
     std::string park_dir = "/dev/shm/judas";
     int prefix_cache = 4;         // RAM snapshots of shared prompt prefixes (LRU)

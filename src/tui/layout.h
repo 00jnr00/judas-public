@@ -28,6 +28,7 @@ struct StatusInfo {
     long long kv_used = 0, kv_total = 0;
     int queued = 0, active = 0, pending_msgs = 0;
     double tok_s = 0;
+    double stalled_s = 0;
     bool connected = true;
 };
 std::string render_status(const StatusInfo & s, int width, const Palette & pal);

@@ -58,6 +58,40 @@ std::string last_line(const std::string & text) {
     return ltrim(text.substr(start, end - start + 1));
 }
 
+// A finite verb anywhere in a short line means it is a statement, not a bare noun phrase naming the next target.
+bool has_finite_verb(const std::string & text) {
+    static const char * finite[] = {
+        "is", "are", "was", "were", "shows", "show", "showed", "confirms", "confirmed", "gives", "gave", "works",
+        "worked", "passes", "passed", "pass", "looks", "means", "makes", "made", "returns", "returned", "fails",
+        "failed", "fail", "takes", "took", "found", "finds", "has", "have", "had", "matches", "matched", "match",
+        "proves", "proved", "says", "said", "done", "complete", "work", "run", "runs", "ran", "fit", "fits",
+        "remain", "remains", "seem", "seems", "look", "appear", "appears", "belong", "belongs", "matter", "matters",
+        "exist", "exists", "depend", "depends", "include", "includes", "contain", "contains", "cover", "covers",
+        "span", "spans", "weigh", "weighs", "measure", "measures", "cost", "costs", "total", "totals", "add", "adds",
+        "remove", "removes", "help", "helps", "need", "needs", "want", "wants", "allow", "allows", "require",
+        "requires", "use", "uses", "used", "become", "becomes", "came", "come", "comes", "went", "go", "goes",
+        "compiles", "builds", "renders", "opens", "loads", "starts", "finishes", "ends", "begins", "continues",
+        "succeeds", "breaks", "changes", "updates", "improves", "reduces", "increases", "solves", "meets", "keeps",
+        "leaves", "stays", "gets", "puts", "sets", "tells", "asks", "writes", "reads", "checks", "pulls", "fetches"};
+    std::string cur, prev;
+    auto is_finite = [&](const std::string & w) {
+        for (const char * f : finite)
+            if (w == f) return true;
+        return false;
+    };
+    for (char ch : text) {
+        if (std::isalpha((unsigned char) ch) || ch == '\'') {
+            cur += (char) std::tolower((unsigned char) ch);
+        } else if (!cur.empty()) {
+            if (prev != "to" && is_finite(cur)) return true;  // "how to remove X" is an infinitive, not finite
+            prev = cur;
+            cur.clear();
+        }
+    }
+    if (!cur.empty() && prev != "to" && is_finite(cur)) return true;
+    return false;
+}
+
 // True when the sentence starts with the speaker saying what it is about to do, not what it did or what
 // the user could do. Questions and the "Let me know" sign-off are answers, not announcements.
 bool is_announcement(const std::string & sentence) {
@@ -72,9 +106,24 @@ bool is_announcement(const std::string & sentence) {
     static const char * markers[] = {"now, ", "now ", "next, ", "next ", "then, ", "then ", "first, ", "first ",
                                      "finally, ", "finally ", "after that, ", "after that ", "afterwards, ",
                                      "so, ", "ok, ", "okay, ", "alright, "};
+    // Conversational openers the model puts in front of the real sentence. Stripping them lets "Sure, let me
+    // look up X." read as the announcement it is (seen live: the turn paused for 9 minutes after this line).
+    static const char * preambles[] = {"sure, ",   "right, ",       "got it, ",     "great, ",     "good, ",
+                                       "cool, ",   "perfect, ",     "absolutely, ", "of course, ", "certainly, ",
+                                       "well, ",   "yes, ",         "yep, ",        "yeah, ",      "hmm, ",
+                                       "alright then, "};
+    bool sequenced = false;
     for (bool cut = true; cut;) {
         cut = false;
         for (const char * m : markers) {
+            if (!starts_with(l, m)) continue;
+            l = ltrim(l.substr(std::string(m).size()));
+            sequenced = true;
+            cut = true;
+            break;
+        }
+        if (cut) continue;
+        for (const char * m : preambles) {
             if (!starts_with(l, m)) continue;
             l = ltrim(l.substr(std::string(m).size()));
             cut = true;
@@ -91,12 +140,22 @@ bool is_announcement(const std::string & sentence) {
                                      "i'm about to ",  "i am about to ", "i need to ",   "i have to "};
     for (const char * a : actions)
         if (starts_with(l, a)) return true;
+    // "Now the main \"how to remove Activation Lock\" page and the proof-of-ownership route." names the next
+    // thing to open without a verb. A sequencing marker followed by a determiner noun phrase and no finite verb
+    // is a plan fragment, not a finished answer (seen live: the turn paused waiting for a nudge).
+    if (sequenced && !has_finite_verb(l)) {
+        static const char * det[] = {"the ",  "a ",   "an ",   "this ",  "that ",  "these ", "those ",
+                                     "its ",  "my ",  "our ",  "your ",  "their ", "his ",   "her "};
+        for (const char * d : det)
+            if (starts_with(l, d)) return true;
+    }
     // "Showing you a real example now." / "Searching for photos now..." announce work in the progressive form.
     // Only with an explicit "now" or a trailing ellipsis, so a description like "Running the tests shows ..." is
     // not mistaken for a plan.
     static const char * gerunds[] = {"showing ", "searching ", "looking ", "pulling ",  "fetching ", "grabbing ",
                                      "finding ", "getting ",   "checking ", "opening ", "loading ",  "starting ",
-                                     "reading ", "running ",   "writing ",  "building ", "creating ", "generating "};
+                                     "reading ", "running ",   "writing ",  "building ", "creating ", "generating ",
+                                     "researching ", "browsing ", "reviewing ", "verifying ", "confirming "};
     std::string t = l;
     while (!t.empty() && (t.back() == '.' || t.back() == '!' || std::isspace((unsigned char) t.back()))) t.pop_back();
     bool soon = t.size() >= 4 && (t.compare(t.size() - 4, 4, " now") == 0 || l.find("...") != std::string::npos ||

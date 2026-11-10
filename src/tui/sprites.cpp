@@ -193,7 +193,7 @@ std::vector<std::string> Companions::render(double now, bool running, const std:
         {"idle", "resting"}, {"think", "thinking"}, {"work", "working"}, {"happy", "all done"}, {"sad", "something broke"}};
     std::string text = label.at(st);
     if ((int) text.size() > pw) text = truncate_width(text, pw);
-    int pad = std::max(0, pw - (int) text.size());
+    int pad = std::max(0, pw - display_width(text));
     std::string status = std::string(pad / 2, ' ') + dim + text + reset + std::string(pad - pad / 2, ' ');
     rows.push_back(status);
     return rows;

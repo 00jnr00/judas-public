@@ -34,6 +34,13 @@ static void test_classify() {
 
 static void test_announce() {
     CHECK(classify_reply("Now let me spawn 6 workers, one per module. Each gets the house rules and its module's function specs.", false, "stop") == ReplyKind::Announce);
+    // Conversational openers must not hide the plan (seen live: "Sure, let me look up ..." paused the turn).
+    CHECK(classify_reply("Sure, let me look up the Activation Lock removal process for Apple Watch.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Right, researching it now.", false, "stop") == ReplyKind::Announce);
+    // A sequencing marker followed by a bare noun phrase names the next target (seen live: the turn paused there).
+    CHECK(classify_reply("Now the main \"how to remove Activation Lock\" page and the proof-of-ownership route.", false, "stop") == ReplyKind::Announce);
+    CHECK(classify_reply("Now the design is complete.", false, "stop") != ReplyKind::Announce);
+    CHECK(classify_reply("Now the tests pass.", false, "stop") != ReplyKind::Announce);
     CHECK(classify_reply("All six modules pass. Let me know if you want more tests.", false, "stop") != ReplyKind::Announce);
     CHECK(classify_reply("My guess is **deep teal**, calm and precise. Showing you a real example now.", false, "stop") == ReplyKind::Announce);
     CHECK(classify_reply("Searching for photos...", false, "stop") == ReplyKind::Announce);

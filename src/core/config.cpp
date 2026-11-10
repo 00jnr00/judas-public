@@ -303,6 +303,8 @@ void apply_file(Config & c, const std::string & file) {
                 else if (e == "prefill_duty") c.engine.prefill_duty = get_double(r, full, ev);
                 else if (e == "prefill_chunk_busy") c.engine.prefill_chunk_busy = get_int(r, full, ev);
                 else if (e == "prefill_max_wait_ms") c.engine.prefill_max_wait_ms = get_int(r, full, ev);
+                else if (e == "stall_warn_s") c.engine.stall_warn_s = get_int(r, full, ev);
+                else if (e == "stall_abort_s") c.engine.stall_abort_s = get_int(r, full, ev);
                 else if (e == "max_tokens") c.engine.max_tokens = get_int(r, full, ev);
                 else if (e == "park_dir") c.engine.park_dir = get_str(r, full, ev);
                 else if (e == "prefix_cache") c.engine.prefix_cache = get_int(r, full, ev);
@@ -903,6 +905,14 @@ std::vector<std::string> validate_config(const Config & cfg) {
         p.push_back("engine.prefill_chunk_busy must be >= 0, got " + std::to_string(cfg.engine.prefill_chunk_busy));
     if (cfg.engine.prefill_max_wait_ms < 0)
         p.push_back("engine.prefill_max_wait_ms must be >= 0, got " + std::to_string(cfg.engine.prefill_max_wait_ms));
+    if (cfg.engine.stall_warn_s < 0)
+        p.push_back("engine.stall_warn_s must be >= 0, got " + std::to_string(cfg.engine.stall_warn_s));
+    if (cfg.engine.stall_abort_s < 0)
+        p.push_back("engine.stall_abort_s must be >= 0, got " + std::to_string(cfg.engine.stall_abort_s));
+    if (cfg.engine.stall_abort_s > 0 && cfg.engine.stall_warn_s > 0 &&
+        cfg.engine.stall_abort_s < cfg.engine.stall_warn_s)
+        p.push_back("engine.stall_abort_s (" + std::to_string(cfg.engine.stall_abort_s) +
+                    ") must be at least stall_warn_s (" + std::to_string(cfg.engine.stall_warn_s) + ")");
     const auto & mode = cfg.permissions.mode;
     if (mode != "suggest" && mode != "auto-edit" && mode != "full-auto")
         p.push_back("permissions.mode must be suggest, auto-edit or full-auto, got '" + mode + "'");
@@ -1045,6 +1055,8 @@ std::string dump_config(const Config & c) {
       << "prefill_duty = " << c.engine.prefill_duty << "\n"
       << "prefill_chunk_busy = " << c.engine.prefill_chunk_busy << "\n"
       << "prefill_max_wait_ms = " << c.engine.prefill_max_wait_ms << "\n"
+      << "stall_warn_s = " << c.engine.stall_warn_s << "\n"
+      << "stall_abort_s = " << c.engine.stall_abort_s << "\n"
       << "max_tokens = " << c.engine.max_tokens << "\n"
       << "park_dir = " << q(c.engine.park_dir) << "\n"
       << "prefix_cache = " << c.engine.prefix_cache << "\n"
@@ -1281,6 +1293,8 @@ prefill_chunk = 256        # tokens per prefill step
 prefill_duty = 1.0         # fraction of busy decode steps that may carry a prefill chunk (0 < x <= 1)
 prefill_chunk_busy = 0     # tokens per prefill chunk while others generate; 0 = same as prefill_chunk
 prefill_max_wait_ms = 2000 # a foreground prefill waiting this long skips the duty pattern
+stall_warn_s = 30          # log a warning when one decode/prefill step runs this long (0 = off)
+stall_abort_s = 300        # exit(70) when one step runs this long so systemd restarts a wedged engine (0 = off)
 max_tokens = 8192          # default generation cap per turn
 park_dir = "/dev/shm/judas"
 prefix_cache = 4           # RAM snapshots of shared prompt prefixes (LRU)

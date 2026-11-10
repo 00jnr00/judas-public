@@ -356,6 +356,7 @@ struct App {
         si.queued = st.value("queued", 0);
         si.active = st.value("active", 0);
         si.tok_s = st.value("gen_tok_s", 0.0);
+        si.stalled_s = st.value("stalled_s", 0.0);
         si.pending_msgs = (int) queued.size();
         { std::lock_guard<std::mutex> lk(net->mu); si.connected = net->connected; }
         return render_status(si, cols - 1, pal);
@@ -453,7 +454,8 @@ struct App {
         std::string f = "\033[?2026h\033[?25l";
         if (region_cursor_row > 0) f += "\033[" + std::to_string(region_cursor_row) + "A";
         for (int i = 0; i < panel_n; i++) {
-            f += "\033[" + std::to_string(col) + "G" + prow[i];
+            // Clear to the end of the row so a shorter frame or label cannot leave old pixels behind.
+            f += "\033[" + std::to_string(col) + "G" + prow[i] + "\033[K";
             if (i + 1 < panel_n) f += "\033[B";
         }
         int delta = region_cursor_row - (panel_n - 1);
@@ -462,6 +464,7 @@ struct App {
         f += "\r";
         if (last_cursor_col > 0) f += "\033[" + std::to_string(last_cursor_col) + "C";
         f += "\033[?25h\033[?2026l";
+        last_paint = t;
         sprite_next = t + comp.frame_seconds(t, stream.running());
         out(f);
     }

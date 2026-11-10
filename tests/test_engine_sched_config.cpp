@@ -39,14 +39,19 @@ int main() {
     CHECK(c.engine.prefill_chunk_busy == 0);
     CHECK(c.engine.busy_prefill_chunk() == c.engine.prefill_chunk);
     CHECK(c.engine.prefill_max_wait_ms == 2000);
+    CHECK(c.engine.stall_warn_s == 30);
+    CHECK(c.engine.stall_abort_s == 300);
 
     // Explicit values are parsed.
     write(root / "cfg.toml",
-          "[engine]\nprefill_duty = 0.25\nprefill_chunk_busy = 64\nprefill_max_wait_ms = 500\n");
+          "[engine]\nprefill_duty = 0.25\nprefill_chunk_busy = 64\nprefill_max_wait_ms = 500\n"
+          "stall_warn_s = 10\nstall_abort_s = 120\n");
     c = load_config(root);
     CHECK(c.engine.prefill_duty == 0.25);
     CHECK(c.engine.busy_prefill_chunk() == 64);
     CHECK(c.engine.prefill_max_wait_ms == 500);
+    CHECK(c.engine.stall_warn_s == 10);
+    CHECK(c.engine.stall_abort_s == 120);
 
     // An unset busy chunk follows a user-changed prefill_chunk.
     write(root / "cfg.toml", "[engine]\nprefill_chunk = 512\n");
@@ -57,6 +62,8 @@ int main() {
     c.engine.prefill_duty = 0.5;
     c.engine.prefill_chunk_busy = 96;
     c.engine.prefill_max_wait_ms = 750;
+    c.engine.stall_warn_s = 12;
+    c.engine.stall_abort_s = 240;
     write(root / "m.gguf", "x");
     c.models["big"].path = "~/m.gguf";
     write(root / "dump.toml", dump_config(c));
@@ -65,6 +72,8 @@ int main() {
     CHECK(d.engine.prefill_duty == 0.5);
     CHECK(d.engine.busy_prefill_chunk() == 96);
     CHECK(d.engine.prefill_max_wait_ms == 750);
+    CHECK(d.engine.stall_warn_s == 12);
+    CHECK(d.engine.stall_abort_s == 240);
 
     // Validation rejects values outside the documented ranges.
     Config b = c;
@@ -78,6 +87,13 @@ int main() {
     b = c;
     b.engine.prefill_max_wait_ms = -1;
     CHECK(mentions(validate_config(b), "prefill_max_wait_ms"));
+    b = c;
+    b.engine.stall_warn_s = -1;
+    CHECK(mentions(validate_config(b), "stall_warn_s"));
+    b = c;
+    b.engine.stall_abort_s = 5;
+    b.engine.stall_warn_s = 30;
+    CHECK(mentions(validate_config(b), "stall_abort_s"));
     b = c;
     b.engine.prefill_duty = 1.0;
     b.engine.prefill_chunk_busy = 0;

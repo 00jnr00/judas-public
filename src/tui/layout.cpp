@@ -102,7 +102,8 @@ std::string render_status(const StatusInfo & s, int width, const Palette & pal) 
     parts.push_back(s.mode);
     if (s.kv_total > 0) parts.push_back("KV " + human_tokens(s.kv_used) + "/" + human_tokens(s.kv_total));
     parts.push_back("q " + std::to_string(s.queued) + (s.active ? " act " + std::to_string(s.active) : ""));
-    if (s.tok_s > 0) {
+    // gen_tok_s is the rate of the last completed window; showing it while idle looks like work is happening.
+    if (s.tok_s > 0 && s.active > 0) {
         char b[32];
         std::snprintf(b, sizeof b, "%.1f tok/s", s.tok_s);
         parts.push_back(b);
@@ -112,9 +113,16 @@ std::string render_status(const StatusInfo & s, int width, const Palette & pal) 
     for (size_t i = 0; i < parts.size(); i++) line += (i ? " \xC2\xB7 " : "") + parts[i];
     std::string turn = s.turn.empty() ? "idle" : s.turn;
     if (!s.connected) turn = "offline";
-    const std::string & tc = turn == "running" ? pal.accent : turn == "paused" ? pal.warn
+    std::string tc = turn == "running" ? pal.accent : turn == "paused" ? pal.warn
                            : (turn == "failed" || turn == "offline") ? pal.err : turn == "done" ? pal.ok : pal.dim;
     std::string tail = " \xC2\xB7 " + turn + (s.pending_msgs ? " (+" + std::to_string(s.pending_msgs) + " queued)" : "");
+    // A single decode step that is not returning: surface it instead of looking like a quiet turn.
+    if (s.stalled_s >= 10) {
+        char b[32];
+        std::snprintf(b, sizeof b, "stalled %.0fs", s.stalled_s);
+        tail += " \xC2\xB7 " + std::string(b);
+        tc = pal.warn;
+    }
     line = truncate_width(line, std::max(10, width - display_width(tail) - 1));
     return pal.dim + line + pal.reset + tc + tail + pal.reset;
 }

@@ -286,6 +286,8 @@ public:
         path_ = path;
         init_vision(path);
         thread_ = std::thread([this] { loop(); });
+        if (cfg_.engine.stall_warn_s > 0 || cfg_.engine.stall_abort_s > 0)
+            watchdog_ = std::thread([this] { watchdog(); });
     }
 
     // Where the routed experts go (cpu_moe). "true": all on the CPU. N: first N layers. "auto" (default): look at
@@ -361,6 +363,8 @@ public:
         }
         cv_.notify_all();
         if (thread_.joinable()) thread_.join();
+        wd_stop_ = true;
+        if (watchdog_.joinable()) watchdog_.join();
         llama_batch_free(batch_);
         if (mctx_) mtmd_free(mctx_);
         llama_free(ctx_);
@@ -446,6 +450,10 @@ public:
         }
         double window = std::max(1e-3, std::chrono::duration<double>(clk::now() - rate_t0_).count());
         s.gen_tok_s = window < 10 ? rate_prev_ : rate_tokens_ / window;
+        {
+            std::lock_guard wl(wd_mu_);
+            if (wd_active_) s.stalled_s = secs_since(wd_start_);
+        }
         s.total_prompt_tokens = total_prompt_;
         s.total_completion_tokens = total_completion_;
         s.requests = total_requests_;
@@ -1077,6 +1085,65 @@ private:
         }
     }
 
+    // Publish the step that is about to run so the watchdog (and /api/state) can see it. llama_decode has no
+    // portable abort on ROCm/CUDA: a hung kernel never returns, so the watchdog is the only way out.
+    void mark_busy(int kind, Request * pre, const std::vector<Request *> & gen) {
+        const Request * r = pre ? pre : (gen.empty() ? nullptr : gen.front());
+        std::lock_guard lk(wd_mu_);
+        wd_active_ = true;
+        wd_start_ = clk::now();
+        wd_kind_ = kind;
+        wd_warned_ = false;
+        wd_tag_ = r ? r->req.tag : "";
+        wd_n_done_ = pre ? (int) pre->n_done : 0;
+        wd_prompt_ = pre ? (int) pre->prompt.size() : 0;
+    }
+    void mark_idle() {
+        std::lock_guard lk(wd_mu_);
+        wd_active_ = false;
+    }
+
+    void watchdog() {
+        const int warn_s = cfg_.engine.stall_warn_s, abort_s = cfg_.engine.stall_abort_s;
+        while (!wd_stop_) {
+            for (int i = 0; i < 10 && !wd_stop_; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (wd_stop_) break;
+            double stalled = 0;
+            int kind = 0, n = 0, prompt = 0;
+            std::string tag;
+            bool warn = false;
+            {
+                std::lock_guard lk(wd_mu_);
+                if (!wd_active_) continue;
+                stalled = secs_since(wd_start_);
+                if (warn_s > 0 && stalled >= warn_s && !wd_warned_) {
+                    wd_warned_ = true;
+                    warn = true;
+                }
+                kind = wd_kind_;
+                n = wd_n_done_;
+                prompt = wd_prompt_;
+                tag = wd_tag_;
+            }
+            const char * what = kind == 2 ? "image" : "decode/prefill";
+            if (warn) {
+                fprintf(stderr,
+                        "judas: engine %s step has run %.0fs (tag %s, %d/%d tokens); a hung GPU call cannot be "
+                        "interrupted, exiting at %ds if it does not finish\n",
+                        what, stalled, tag.empty() ? "-" : tag.c_str(), n, prompt, abort_s);
+                fflush(stderr);
+            }
+            if (abort_s > 0 && stalled >= abort_s) {
+                fprintf(stderr,
+                        "judas: engine %s step stalled %.0fs (tag %s, %d/%d tokens); exiting (70) so systemd can "
+                        "restart the daemon\n",
+                        what, stalled, tag.empty() ? "-" : tag.c_str(), n, prompt);
+                fflush(stderr);
+                std::_Exit(70);
+            }
+        }
+    }
+
     // Batch for one decode: every generating request's next token, plus one prefill chunk when the fairness
     // policy allows one (lowest priority number first). A step without a chunk is pure decode: the generators
     // run alone and their token rate does not pay for someone else's document.
@@ -1170,7 +1237,9 @@ private:
             build_batch(active, gen, pre, pre_end);
             if (batch_.n_tokens == 0) return -1;
             lk.unlock();
+            mark_busy(1, pre, gen);
             int rc = llama_decode(ctx_, batch_);
+            mark_idle();
             lk.lock();
             if (rc != 1) return rc;
             auto live = live_set();
@@ -1200,7 +1269,12 @@ private:
         ++step_clock_;
         build_batch(active, gen, pre, pre_end);
 
-        int rc = batch_.n_tokens > 0 ? llama_decode(ctx_, batch_) : 0;  // an image-only step has no batch
+        int rc = 0;
+        if (batch_.n_tokens > 0) {
+            mark_busy(1, pre, gen);
+            rc = llama_decode(ctx_, batch_);  // an image-only step has no batch
+            mark_idle();
+        }
         std::unique_lock lk(mu_);
         if (rc == 1) rc = recover_kv(lk, active, gen, pre, pre_end);
         if (rc != 0) {
@@ -1258,8 +1332,10 @@ private:
             return;
         }
         llama_pos new_past = (llama_pos) r.n_done;
+        mark_busy(2, &r, {});
         int32_t rc = mtmd_helper_eval_chunk_single(mctx_, ctx_, m->chunk, (llama_pos) r.n_done, r.seq, mcfg_.batch, false,
                                                    &new_past);
+        mark_idle();
         {
             std::lock_guard lk(mu_);
             auto & q = seqs_[r.seq];
@@ -1303,6 +1379,15 @@ private:
     KvBudget kv_{1, 0};
     std::vector<Request *> completed_;   // finished, caller not yet woken (scheduler thread only)
     std::thread thread_;
+    std::thread watchdog_;
+    std::atomic<bool> wd_stop_{false};
+    mutable std::mutex wd_mu_;
+    bool wd_active_ = false;            // a decode/prefill/image step is in flight
+    clk::time_point wd_start_;
+    int wd_kind_ = 0;                   // 1 = decode/prefill, 2 = image
+    int wd_n_done_ = 0, wd_prompt_ = 0;
+    std::string wd_tag_;
+    bool wd_warned_ = false;
     std::atomic<int> pending_threads_{0};  // set_threads, applied by the scheduler thread at the next step
     std::atomic<int> threads_{0};
     bool stop_ = false;
