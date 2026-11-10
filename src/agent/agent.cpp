@@ -35,6 +35,9 @@
 #ifdef JUDAS_MACH12
 #include "mach12/mach12_tools.h"
 #endif
+#ifdef JUDAS_CLOUD_HELPER
+#include "cloudhelp/cloudhelp.h"
+#endif
 
 #include <unistd.h>
 
@@ -359,6 +362,9 @@ struct AgentManager::Impl {
         std::string last_answer;
         ReviewCounters review;       // per-session nudge counters and the in-flight flag
         std::string review_id;       // the review agent currently running, if any
+        // What the user last typed (attachment blocks removed): explicit-ask tools (Tool::grant) read it. A turn the
+        // user did not type (auto-resume, a lead nudge) keeps it; the next typed message replaces it.
+        std::string grant_text;
         struct Queued { std::string id, text, suffix; };
         std::deque<Queued> queued;   // user messages sent mid-turn, drained one turn at a time
         int next_q = 1;
@@ -509,6 +515,9 @@ struct AgentManager::Impl {
         register_done_tool();
 #ifdef JUDAS_MACH12
         mach12::register_mach12_tools(tools);
+#endif
+#ifdef JUDAS_CLOUD_HELPER
+        cloudhelp::register_cloud_helper(tools);
 #endif
         if (cfg.mcp.enabled && !cfg.mcp.servers.empty()) {
             mcp_ = std::make_unique<mcp::Manager>(cfg, tools);
@@ -696,6 +705,26 @@ struct AgentManager::Impl {
         return o + "'";
     }
 
+    // The user's own words: the message without the attachment blocks the server appended.
+    static std::string typed_text(const std::string & m) {
+        std::string out;
+        size_t i = 0;
+        while (i < m.size()) {
+            size_t s = m.find("<attachment ", i);
+            if (s == std::string::npos) { out += m.substr(i); break; }
+            out += m.substr(i, s - i);
+            size_t e = m.find("</attachment>", s);
+            if (e == std::string::npos) break;
+            i = e + 13;
+        }
+        return out;
+    }
+    std::string grant_text_of(const std::string & sid) {
+        std::lock_guard lk(mu);
+        auto s = sessions.find(sid);
+        return s == sessions.end() ? std::string() : s->second.grant_text;
+    }
+
     std::vector<const Tool *> tools_for(const Agent & a) {
         std::vector<const Tool *> out;
         if (a.review) {
@@ -714,8 +743,11 @@ struct AgentManager::Impl {
             std::lock_guard lk(extras_mu);
             sealed = extras.count(a.row.session) > 0;
         }
+        bool grant_ok = lead_only && !sealed && !learn && !store.session_health_tainted(a.row.session);
+        std::string gtext = grant_ok ? grant_text_of(a.row.session) : std::string();
         for (const Tool * t : tools.list()) {
             if (sealed && (t->name == "skill_manage" || t->name == "memory_append")) continue;
+            if (t->grant && !(grant_ok && t->grant(gtext))) continue;   // explicit-ask tools: see Tool::grant
 #ifdef JUDAS_MACH12
             if (t->name.rfind("mach12_", 0) == 0 && !mach12_tools_allowed(a)) continue;
 #else
@@ -1059,6 +1091,7 @@ struct AgentManager::Impl {
         d.any = true;
         d.content = q.text + q.suffix;
         s->second.request = d.content;
+        s->second.grant_text = typed_text(q.text);
         s->second.busy = true;
         preempt_reviews_locked();
         a->inbox.push_back(d.content);
@@ -1525,6 +1558,10 @@ struct AgentManager::Impl {
         int text_call_seq = 0;
         const bool swarm_lead = is_swarm_session(a);
         bool report_nudged = false;
+        // Write mode: the Write view shows only doc_suggest items. A lead that read the document and answered with
+        // feedback in chat but filed none is sent back once to file it (overnight 2026-11-06: typos found, 0 filed).
+        int write_reads = 0, write_suggests = 0;
+        bool write_nudged = false;
         a->url_guard.set_cap(cfg.agents.url_retry_cap);
         if (swarm_lead && a->report_now) {   // resumed after empty turns: say so first
             a->report_now = false;
@@ -1672,6 +1709,15 @@ struct AgentManager::Impl {
             Decision d = should_continue(kind, plan_state(a->plan), ts, cfg.agents.max_auto_continues,
                                          res.completion_tokens);
             if (d.action == Action::Pause) return paused(a, d.reason);
+            if (d.action == Action::Finish && !write_nudged && is_lead && !a->review && write_reads > 0 &&
+                write_suggests == 0 && msg.content.size() > 200 && session_mode(*a) == "write") {
+                write_nudged = true;
+                nudge(a, "Write mode: the user's Write view shows only doc_suggest items, not this chat reply. File your feedback now with "
+                         "doc_suggest: each typo as kind \"spelling\" (find = the exact wrong text, replace = the fix) and each structural "
+                         "point as kind \"note\" anchored to exact text. Then end with one short line.",
+                      "write mode: feedback not filed with doc_suggest");
+                continue;
+            }
             if (d.action == Action::Finish) {
                 finish_hooks(a, msg.content);
                 return {msg.content, "done", ""};
@@ -1713,6 +1759,11 @@ struct AgentManager::Impl {
                 ctx.location_used = store.session_location_used(a->row.session);
                 ctx.note_location = [this, sid = a->row.session] { store.set_session_location_used(sid); };
                 ctx.progress = [this, a](const json & d) { emit(event(*a, "swarm", d)); };
+                if (const Tool * gt = tools.find(tc.name); gt && gt->grant && is_lead && !a->review &&
+                    !has_extras(a->row.session) && !is_learn_session(*a) && !ctx.health_tainted) {
+                    ctx.grant_text = grant_text_of(a->row.session);
+                    ctx.granted = gt->grant(ctx.grant_text);
+                }
                 ctx.checkpoint = journal.begin(a->row.session, a->row.id, label.substr(0, 200));
                 if (!a->review) ctx.approve = [this, a, tool = tc.name](const std::string & what) {
                     if (cfg.permissions.mode == "full-auto") return true;
@@ -1762,6 +1813,8 @@ struct AgentManager::Impl {
                 } else {
                     r = tools.call(tc.name, args, ctx);
                     ran = true;
+                    if (r.ok && tc.name == "read_file") write_reads++;
+                    if (r.ok && tc.name == "doc_suggest") write_suggests++;
                     if (!a->review)
                         hooks.run(writes ? "post-edit" : "post-tool", selector,
                                   {{"tool", tc.name}, {"ok", r.ok}, {"session", a->row.session}, {"cwd", a->cwd}});
@@ -2819,6 +2872,7 @@ std::string AgentManager::submit(const std::string & session_id, const std::stri
         s.lead = lead->row.id;
         s.busy = true;
         s.request = user_message;
+        s.grant_text = I.typed_text(user_message);
         // a new message clears an earlier cancel for the whole session, workers included
         for (auto & [id, ag] : I.agents)
             if (ag->row.session == sid) ag->cancel = false;

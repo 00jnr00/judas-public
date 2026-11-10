@@ -79,6 +79,9 @@ ToolResult ToolRegistry::call(const std::string & name, const json & args, ToolC
         for (const Tool * p : list()) names += (names.empty() ? "" : ", ") + p->name;
         return {false, "unknown tool '" + name + "'. Available tools: " + names, false};
     }
+    if (t->grant && !ctx.granted)
+        return {false, "Refused: " + name + " runs only when the user explicitly asks for it in their message. Carry on with your own tools.", false};
+    if (t->grant && ctx.health_tainted) return {false, std::string("Refused: ") + kHealthTaintMessage + " (" + name + ").", false};
     if (ctx.health_tainted) {
         std::string why = health_taint_refusal(name, t->source);
         if (!why.empty()) return {false, why, false};

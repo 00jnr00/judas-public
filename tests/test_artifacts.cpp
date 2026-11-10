@@ -304,6 +304,18 @@ static void test_tools() {
     CHECK(!reg.call("artifact_create", {{"title", "x"}, {"kind", "html"}, {"files", {{"../up.html", "x"}}}}, ctx).ok);
     CHECK(!reg.call("artifact_create", {{"title", "x"}, {"kind", "html"}}, ctx).ok);
     CHECK(!reg.call("artifact_update", {{"id", id}}, ctx).ok);
+    // content: the plain body for markdown/svg/html (the session that lost its report sent exactly this)
+    auto md = reg.call("artifact_create", {{"kind", "markdown"}, {"content", "# Insert holes\n\nM6: 8.0 mm [1]\n"}, {"note", "first"}}, ctx);
+    REQUIRE(md.ok);
+    CHECK(md.output.find("\"Insert holes\"") != std::string::npos);   // title from the first heading
+    std::string mid = md.output.substr(md.output.find("[[artifact:") + 11, 10);
+    auto mu = reg.call("artifact_update", {{"id", mid}, {"content", "# Insert holes\n\nM6: 8.0 mm [1], M5: 6.4 mm [2]\n"}}, ctx);
+    CHECK(mu.ok && mu.output.find("version 2") != std::string::npos);
+    auto mr = reg.call("artifact_read", {{"id", mid}, {"path", "report.md"}}, ctx);
+    CHECK(mr.ok && mr.output.find("M5: 6.4") != std::string::npos);
+    auto sv = reg.call("artifact_create", {{"title", "Sketch"}, {"content", "<svg xmlns='http://www.w3.org/2000/svg'/>"}}, ctx);
+    CHECK(sv.ok && sv.output.find("|svg|1]]") != std::string::npos);   // kind inferred
+    CHECK(!reg.call("artifact_create", {{"kind", "model3d"}, {"content", "solid x"}}, ctx).ok);
     // source file: copied in from disk through the read-path policy
     fs::create_directories(base);
     std::ofstream(base / "part.stl") << cube_stl();

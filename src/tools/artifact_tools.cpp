@@ -59,13 +59,76 @@ bool collect_files(const json & a, ToolContext & ctx, std::map<std::string, std:
     return true;
 }
 
+// The one text file a single-file kind keeps its body in: what a plain `content` argument fills.
+std::string default_name(const std::string & kind) {
+    if (kind == "markdown") return "report.md";
+    if (kind == "svg") return "index.svg";
+    if (kind == "html") return "index.html";
+    return "";
+}
+std::string ext_of_kind(const std::string & kind) {
+    return kind == "markdown" ? ".md" : kind == "svg" ? ".svg" : kind == "html" ? ".html" : "";
+}
+// Models send the body as `content` far more often than as files:{name: body}. Accept it for the text kinds:
+// on create it goes to the kind's default name, on update it replaces the artifact's main text file.
+bool add_content(const json & a, const std::string & kind, const std::string & existing, std::map<std::string, std::string> & files,
+                 std::string & err) {
+    if (!a.contains("content") || !a["content"].is_string()) return true;
+    std::string body = a["content"].get<std::string>();
+    if (body.empty()) return true;
+    std::string name = !existing.empty() ? existing : default_name(kind);
+    if (name.empty()) { err = "content works for markdown, svg and html; give a " + kind + " through source or files"; return false; }
+    if (body.size() > ArtifactLimits::MAX_TEXT_FILE) { err = "content is larger than 4 MB"; return false; }
+    files[name] = std::move(body);
+    return true;
+}
+// A missing kind is inferred from what was sent; a missing title from the first markdown heading or <title>.
+std::string infer_kind(const json & a, const std::map<std::string, std::string> & files) {
+    for (auto & [k, v] : files) {
+        std::string e = fs::path(k).extension().string();
+        if (e == ".md") return "markdown";
+        if (e == ".svg") return "svg";
+        if (e == ".html") return "html";
+        if (e == ".stl" || e == ".glb") return "model3d";
+        if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".gif" || e == ".webp") return "image";
+    }
+    std::string c = a.value("content", "");
+    size_t i = c.find_first_not_of(" \n\t");
+    if (i != std::string::npos && c.compare(i, 4, "<svg") == 0) return "svg";
+    if (i != std::string::npos && c[i] == '<') return "html";
+    return c.empty() ? "" : "markdown";
+}
+std::string infer_title(const std::map<std::string, std::string> & files) {
+    for (auto & [k, v] : files) {
+        std::istringstream in(v);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.rfind("# ", 0) == 0) return line.substr(2, 120);
+            if (auto p = line.find("<title>"); p != std::string::npos) {
+                auto q = line.find("</title>", p);
+                if (q != std::string::npos) return line.substr(p + 7, std::min<size_t>(q - p - 7, 120));
+            }
+        }
+    }
+    return "";
+}
+
 ToolResult t_create(const json & a, ToolContext & ctx) {
     if (!ctx.cfg) return fail("artifact_create: no configuration available");
     std::map<std::string, std::string> files;
     std::string err;
     if (!collect_files(a, ctx, files, err)) return fail("artifact_create: " + err);
+    std::string kind = a.value("kind", "");
+    if (kind.empty()) {
+        kind = infer_kind(a, files);
+    }
+    if (kind.empty()) return fail("artifact_create: give kind (html, svg, markdown, model3d, image) and the body as content, files or source");
+    if (!add_content(a, kind, "", files, err)) return fail("artifact_create: " + err);
+    std::string title = a.value("title", "");
+    if (title.empty()) title = infer_title(files);
+    if (title.empty()) title = "Untitled " + kind;
     ArtifactStore store(*ctx.cfg);
-    auto m = store.create(a.value("title", ""), a.value("kind", ""), files, ctx.session, a.value("note", ""), err);
+    auto m = store.create(title, kind, files, ctx.session, a.value("note", ""), err);
     if (!m) return fail("artifact_create: " + err);
     return {true,
             "Created artifact " + m->id + " \"" + m->title + "\" (" + m->kind + "), version 1, " + std::to_string(m->versions[0].files.size()) +
@@ -79,6 +142,15 @@ ToolResult t_update(const json & a, ToolContext & ctx) {
     std::map<std::string, std::string> files;
     std::string err;
     if (!collect_files(a, ctx, files, err)) return fail("artifact_update: " + err);
+    if (a.contains("content")) {
+        ArtifactStore s0(*ctx.cfg);
+        auto cur = s0.get(a.value("id", ""));
+        if (!cur || !cur->latest()) return fail("artifact_update: no artifact with that id (artifact_list shows them)");
+        std::string existing, want = ext_of_kind(cur->kind);
+        for (auto & f : cur->latest()->files)
+            if (!want.empty() && fs::path(f.path).extension().string() == want) { existing = f.path; break; }
+        if (!add_content(a, cur->kind, existing, files, err)) return fail("artifact_update: " + err);
+    }
     std::vector<std::string> rm;
     if (a.contains("remove") && a["remove"].is_array())
         for (auto & r : a["remove"]) if (r.is_string()) rm.push_back(r.get<std::string>());
@@ -177,16 +249,17 @@ void register_artifact_tools(ToolRegistry & reg) {
             "or 3D view. kind: html (needs index.html; may add css/js files; runs sandboxed with no network), svg (one .svg), markdown (one .md), "
             "model3d (an .stl or .glb, given as files text for ASCII STL or as source path of a file on disk; shown with an orbit viewer), "
             "image (png/jpg/gif/webp via source). Every change later is a new version via artifact_update; nothing is overwritten. "
-            "Then call artifact_render to look at your own work and fix it.";
+            "For markdown, svg and html the simplest call is title + kind + content (the text). Then call artifact_render to look at your own work and fix it.";
         t.parameters = {{"type", "object"},
                         {"properties",
                          {{"title", {{"type", "string"}}},
                           {"kind", {{"type", "string"}, {"enum", {"html", "svg", "markdown", "model3d", "image"}}}},
+                          {"content", {{"type", "string"}, {"description", "The body of a markdown, svg or html artifact (the simplest way to give it)"}}},
                           {"files", files_schema},
                           {"source", {{"type", "string"}, {"description", "Path of a file on disk to copy in (STL, GLB, image)"}}},
                           {"source_name", {{"type", "string"}, {"description", "Name to store the source file under, e.g. model.stl"}}},
                           {"note", {{"type", "string"}, {"description", "One line: what this version is"}}}}},
-                        {"required", {"title", "kind"}}};
+                        {"required", json::array()}};
         t.run = t_create;
         reg.add(std::move(t));
     }
@@ -199,6 +272,7 @@ void register_artifact_tools(ToolRegistry & reg) {
         t.parameters = {{"type", "object"},
                         {"properties",
                          {{"id", {{"type", "string"}}},
+                          {"content", {{"type", "string"}, {"description", "New full body of a markdown, svg or html artifact"}}},
                           {"files", files_schema},
                           {"source", {{"type", "string"}}},
                           {"source_name", {{"type", "string"}}},

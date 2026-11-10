@@ -43,6 +43,10 @@ struct ToolContext {
     std::function<void()> note_location;
     // Long tools report progress here (the agent loop turns it into a "swarm" UI event). May be null.
     std::function<void(const json &)> progress;
+    // Explicit-ask tools (Tool::grant): the latest message the user typed in this session, and whether it grants
+    // the tool being called. Set by the agent loop for the session lead only; empty/false everywhere else.
+    std::string grant_text;
+    bool granted = false;
 };
 
 struct ToolResult {
@@ -58,6 +62,10 @@ struct Tool {
     bool writes = false;             // changes files (journaled)
     bool may_be_irreversible = false;  // shell, process control, network writes
     std::string source;              // "" = built in; "mcp:<server>" = from an MCP server (see src/mcp)
+    // Explicit-ask tool: set = the tool is offered to (and runs for) the session lead only in a turn whose latest
+    // user-typed message makes this return true. Never offered to workers, reviews, probes, Learn or health-tainted
+    // sessions. The model cannot grant it to itself: the text is what the user typed, not tool output.
+    std::function<bool(const std::string & user_text)> grant;
     std::function<ToolResult(const json & args, ToolContext & ctx)> run;
 };
 
